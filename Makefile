@@ -12,8 +12,21 @@ BINARY     := gc
 BUILD_DIR  := bin
 INSTALL_DIR := $(BIN_DIR)
 
-# Version metadata injected via ldflags.
-VERSION    := $(shell tag=$$(git describe --tags --exact-match 2>/dev/null || true); if [ -n "$$tag" ]; then printf '%s' "$$tag" | sed 's/^v//'; else echo "dev"; fi)
+# ── Fork integration baseline ────────────────────────────────────────────────
+# The `integration` branch carries fork-local patches on top of a pinned
+# upstream gascity release (deliberately NOT `main`). BASELINE is the exact
+# commit those patches replay onto; BASELINE_VERSION is the version string a
+# fork build reports, so `gc version` proves it is the LTS-derived build and
+# not `dev`/main. To move to a newer upstream release, bump BOTH values, then
+# run `make upgrade`. Full workflow: engdocs/contributors/fork-patches.md
+# BASELINE is v1.4.0 (upstream tag `v1.4.0`, pinned by SHA so the tag moving
+# cannot silently change what the fork replays onto).
+BASELINE         ?= a7297c511d637a3609947386f3389d76ddb2f23b
+BASELINE_VERSION ?= 1.4.0-integration
+
+# Version metadata injected via ldflags. On an exact release tag the tag wins;
+# otherwise a fork build reports BASELINE_VERSION (see fork block above).
+VERSION    := $(shell tag=$$(git describe --tags --exact-match 2>/dev/null || true); if [ -n "$$tag" ]; then printf '%s' "$$tag" | sed 's/^v//'; else echo "$(BASELINE_VERSION)"; fi)
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
@@ -255,7 +268,7 @@ check-version-tag:
 ## check-all: run all quality gates including integration tests (CI)
 check-all: fmt-check lint vet check-release-dist-ignore check-bd check-dolt check-docker test-integration check-docs
 
-LINT_BASE ?= origin/main
+LINT_BASE ?= upstream/main
 LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
 LINT_FLAGS ?=
@@ -940,3 +953,51 @@ k8s-secret:
 ## help: show this help
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## //' | column -t -s ':'
+
+# ── Fork patch management (integration branch) ───────────────────────────────
+# patches/ is a DERIVED artifact: the `git format-patch BASELINE..HEAD` export
+# of the fork's divergence, EXCLUDING patches/ itself (so it can't recursively
+# include its own exports). Regenerate with `make patches` after adding or
+# editing a fork commit. See engdocs/contributors/fork-patches.md.
+.PHONY: patches upgrade check-patches
+
+## patches: regenerate patches/ from the current BASELINE..HEAD divergence
+patches:
+	@echo "Exporting patches from $(BASELINE) -> HEAD divergence..."
+	@rm -f patches/*.patch
+	@git format-patch --zero-commit $(BASELINE)..HEAD --output-directory patches/ -- . ':!patches/'
+	@echo "Patches written to patches/:"
+	@ls patches/*.patch 2>/dev/null | sed 's|patches/||' || echo "  (none)"
+
+## upgrade: reset integration to BASELINE and replay patches/ (guided)
+upgrade:
+	@BASELINE=$(BASELINE) bash scripts/upgrade-integration.sh
+
+## check-patches: fail if patches/ is stale vs BASELINE..HEAD (used by pre-push)
+check-patches:
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+		git format-patch --zero-commit $(BASELINE)..HEAD --output-directory "$$tmp" -- . ':!patches/' >/dev/null 2>&1; \
+		expected=$$(ls "$$tmp"/*.patch 2>/dev/null | wc -l | tr -d ' '); \
+		actual=$$(ls patches/*.patch 2>/dev/null | wc -l | tr -d ' '); \
+		if [ "$$expected" != "$$actual" ]; then \
+			echo "patches/ is stale: $$actual present, $$expected expected."; \
+			echo "  Run: make patches && git add patches && git commit"; \
+			exit 1; \
+		fi; \
+		for f in "$$tmp"/*.patch; do \
+			[ -e "$$f" ] || continue; \
+			b=$$(basename "$$f"); \
+			if [ ! -f "patches/$$b" ]; then \
+				echo "patches/ is stale: missing $$b."; \
+				echo "  Run: make patches && git add patches && git commit"; \
+				exit 1; \
+			fi; \
+			tail -n +2 "patches/$$b" > "$$tmp/.committed"; \
+			tail -n +2 "$$f"          > "$$tmp/.regen"; \
+			if ! cmp -s "$$tmp/.committed" "$$tmp/.regen"; then \
+				echo "patches/ is stale: content drift in $$b."; \
+				echo "  Run: make patches && git add patches && git commit"; \
+				exit 1; \
+			fi; \
+		done; \
+		echo "patches/ up to date ($$actual patches)"

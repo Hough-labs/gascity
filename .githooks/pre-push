@@ -11,6 +11,14 @@ set -euo pipefail
 # git feeds "<local ref> <local sha> <remote ref> <remote sha>" per pushed ref
 # on stdin (see githooks(5)).
 
+# ── Fork: on the integration branch, refuse to push a stale patches/ ─────────
+# Validation only — it never amends. (An amend after git has already captured
+# the push range causes perpetual local/origin SHA drift.) Bypass with
+# `git push --no-verify`. See engdocs/contributors/fork-patches.md.
+if [ "$(git symbolic-ref --short HEAD 2>/dev/null || echo '')" = "integration" ]; then
+  make -s check-patches
+fi
+
 zero="0000000000000000000000000000000000000000"
 
 go_changed=0
