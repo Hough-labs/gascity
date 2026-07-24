@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hunter B Hough <git@hough.ink>
+Date: Fri, 24 Jul 2026 15:51:37 -0400
+Subject: [PATCH 2/2] fix(status): raise runtime probe budget 50ms -> 200ms
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The upstream 50ms per-probe budget in the bounded status provider is
+smaller than a single full process-table scan on macOS. The tmux
+StateCache fetch shells out to:
+
+  ps -eo pid=,ppid=,args=    ~81ms  (~1100 processes)
+  ps -eo pid=,ppid=,comm=    ~61ms
+
+Both exceed 50ms, so every probe hit the timeout, latched the partial
+flag, and rendered live agents as "unknown (partial status)" — the
+city reported 0/18 running while mayor, deacon and boot were up.
+
+The partial-as-unknown rendering arrived upstream in 2666ecdc2
+("Render partial status rows as unknown", #4345, Jul 18), which is in
+our pinned v1.4.0 baseline. The timeout itself dates to a963419a1
+(Jun 2) — before #4345 these same timeouts rendered as an
+authoritative "stopped", so the misreport was silent rather than new.
+
+200ms gives ~2.5x headroom over the slowest observed scan. Cost is
+bounded: the StateCache (2s TTL) means one gc status invocation pays
+for ~2 scans, not one per agent. Measured over 3 runs each:
+
+  50ms  budget: 4201 / 4290 / 4296 ms
+  200ms budget: 4352 / 4330 / 4440 ms   (+110ms avg)
+
+Tests pin their own value and restore it, so they are unaffected.
+
+Note: ps accounts for only ~300ms of that ~4.3s. The remaining time is
+not this timeout and is untouched here.
+---
+ cmd/gc/status_provider.go | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/cmd/gc/status_provider.go b/cmd/gc/status_provider.go
+index 2a474d4f9..c04b2b4c0 100644
+--- a/cmd/gc/status_provider.go
++++ b/cmd/gc/status_provider.go
+@@ -12,7 +12,15 @@ import (
+ )
+ 
+ var (
+-	statusProviderCallTimeout    = 50 * time.Millisecond
++	// statusProviderCallTimeout bounds each runtime status probe. The 50ms
++	// upstream default is smaller than a single full process-table scan on
++	// macOS: the tmux StateCache fetch runs `ps -eo pid=,ppid=,args=`
++	// (~81ms measured, ~1100 processes) and `ps -eo pid=,ppid=,comm=`
++	// (~61ms). Every probe therefore timed out, latching the partial flag
++	// and rendering live agents as "unknown (partial status)". The cache
++	// (2s TTL) means one gc status invocation pays for ~2 scans, not one
++	// per agent, so the extra headroom costs ~150ms per invocation.
++	statusProviderCallTimeout    = 200 * time.Millisecond
+ 	statusProviderTimeoutWarning = func() {
+ 		fmt.Fprintln(os.Stderr, "gc status: runtime status probe timed out; using partial status")
+ 	}
+-- 
+2.50.1 (Apple Git-155)
+
