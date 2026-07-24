@@ -12,7 +12,14 @@ import (
 )
 
 var (
-	statusProviderCallTimeout    = 50 * time.Millisecond
+	// statusProviderCallTimeout bounds each runtime status probe. Upstream's
+	// 50ms is smaller than a single process-table scan on macOS: the tmux
+	// StateCache fetch runs `ps -eo pid=,ppid=,args=` (~81ms measured, ~1100
+	// processes). Every probe therefore times out, latching the partial flag
+	// and reporting live agents as "unknown (partial status)" — and an agent
+	// count of 0 while sessions are demonstrably running. The cache (2s TTL)
+	// means one gc status invocation pays for ~2 scans, not one per agent.
+	statusProviderCallTimeout    = 200 * time.Millisecond
 	statusProviderTimeoutWarning = func() {
 		fmt.Fprintln(os.Stderr, "gc status: runtime status probe timed out; using partial status")
 	}
