@@ -2834,66 +2834,77 @@ func TestGastownPatrolWispCommandsPropagateRoutingNamespace(t *testing.T) {
 }
 
 func TestGastownPatrolPromptFallbackPreservesLifecycle(t *testing.T) {
+	// These assertions are deliberately PREFIX-based, matching the style used
+	// for the witness startup/no-idle checks above. Asserting a whole shell
+	// line means every legitimate prompt edit is a test break, which trains
+	// people to update fixtures without reading them — the exact reflex that
+	// let the ephemeral-blind reconcile snippet survive five separate filings
+	// (gc-b6s). Two independent kinds of drift are expected here and neither
+	// changes the lifecycle this test exists to protect:
+	//
+	//   - flags appended to the reconcile queries (e.g. --include-infra, which
+	//     these queries REQUIRE, since wisps are infra beads and are invisible
+	//     without it), and --status=in_progress widening to in_progress,open.
+	//   - the deacon converging on the witness's shape: a single-result
+	//     ASSIGNED_WISP query becoming an OPEN_WISPS list plus a surplus-burn
+	//     loop.
+	//
+	// So each query is asserted up to the last token that carries meaning for
+	// the lifecycle and no further. Anything genuinely agent-specific goes in
+	// wantContains instead of being baked into the ordered lifecycle.
+	lifecycle := func(formula string) []string {
+		return []string{
+			`run ` + "`gc hook`" + ` immediately`,
+			`CURRENT_WISP=${GC_BEAD_ID:-}`,
+			`if [ -z "$CURRENT_WISP" ]; then`,
+			// Falls back to querying its own in-progress wisp.
+			`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress`,
+			// Then its open wisps. The receiving variable differs by version
+			// (ASSIGNED_WISP directly, or OPEN_WISPS + sed), so assert only
+			// the query.
+			`gc bd list --assignee="$GC_AGENT" --status=open`,
+			`if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then`,
+			`NEXT=$(gc bd mol wisp ` + formula + ` --root-only --var binding_prefix=`,
+			`if [ -z "$NEXT" ]; then`,
+			`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+			`gc bd mol burn "$CURRENT_WISP" --force`,
+			`elif [ -n "$CURRENT_WISP" ]; then`,
+			`gc bd mol burn "$CURRENT_WISP" --force`,
+			`elif [ -z "$ASSIGNED_WISP" ]; then`,
+			`NEXT=$(gc bd mol wisp ` + formula + ` --root-only --var binding_prefix=`,
+			`if [ -z "$NEXT" ]; then`,
+			`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+			`gc hook`,
+		}
+	}
+
 	checks := []struct {
-		rel       string
-		agentName string
-		template  string
-		formula   string
-		wantOrder []string
+		rel          string
+		agentName    string
+		template     string
+		formula      string
+		wantOrder    []string
+		wantContains []string
 	}{
 		{
 			rel:       "packs/gastown/agents/deacon/prompt.template.md",
 			agentName: "gascity/gastown.deacon",
 			template:  "deacon",
 			formula:   "mol-deacon-patrol",
-			wantOrder: []string{
-				`run ` + "`gc hook`" + ` immediately`,
-				`CURRENT_WISP=${GC_BEAD_ID:-}`,
-				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
-				`ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
-				`if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then`,
-				`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix=gastown. --json | jq -r '.new_epic_id // empty')`,
-				`if [ -z "$NEXT" ]; then`,
-				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
-				`gc bd mol burn "$CURRENT_WISP" --force`,
-				`elif [ -n "$CURRENT_WISP" ]; then`,
-				`gc bd mol burn "$CURRENT_WISP" --force`,
-				`elif [ -z "$ASSIGNED_WISP" ]; then`,
-				`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix=gastown. --json | jq -r '.new_epic_id // empty')`,
-				`if [ -z "$NEXT" ]; then`,
-				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
-				`gc hook`,
-			},
+			wantOrder: lifecycle("mol-deacon-patrol"),
 		},
 		{
 			rel:       "packs/gastown/agents/witness/prompt.template.md",
 			agentName: "gascity/gastown.witness",
 			template:  "witness",
 			formula:   "mol-witness-patrol",
-			// The witness no-idle guard finds its own patrol wisps with
-			// --type=molecule (never the invalid --type=wisp) and reconciles
-			// surplus open wisps to exactly one by burning extras (ga-7c6).
-			wantOrder: []string{
-				`run ` + "`gc hook`" + ` immediately`,
-				`CURRENT_WISP=${GC_BEAD_ID:-}`,
-				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
-				`OPEN_WISPS=$(gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --limit=0 --json | jq -r '.[].id')`,
-				`ASSIGNED_WISP=$(printf '%s\n' $OPEN_WISPS | sed -n '1p')`,
+			wantOrder: lifecycle("mol-witness-patrol"),
+			// The witness finds its own patrol wisps with --type=molecule
+			// (never the invalid --type=wisp) and reconciles surplus open
+			// wisps to exactly one by burning extras (ga-7c6).
+			wantContains: []string{
+				`--type=molecule`,
 				`gc bd mol burn "$extra" --force`,
-				`if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then`,
-				`NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='gastown.' --json | jq -r '.new_epic_id // empty')`,
-				`if [ -z "$NEXT" ]; then`,
-				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
-				`gc bd mol burn "$CURRENT_WISP" --force`,
-				`elif [ -n "$CURRENT_WISP" ]; then`,
-				`gc bd mol burn "$CURRENT_WISP" --force`,
-				`elif [ -z "$ASSIGNED_WISP" ]; then`,
-				`NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='gastown.' --json | jq -r '.new_epic_id // empty')`,
-				`if [ -z "$NEXT" ]; then`,
-				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
-				`gc hook`,
 			},
 		},
 	}
@@ -2902,6 +2913,11 @@ func TestGastownPatrolPromptFallbackPreservesLifecycle(t *testing.T) {
 		body := renderGastownPromptForPack(t, check.rel, check.agentName, check.template, "gascity", "gastown", "gastown.")
 		section := sectionBetween(t, body, "## CRITICAL: No Idle State Between Cycles", "## Context Exhaustion")
 		assertContainsInOrder(t, section, check.wantOrder...)
+		for _, want := range check.wantContains {
+			if !strings.Contains(section, want) {
+				t.Errorf("%s no-idle fallback missing %q", check.rel, want)
+			}
+		}
 		for _, bad := range []string{`--assignee="$GC_ALIAS"`, "sleep 5"} {
 			if strings.Contains(section, bad) {
 				t.Fatalf("%s no-idle fallback still contains %q", check.rel, bad)
