@@ -1371,6 +1371,15 @@ esac
 // returned, so WaitDelay would force-kill the shell before its rollback trap
 // ran and the resource the adapter created would leak. Signaling the process
 // group unblocks the child so the trap runs inside the grace window.
+//
+// The readiness marker is written by the foreground CHILD, not by the shell
+// before it forks one. Writing it from the shell leaves a fork-sized window in
+// which the marker already exists but the child does not: the group interrupt
+// then reaches only the shell, the child is forked afterwards and sleeps out
+// its full duration, the shell defers its INT trap until that foreground child
+// returns, and WaitDelay force-kills the shell before the trap can run. That
+// window made this test fail on roughly one Darwin run in six, always leaving
+// an orphaned `sleep` behind as the signature of the missed signal.
 func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
@@ -1379,8 +1388,7 @@ func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
 case "$1" in
   start)
     trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
-    : > "%s"
-    sleep 30
+    sh -c ': > "%s"; exec sleep 30'
     ;;
   *) exit 2 ;;
 esac
