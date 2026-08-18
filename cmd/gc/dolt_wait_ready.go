@@ -42,7 +42,9 @@ func waitForManagedDoltReady(cityPath, host, port, user string, pid int, timeout
 		if !report.PIDAlive {
 			return report, fmt.Errorf("pid %d exited", pid)
 		}
-		if checkDeleted && processHasDeletedDataInodes(pid, dataDir) {
+		// probeUnknown keeps the loop polling rather than declaring the process
+		// clean; the next iteration re-probes until the caller's deadline.
+		if checkDeleted && processHasDeletedDataInodes(pid, dataDir) == probeYes {
 			report.DeletedInodes = true
 			return report, fmt.Errorf("pid %d holds deleted data inodes under %s", pid, dataDir)
 		}
@@ -73,7 +75,7 @@ func confirmManagedDoltStillReady(cityPath, host, port, user string, pid int, ch
 		if err != nil {
 			return false, err
 		}
-		if processHasDeletedDataInodes(pid, layout.DataDir) {
+		if processHasDeletedDataInodes(pid, layout.DataDir) == probeYes {
 			return false, nil
 		}
 	}

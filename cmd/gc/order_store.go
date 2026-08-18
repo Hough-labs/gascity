@@ -459,13 +459,13 @@ func validPublishedManagedDoltDataDirState(cityPath string, state doltRuntimeSta
 	if !pidAlive(state.PID) || !doltPortReachable(strconv.Itoa(state.Port)) {
 		return false
 	}
-	holderPID := findPortHolderPID(strconv.Itoa(state.Port))
-	if holderPID > 0 {
+	holderPID, probed := findPortHolderPID(strconv.Itoa(state.Port))
+	if probed && holderPID > 0 {
 		return holderPID == state.PID
 	}
 	layout := managedDoltOrderRuntimeLayoutForDataDir(cityPath, dataDir)
 	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
-	return owned && !deleted
+	return owned && deleted != probeYes
 }
 
 func managedDoltOrderRuntimeLayoutForDataDir(cityPath, dataDir string) managedDoltRuntimeLayout {
@@ -525,15 +525,15 @@ func validDoltRuntimeStateForLayout(state doltRuntimeState, layout managedDoltRu
 	if !pidAlive(state.PID) || !doltPortReachable(strconv.Itoa(state.Port)) {
 		return false
 	}
-	holderPID := findPortHolderPID(strconv.Itoa(state.Port))
-	if holderPID > 0 && holderPID != state.PID {
+	holderPID, probed := findPortHolderPID(strconv.Itoa(state.Port))
+	if probed && holderPID > 0 && holderPID != state.PID {
 		return false
 	}
 	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
-	if deleted {
+	if deleted == probeYes {
 		return false
 	}
-	if holderPID == state.PID {
+	if probed && holderPID == state.PID {
 		return true
 	}
 	return owned

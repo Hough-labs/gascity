@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,19 +14,71 @@ import (
 	"time"
 )
 
+const processArgsPSTimeout = 10 * time.Second
+
+// lsofCommandTimeout bounds one logical question rather than one exec: helpers
+// that try a formatted lsof form and then fall back to a plain one share a
+// single deadline, so the retry cannot double the budget. It matches
+// processArgsPSTimeout because lsof walks the host-wide open-file table, so its
+// latency scales with the machine's total open files rather than with anything
+// gc controls. It is a var only so tests can shorten it.
+var lsofCommandTimeout = 10 * time.Second
+
+// probeResult is the answer from a system probe that can fail to answer at all:
+// the probe either established the fact (probeYes), established its absence
+// (probeNo), or could not run to completion (probeUnknown).
+//
+// The third state is load-bearing. On Linux these facts come from /proc, which
+// cannot time out; on Darwin they come from lsof under a deadline. Collapsing a
+// failed probe into probeNo is what turns a loaded machine into a confident
+// wrong answer -- "no process holds this port" while one does -- and callers
+// then allocate a fresh port, adopt stale runtime state, or report drift on the
+// strength of it.
+//
+// The contract for callers: probeUnknown may never stand in for probeNo in a
+// decision that mutates state (allocating a port, repairing or adopting runtime
+// state, advising that a file is safe to delete), and may never be reported as
+// a confirmed negative. Where the only alternative to acting on probeNo is a
+// non-destructive retry or leaving working state alone, treating probeUnknown
+// as "keep going and re-probe" is correct -- but it is still recorded, never
+// silently folded into the negative.
+type probeResult int
+
 const (
-	processArgsPSTimeout = 10 * time.Second
-	lsofCommandTimeout   = 2 * time.Second
+	probeUnknown probeResult = iota
+	probeNo
+	probeYes
 )
+
+// probeAnswer converts a definite result from a probe that ran to completion.
+func probeAnswer(found bool) probeResult {
+	if found {
+		return probeYes
+	}
+	return probeNo
+}
+
+// String renders the tri-state for the tab-separated inspection reports.
+func (r probeResult) String() string {
+	switch r {
+	case probeYes:
+		return "true"
+	case probeNo:
+		return "false"
+	default:
+		return "unknown"
+	}
+}
 
 type managedDoltProcessInspection struct {
 	ManagedPID              int
 	ManagedSource           string
 	ManagedOwned            bool
-	ManagedDeletedInodes    bool
+	ManagedDeletedInodes    probeResult
 	PortHolderPID           int
+	PortHolderProbed        bool
 	PortHolderOwned         bool
-	PortHolderDeletedInodes bool
+	PortHolderDeletedInodes probeResult
 }
 
 func inspectManagedDoltProcess(cityPath, port string) (managedDoltProcessInspection, error) {
@@ -38,7 +91,7 @@ func inspectManagedDoltProcess(cityPath, port string) (managedDoltProcessInspect
 	if info.ManagedPID > 0 {
 		info.ManagedOwned, info.ManagedDeletedInodes = inspectManagedDoltOwnership(info.ManagedPID, layout)
 	}
-	info.PortHolderPID = findPortHolderPID(port)
+	info.PortHolderPID, info.PortHolderProbed = findPortHolderPID(port)
 	if info.PortHolderPID > 0 {
 		info.PortHolderOwned, info.PortHolderDeletedInodes = inspectManagedDoltOwnership(info.PortHolderPID, layout)
 	}
@@ -49,7 +102,10 @@ func findManagedDoltPID(layout managedDoltRuntimeLayout, port string) (int, stri
 	if pid := managedPIDFromPIDFile(layout.PIDFile); pid > 0 {
 		return pid, "pid-file"
 	}
-	if pid := findPortHolderPID(port); pid > 0 {
+	// The probe flag is deliberately dropped here: this is a chain of discovery
+	// strategies, so an unanswered port lookup simply falls through to the next
+	// one rather than standing in for "no managed dolt".
+	if pid, _ := findPortHolderPID(port); pid > 0 {
 		return pid, "port-holder"
 	}
 	if pid := managedPIDFromPSByConfig(layout.ConfigFile); pid > 0 {
@@ -74,33 +130,51 @@ func managedPIDFromPIDFile(pidFile string) int {
 	return pid
 }
 
-func findPortHolderPID(port string) int {
+// findPortHolderPID reports the PID listening on port. The bool means "the
+// probe ran to completion", not "a holder was found": (0, true) says the port is
+// genuinely unheld, while (0, false) says we could not tell. No caller may read
+// the second form as a free port.
+func findPortHolderPID(port string) (int, bool) {
 	port = strings.TrimSpace(port)
 	if port == "" {
-		return 0
+		return 0, false
 	}
 	if pid, checked := findPortHolderPIDFromProc(port); checked {
-		return pid
+		return pid, true
 	}
 	return findPortHolderPIDFromLsof(port)
 }
 
-func findPortHolderPIDFromLsof(port string) int {
+// findPortHolderPIDFromLsof answers the same question from lsof on hosts without
+// /proc. Both attempts share one deadline so the fallback cannot double the
+// budget, and a probe that never completed is reported as such rather than as an
+// unheld port.
+func findPortHolderPIDFromLsof(port string) (int, bool) {
 	if _, err := exec.LookPath("lsof"); err != nil {
-		return 0
+		return 0, false
 	}
-	out, err := lsofOutput("-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-t")
+	ctx, cancel := context.WithTimeout(context.Background(), lsofCommandTimeout)
+	defer cancel()
+
+	out, err := lsofOutputContext(ctx, "-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-t")
+	if lsofProbeFailed(err) {
+		return 0, false
+	}
 	if err == nil {
 		if pid := pidFromLsofPIDList(string(out)); pid > 0 {
-			return pid
+			return pid, true
 		}
 	}
 
-	out, err = lsofOutput("-nP", "-iTCP:"+port, "-sTCP:LISTEN")
-	if err != nil {
-		return 0
+	out, err = lsofOutputContext(ctx, "-nP", "-iTCP:"+port, "-sTCP:LISTEN")
+	if lsofProbeFailed(err) {
+		return 0, false
 	}
-	return pidFromPlainPortLsofOutput(string(out), port)
+	if err != nil {
+		// lsof ran and exited non-zero: nothing matched the query.
+		return 0, true
+	}
+	return pidFromPlainPortLsofOutput(string(out), port), true
 }
 
 func pidFromLsofPIDList(output string) int {
@@ -235,21 +309,35 @@ func normalizeLsofReportedPath(path string) string {
 	}
 }
 
-func processCWDFromLsof(pid int) (string, bool) {
+// processCWDFromLsof reads a process working directory on hosts without /proc.
+// The probeResult separates "lsof reported no cwd" (probeNo) from "the probe
+// never completed" (probeUnknown); the returned path is meaningful only for
+// probeYes.
+func processCWDFromLsof(pid int) (string, probeResult) {
 	if _, err := exec.LookPath("lsof"); err != nil {
-		return "", false
+		return "", probeUnknown
 	}
-	out, err := lsofOutput("-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn")
+	ctx, cancel := context.WithTimeout(context.Background(), lsofCommandTimeout)
+	defer cancel()
+
+	out, err := lsofOutputContext(ctx, "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn")
+	if lsofProbeFailed(err) {
+		return "", probeUnknown
+	}
 	if err == nil {
 		if cwd, ok := cwdFromFormattedLsofOutput(string(out)); ok {
-			return cwd, true
+			return cwd, probeYes
 		}
 	}
-	out, err = lsofOutput("-a", "-p", strconv.Itoa(pid), "-d", "cwd")
-	if err != nil {
-		return "", false
+	out, err = lsofOutputContext(ctx, "-a", "-p", strconv.Itoa(pid), "-d", "cwd")
+	if lsofProbeFailed(err) {
+		return "", probeUnknown
 	}
-	return cwdFromPlainLsofOutput(string(out))
+	if err != nil {
+		return "", probeNo
+	}
+	cwd, ok := cwdFromPlainLsofOutput(string(out))
+	return cwd, probeAnswer(ok)
 }
 
 func benignManagedDeletedInodeTarget(target string) bool {
@@ -257,12 +345,16 @@ func benignManagedDeletedInodeTarget(target string) bool {
 	return strings.HasSuffix(clean, string(filepath.Separator)+".dolt"+string(filepath.Separator)+"noms"+string(filepath.Separator)+"LOCK")
 }
 
-func processHasDeletedDataInodes(pid int, dataDir string) bool {
+// processHasDeletedDataInodes reports whether pid still holds inodes that have
+// been unlinked from dataDir -- the signal that a dolt server is writing into a
+// data directory that has since been replaced. probeUnknown means the question
+// could not be answered, which callers must not read as a clean process.
+func processHasDeletedDataInodes(pid int, dataDir string) probeResult {
 	if pid <= 0 {
-		return false
+		return probeNo
 	}
 	if cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd")); err == nil && strings.HasSuffix(cwd, " (deleted)") {
-		return true
+		return probeYes
 	}
 	fdDir := filepath.Join("/proc", strconv.Itoa(pid), "fd")
 	entries, err := os.ReadDir(fdDir)
@@ -277,20 +369,24 @@ func processHasDeletedDataInodes(pid int, dataDir string) bool {
 				if benignManagedDeletedInodeTarget(cleanTarget) {
 					continue
 				}
-				return true
+				return probeYes
 			}
 		}
-		return false
+		return probeNo
 	}
-	for _, target := range deletedDataInodeTargetsFromLsof(pid) {
+	targets, probed := deletedDataInodeTargetsFromLsof(pid)
+	if !probed {
+		return probeUnknown
+	}
+	for _, target := range targets {
 		if pathWithinOrSame(target, dataDir) {
 			if benignManagedDeletedInodeTarget(target) {
 				continue
 			}
-			return true
+			return probeYes
 		}
 	}
-	return false
+	return probeNo
 }
 
 func pathWithinOrSame(path, root string) bool {
@@ -302,32 +398,56 @@ func pathWithinOrSame(path, root string) bool {
 	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
 }
 
-func deletedDataInodeTargetsFromLsof(pid int) []string {
+// deletedDataInodeTargetsFromLsof lists a process's unlinked open files on hosts
+// without /proc. The bool means the probe ran to completion: a nil slice with
+// false says we could not look, not that the process holds nothing.
+func deletedDataInodeTargetsFromLsof(pid int) ([]string, bool) {
 	if _, err := exec.LookPath("lsof"); err != nil {
-		return nil
+		return nil, false
 	}
-	targets := deletedDataInodeTargetsFromFormattedLsof(pid)
-	if len(targets) > 0 {
-		return targets
-	}
-	out, err := lsofOutput("-p", strconv.Itoa(pid))
-	if err != nil {
-		return nil
-	}
-	return deletedDataInodeTargetsFromPlainLsofOutput(string(out))
-}
+	ctx, cancel := context.WithTimeout(context.Background(), lsofCommandTimeout)
+	defer cancel()
 
-func deletedDataInodeTargetsFromFormattedLsof(pid int) []string {
-	out, err := lsofOutput("-a", "-p", strconv.Itoa(pid), "+L1", "-Fnk")
-	if err != nil {
-		return nil
+	out, err := lsofOutputContext(ctx, "-a", "-p", strconv.Itoa(pid), "+L1", "-Fnk")
+	if lsofProbeFailed(err) {
+		return nil, false
 	}
-	return deletedDataInodeTargetsFromFormattedLsofOutput(string(out))
+	if err == nil {
+		if targets := deletedDataInodeTargetsFromFormattedLsofOutput(string(out)); len(targets) > 0 {
+			return targets, true
+		}
+	}
+	out, err = lsofOutputContext(ctx, "-p", strconv.Itoa(pid))
+	if lsofProbeFailed(err) {
+		return nil, false
+	}
+	if err != nil {
+		return nil, true
+	}
+	return deletedDataInodeTargetsFromPlainLsofOutput(string(out)), true
 }
 
 func lsofOutput(args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), lsofCommandTimeout)
+	return lsofOutputWithTimeout(lsofCommandTimeout, args...)
+}
+
+// lsofOutputWithTimeout runs a single lsof under its own deadline. Prefer
+// lsofOutputContext when several execs answer one logical question and must
+// share a budget.
+func lsofOutputWithTimeout(timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	return lsofOutputContext(ctx, args...)
+}
+
+// lsofOutputContext runs lsof with the hardening every caller needs: a WaitDelay
+// so a child holding the pipes open cannot outlive the deadline, and a cancel
+// that kills the whole process group rather than the direct child alone.
+//
+// A deadline hit is reported as an error wrapping context.DeadlineExceeded so
+// callers can tell a truncated listing from a complete one; whatever lsof
+// buffered before the kill is still returned alongside it.
+func lsofOutputContext(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "lsof", args...)
 	cmd.WaitDelay = 100 * time.Millisecond
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -340,24 +460,42 @@ func lsofOutput(args ...string) ([]byte, error) {
 		}
 		return nil
 	}
-	return cmd.Output()
+	out, err := cmd.Output()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return out, fmt.Errorf("lsof: %w", ctxErr)
+	}
+	return out, err
 }
 
-func processHasDeletedDataInodesWithin(pid int, dataDir string, timeout time.Duration) bool {
-	if processHasDeletedDataInodes(pid, dataDir) {
+// lsofProbeFailed reports whether err means the probe could not answer, as
+// opposed to lsof answering with "nothing matched". lsof exits non-zero with
+// empty output when a query has no matches, so a plain exit status is a genuine
+// negative; a deadline, or a failure to launch lsof at all, is not.
+func lsofProbeFailed(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return true
 	}
-	if timeout <= 0 {
-		return false
+	var exitErr *exec.ExitError
+	return !errors.As(err, &exitErr)
+}
+
+func processHasDeletedDataInodesWithin(pid int, dataDir string, timeout time.Duration) probeResult {
+	result := processHasDeletedDataInodes(pid, dataDir)
+	if result == probeYes || timeout <= 0 {
+		return result
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(50 * time.Millisecond)
-		if processHasDeletedDataInodes(pid, dataDir) {
-			return true
+		result = processHasDeletedDataInodes(pid, dataDir)
+		if result == probeYes {
+			return result
 		}
 	}
-	return false
+	return result
 }
 
 func findPortHolderPIDFromProc(port string) (int, bool) {
@@ -495,9 +633,9 @@ func psLinePID(line string) int {
 	return pid
 }
 
-func inspectManagedDoltOwnership(pid int, layout managedDoltRuntimeLayout) (bool, bool) {
+func inspectManagedDoltOwnership(pid int, layout managedDoltRuntimeLayout) (bool, probeResult) {
 	if pid <= 0 {
-		return false, false
+		return false, probeNo
 	}
 
 	stateDir := strings.TrimSpace(loadDoltRuntimeStateDataDir(layout.StateFile))
@@ -509,7 +647,7 @@ func inspectManagedDoltOwnership(pid int, layout managedDoltRuntimeLayout) (bool
 	for {
 		owned := managedDoltProcessOwnedWithStateDir(pid, layout, stateDir)
 		deleted := processHasDeletedDataInodes(pid, layout.DataDir)
-		if owned || deleted || !pidAlive(pid) || time.Now().After(deadline) {
+		if owned || deleted == probeYes || !pidAlive(pid) || time.Now().After(deadline) {
 			return owned, deleted
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -532,7 +670,9 @@ func managedDoltProcessOwnedWithStateDir(pid int, layout managedDoltRuntimeLayou
 		return false
 	case processDataDirMatches(procArgs, layout.DataDir):
 		return true
-	case processCWDMatches(pid, layout.DataDir):
+	case processCWDMatches(pid, layout.DataDir) == probeYes:
+		// Ownership is a positive claim: an unproven cwd (probeUnknown) leaves
+		// the process unadopted rather than asserting it is someone else's.
 		return true
 	default:
 		return false
@@ -639,13 +779,16 @@ func extractFlagValue(args, flag string) string {
 	return ""
 }
 
-func processCWDMatches(pid int, dataDir string) bool {
+func processCWDMatches(pid int, dataDir string) probeResult {
 	cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
 	if err == nil {
-		return samePath(cwd, dataDir)
+		return probeAnswer(samePath(cwd, dataDir))
 	}
-	cwd, ok := processCWDFromLsof(pid)
-	return ok && samePath(cwd, dataDir)
+	cwd, result := processCWDFromLsof(pid)
+	if result != probeYes {
+		return result
+	}
+	return probeAnswer(samePath(cwd, dataDir))
 }
 
 func doltProcessInspectionFields(info managedDoltProcessInspection) []string {
@@ -653,9 +796,12 @@ func doltProcessInspectionFields(info managedDoltProcessInspection) []string {
 		fmt.Sprintf("managed_pid\t%d", info.ManagedPID),
 		"managed_source\t" + info.ManagedSource,
 		fmt.Sprintf("managed_owned\t%t", info.ManagedOwned),
-		fmt.Sprintf("managed_deleted_inodes\t%t", info.ManagedDeletedInodes),
+		fmt.Sprintf("managed_deleted_inodes\t%t", info.ManagedDeletedInodes == probeYes),
+		fmt.Sprintf("managed_deleted_inodes_probed\t%t", info.ManagedDeletedInodes != probeUnknown),
 		fmt.Sprintf("port_holder_pid\t%d", info.PortHolderPID),
+		fmt.Sprintf("port_holder_probed\t%t", info.PortHolderProbed),
 		fmt.Sprintf("port_holder_owned\t%t", info.PortHolderOwned),
-		fmt.Sprintf("port_holder_deleted_inodes\t%t", info.PortHolderDeletedInodes),
+		fmt.Sprintf("port_holder_deleted_inodes\t%t", info.PortHolderDeletedInodes == probeYes),
+		fmt.Sprintf("port_holder_deleted_inodes_probed\t%t", info.PortHolderDeletedInodes != probeUnknown),
 	}
 }

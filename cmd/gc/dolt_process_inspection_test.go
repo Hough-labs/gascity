@@ -48,7 +48,10 @@ func TestFindPortHolderPIDUsesProcBeforeLsof(t *testing.T) {
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 
 	start := time.Now()
-	pid := findPortHolderPID(strconv.Itoa(port))
+	pid, probed := findPortHolderPID(strconv.Itoa(port))
+	if !probed {
+		t.Fatal("findPortHolderPID reported an incomplete probe on a host with /proc")
+	}
 	if pid != os.Getpid() {
 		t.Fatalf("findPortHolderPID(%d) = %d, want current pid %d", port, pid, os.Getpid())
 	}
@@ -74,9 +77,9 @@ func TestProcessCWDFromLsofParsesNameRecord(t *testing.T) {
 	}
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 
-	cwd, ok := processCWDFromLsof(123)
-	if !ok {
-		t.Fatal("processCWDFromLsof did not find cwd")
+	cwd, result := processCWDFromLsof(123)
+	if result != probeYes {
+		t.Fatalf("processCWDFromLsof result = %v, want probeYes", result)
 	}
 	if !samePath(cwd, "/var/folders/example/.beads/dolt") {
 		t.Fatalf("processCWDFromLsof = %q, want path equivalent to /var/folders/example/.beads/dolt", cwd)
@@ -117,7 +120,10 @@ func TestDeletedDataInodeTargetsFromLsofParsesNameRecords(t *testing.T) {
 	}
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 
-	targets := deletedDataInodeTargetsFromLsof(123)
+	targets, probed := deletedDataInodeTargetsFromLsof(123)
+	if !probed {
+		t.Fatal("deletedDataInodeTargetsFromLsof reported an incomplete probe for a successful lsof")
+	}
 	if len(targets) != 2 {
 		t.Fatalf("deletedDataInodeTargetsFromLsof returned %d targets, want 2: %#v", len(targets), targets)
 	}

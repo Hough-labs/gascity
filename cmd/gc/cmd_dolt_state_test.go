@@ -1843,7 +1843,8 @@ func processHoldsDeletedPath(pid int, targetPath string) bool {
 			}
 		}
 	}
-	for _, target := range deletedDataInodeTargetsFromLsof(pid) {
+	targets, _ := deletedDataInodeTargetsFromLsof(pid)
+	for _, target := range targets {
 		if samePath(target, targetPath) {
 			return true
 		}
@@ -1873,8 +1874,8 @@ func TestProcessHasDeletedDataInodesIgnoresDeletedNomsLock(t *testing.T) {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	if processHasDeletedDataInodes(proc.Process.Pid, layout.DataDir) {
-		t.Fatalf("processHasDeletedDataInodes(%d, %q) = true, want false for deleted noms LOCK", proc.Process.Pid, layout.DataDir)
+	if got := processHasDeletedDataInodes(proc.Process.Pid, layout.DataDir); got == probeYes {
+		t.Fatalf("processHasDeletedDataInodes(%d, %q) = %v, want a non-yes result for deleted noms LOCK", proc.Process.Pid, layout.DataDir, got)
 	}
 }
 

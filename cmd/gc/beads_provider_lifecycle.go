@@ -1424,15 +1424,15 @@ func validDoltRuntimeStateIdentity(state doltRuntimeState, cityPath string) (man
 }
 
 func managedDoltRuntimeProcessOwned(state doltRuntimeState, layout managedDoltRuntimeLayout) bool {
-	holderPID := findPortHolderPID(strconv.Itoa(state.Port))
-	if holderPID > 0 && holderPID != state.PID {
+	holderPID, probed := findPortHolderPID(strconv.Itoa(state.Port))
+	if probed && holderPID > 0 && holderPID != state.PID {
 		return false
 	}
 	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
-	if deleted {
+	if deleted == probeYes {
 		return false
 	}
-	if holderPID == state.PID {
+	if probed && holderPID == state.PID {
 		return true
 	}
 	return owned

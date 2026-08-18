@@ -86,16 +86,25 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			continue
 		}
 
-		livePID, livePort, infoExists, liveRigLocal := rigLocalDoltPIDFromSQLServerInfo(rig.Path)
+		livePID, livePort, infoExists, rigLocalLive := rigLocalDoltPIDFromSQLServerInfo(rig.Path)
 
-		// Case A: rig is inherited_city but has a live rig-local Dolt.
-		if liveRigLocal {
+		switch {
+		case rigLocalLive == probeYes:
+			// Case A: rig is inherited_city but has a live rig-local Dolt.
 			c.liveRigLocalBlocking = true
 			errors = append(errors, fmt.Sprintf(
 				"rig %q endpoint_origin=inherited_city but rig-local Dolt pid %d is listening on port %d (.dolt/sql-server.info); stop the rig-local server or acknowledge it with `gc rig set-endpoint %s --self --port %d --force`",
 				rig.Name, livePID, livePort, rig.Name, livePort,
 			))
-		} else if infoExists {
+		case rigLocalLive == probeUnknown && infoExists:
+			// The port-holder probe never completed, so the recorded server is
+			// neither confirmed live nor confirmed gone. Reporting it as stale
+			// here would advise deleting the state file of a running server.
+			warnings = append(warnings, fmt.Sprintf(
+				"rig %q has .dolt/sql-server.info recording pid %d on port %d, but the port-holder probe did not complete; re-run `gc doctor` on a quieter machine before treating it as stale",
+				rig.Name, livePID, livePort,
+			))
+		case infoExists:
 			// Case C: stale rig-local sql-server.info (file present, but the
 			// recorded PID is not serving the recorded port).
 			warnings = append(warnings, fmt.Sprintf(
@@ -180,31 +189,39 @@ func (c *doltDriftCheck) Fix(ctx *doctor.CheckContext) error {
 // content of rigPath/.dolt/sql-server.info (written by dolt sql-server). It
 // returns the PID and port parsed from the file, whether the file exists at
 // all, and whether that PID is currently alive and listening on the recorded
-// port. When the file is missing the PID and port are zero and both bools are
-// false.
-func rigLocalDoltPIDFromSQLServerInfo(rigPath string) (pid int, port int, infoExists bool, pidAliveNow bool) {
+// port. When the file is missing the PID and port are zero, infoExists is false
+// and the liveness is probeNo.
+//
+// The liveness is a probeResult because the port-holder lookup can fail to run:
+// probeUnknown must not be read as "the recorded server is gone", which is the
+// input to advising that the file is safe to delete.
+func rigLocalDoltPIDFromSQLServerInfo(rigPath string) (pid int, port int, infoExists bool, rigLocalLive probeResult) {
 	path := filepath.Join(rigPath, ".dolt", "sql-server.info")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0, 0, false, false
+		return 0, 0, false, probeNo
 	}
 	parts := strings.SplitN(strings.TrimSpace(string(data)), ":", 3)
 	if len(parts) < 1 || strings.TrimSpace(parts[0]) == "" {
-		return 0, 0, true, false
+		return 0, 0, true, probeNo
 	}
 	parsed, convErr := strconv.Atoi(strings.TrimSpace(parts[0]))
 	if convErr != nil || parsed <= 0 {
-		return 0, 0, true, false
+		return 0, 0, true, probeNo
 	}
 	if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
-		return parsed, 0, true, false
+		return parsed, 0, true, probeNo
 	}
 	parsedPort, convErr := strconv.Atoi(strings.TrimSpace(parts[1]))
 	if convErr != nil || parsedPort <= 0 {
-		return parsed, 0, true, false
+		return parsed, 0, true, probeNo
 	}
 	if !pidAlive(parsed) {
-		return parsed, parsedPort, true, false
+		return parsed, parsedPort, true, probeNo
 	}
-	return parsed, parsedPort, true, findPortHolderPID(strconv.Itoa(parsedPort)) == parsed
+	holderPID, probed := findPortHolderPID(strconv.Itoa(parsedPort))
+	if !probed {
+		return parsed, parsedPort, true, probeUnknown
+	}
+	return parsed, parsedPort, true, probeAnswer(holderPID == parsed)
 }

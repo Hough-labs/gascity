@@ -1641,6 +1641,11 @@ const (
 
 var doltVersionCommandTimeout = 10 * time.Second
 
+// doltPortHolderLsofTimeout bounds the Darwin port-holder lookup. It duplicates
+// the cmd/gc lsofCommandTimeout value because package main cannot be imported;
+// keep the two in step. It is a var only so tests can shorten it.
+var doltPortHolderLsofTimeout = 10 * time.Second
+
 const doltDirMeasureTimeout = 60 * time.Second
 
 // resolveManagedDoltDataDir returns the effective Dolt data directory for the
@@ -1734,10 +1739,13 @@ func validPublishedManagedDoltDoctorState(cityPath string, state managedDoltDoct
 		return false
 	}
 	_ = conn.Close()
-	holderPID := managedDoltDoctorPortHolderPID(state.Port)
-	if holderPID > 0 {
+	holderPID, probed := managedDoltDoctorPortHolderPID(state.Port)
+	if probed && holderPID > 0 {
 		return holderPID == state.PID
 	}
+	// A probe that never completed says nothing about who holds the port, so
+	// fall through to the ownership evidence rather than treating the port as
+	// unheld.
 	return managedDoltDoctorProcessOwnsRuntime(state.PID, dataDir, resolveManagedDoltConfigPath(cityPath))
 }
 
@@ -1769,12 +1777,16 @@ func managedDoltDoctorProcCmdline(pid int) string {
 	return strings.TrimSpace(string(out))
 }
 
-func managedDoltDoctorPortHolderPID(port int) int {
+// managedDoltDoctorPortHolderPID reports the PID listening on port. The bool
+// means the probe ran to completion, not that a holder was found: (0, true) is
+// a genuinely unheld port, (0, false) is an unanswered question. Callers must
+// not read the second form as evidence that nothing is listening.
+func managedDoltDoctorPortHolderPID(port int) (int, bool) {
 	if port <= 0 {
-		return 0
+		return 0, false
 	}
 	if pid, checked := managedDoltDoctorPortHolderFromProc(uint16(port)); checked {
-		return pid
+		return pid, true
 	}
 	return managedDoltDoctorPortHolderFromLsof(port)
 }
@@ -1841,20 +1853,49 @@ func managedDoltDoctorPortHolderFromProc(port uint16) (int, bool) {
 	return 0, true
 }
 
-func managedDoltDoctorPortHolderFromLsof(port int) int {
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+// managedDoltDoctorPortHolderFromLsof answers the same question from lsof on
+// hosts without /proc. lsof walks the host-wide open-file table, so its latency
+// tracks the machine's total open files rather than anything gc controls; the
+// budget matches doltVersionCommandTimeout for that reason, and a deadline is
+// reported as an unanswered probe rather than as an unheld port.
+func managedDoltDoctorPortHolderFromLsof(port int) (int, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), doltPortHolderLsofTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "lsof", "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
+	cmd := exec.CommandContext(ctx, "lsof", "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t")
+	// Without these a wedged lsof outlives its deadline: WaitDelay stops a child
+	// holding the pipes open from blocking Output, and the cancel kills the whole
+	// process group rather than the direct child alone.
+	cmd.WaitDelay = 100 * time.Millisecond
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+			return err
+		}
+		return nil
+	}
+	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		return 0, false
+	}
 	if err != nil {
-		return 0
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			// lsof never ran (absent, or not executable): we cannot tell.
+			return 0, false
+		}
+		// lsof ran and exited non-zero: nothing is listening on that port.
+		return 0, true
 	}
 	for _, field := range strings.Fields(string(out)) {
 		pid, err := strconv.Atoi(field)
 		if err == nil && pidutil.Alive(pid) {
-			return pid
+			return pid, true
 		}
 	}
-	return 0
+	return 0, true
 }
 
 func managedDoltDoctorDefaultDataDirExists(cityPath, dataDir string) bool {
