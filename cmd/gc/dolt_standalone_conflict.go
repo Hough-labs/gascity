@@ -96,7 +96,9 @@ func doltSQLServerProcessOwnsDataDir(pid int, argv []string, args, dataDir strin
 	if strings.Contains(args, "--data-dir") {
 		return processDataDirMatches(args, dataDir)
 	}
-	return processCWDMatches(pid, dataDir)
+	// Ownership is a positive claim: a cwd the probe could not read leaves the
+	// process unattributed rather than attributed to someone else.
+	return processCWDMatches(pid, dataDir) == probeYes
 }
 
 func argvDataDirMatches(argv []string, dataDir string) (bool, bool) {

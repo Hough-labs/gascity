@@ -12,6 +12,7 @@ type managedDoltExistingReport struct {
 	ManagedPID              int
 	ManagedOwned            bool
 	DeletedInodes           bool
+	DeletedInodesProbed     bool
 	StatePort               int
 	Ready                   bool
 	Reusable                bool
@@ -32,10 +33,11 @@ func assessExistingManagedDolt(cityPath, host, port, user string, timeout time.D
 	report := managedDoltExistingReport{
 		ManagedPID:              info.ManagedPID,
 		ManagedOwned:            info.ManagedOwned,
-		DeletedInodes:           info.ManagedDeletedInodes,
+		DeletedInodes:           info.ManagedDeletedInodes == probeYes,
+		DeletedInodesProbed:     info.ManagedDeletedInodes != probeUnknown,
 		PortHolderPID:           info.PortHolderPID,
 		PortHolderOwned:         info.PortHolderOwned,
-		PortHolderDeletedInodes: info.PortHolderDeletedInodes,
+		PortHolderDeletedInodes: info.PortHolderDeletedInodes == probeYes,
 	}
 	owned, err := managedDoltLifecycleOwned(cityPath)
 	if err != nil {
@@ -50,8 +52,14 @@ func assessExistingManagedDolt(cityPath, host, port, user string, timeout time.D
 	}
 	readyReport, err := waitForManagedDoltReady(cityPath, host, strconv.Itoa(report.StatePort), user, report.ManagedPID, timeout, true)
 	report.Ready = readyReport.Ready
-	if readyReport.DeletedInodes || processHasDeletedDataInodesWithin(report.ManagedPID, layout.DataDir, 300*time.Millisecond) {
+	// DeletedInodesProbed describes the verdict actually reported below, so a
+	// confirmed hit counts as probed and an unanswered re-check does not.
+	deleted := processHasDeletedDataInodesWithin(report.ManagedPID, layout.DataDir, 300*time.Millisecond)
+	if readyReport.DeletedInodes || deleted == probeYes {
 		report.DeletedInodes = true
+		report.DeletedInodesProbed = true
+	} else {
+		report.DeletedInodesProbed = deleted != probeUnknown
 	}
 	if err == nil && report.Ready && !report.DeletedInodes {
 		report.Reusable = true
@@ -92,6 +100,7 @@ func managedDoltExistingFields(report managedDoltExistingReport) []string {
 		"managed_pid\t" + strconv.Itoa(report.ManagedPID),
 		"managed_owned\t" + strconv.FormatBool(report.ManagedOwned),
 		"deleted_inodes\t" + strconv.FormatBool(report.DeletedInodes),
+		"deleted_inodes_probed\t" + strconv.FormatBool(report.DeletedInodesProbed),
 		"state_port\t" + strconv.Itoa(report.StatePort),
 		"ready\t" + strconv.FormatBool(report.Ready),
 		"reusable\t" + strconv.FormatBool(report.Reusable),

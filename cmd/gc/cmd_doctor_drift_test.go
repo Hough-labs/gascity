@@ -260,7 +260,7 @@ func TestRigLocalDoltPIDFromSQLServerInfoParsesColonFormat(t *testing.T) {
 	dir := t.TempDir()
 	const parsedPID = 2147483639
 	writeSQLServerInfo(t, dir, parsedPID, 28232)
-	pid, port, exists, alive := rigLocalDoltPIDFromSQLServerInfo(dir)
+	pid, port, exists, live := rigLocalDoltPIDFromSQLServerInfo(dir)
 	if !exists {
 		t.Fatalf("infoExists = false, want true")
 	}
@@ -270,14 +270,14 @@ func TestRigLocalDoltPIDFromSQLServerInfoParsesColonFormat(t *testing.T) {
 	if port != 28232 {
 		t.Errorf("port = %d, want 28232", port)
 	}
-	if alive {
-		t.Errorf("pidAliveNow = true, want false when recorded PID is not tied to the port")
+	if live != probeNo {
+		t.Errorf("rigLocalLive = %v, want probeNo when the recorded PID is dead", live)
 	}
 }
 
 func TestRigLocalDoltPIDFromSQLServerInfoMissingFile(t *testing.T) {
 	dir := t.TempDir()
-	pid, port, exists, alive := rigLocalDoltPIDFromSQLServerInfo(dir)
+	pid, port, exists, live := rigLocalDoltPIDFromSQLServerInfo(dir)
 	if exists {
 		t.Errorf("infoExists = true, want false when file is absent")
 	}
@@ -287,7 +287,7 @@ func TestRigLocalDoltPIDFromSQLServerInfoMissingFile(t *testing.T) {
 	if port != 0 {
 		t.Errorf("port = %d, want 0", port)
 	}
-	if alive {
-		t.Errorf("pidAliveNow = true, want false when file absent")
+	if live != probeNo {
+		t.Errorf("rigLocalLive = %v, want probeNo when the file is absent", live)
 	}
 }

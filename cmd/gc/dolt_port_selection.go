@@ -86,8 +86,11 @@ func repairedManagedDoltRuntimeState(_ string, layout managedDoltRuntimeLayout, 
 		return doltRuntimeState{}, false
 	}
 	port := strconv.Itoa(state.Port)
-	holderPID := findPortHolderPID(port)
-	if holderPID <= 0 {
+	holderPID, probed := findPortHolderPID(port)
+	if !probed || holderPID <= 0 {
+		// Repair adopts a running server as the city's own. A probe that never
+		// completed is not evidence that one is there, and acting on it would
+		// republish state pointing at a process we never confirmed.
 		return doltRuntimeState{}, false
 	}
 	stateDir := strings.TrimSpace(state.DataDir)
@@ -97,7 +100,9 @@ func repairedManagedDoltRuntimeState(_ string, layout managedDoltRuntimeLayout, 
 	if !managedDoltProcessOwnedWithStateDir(holderPID, layout, stateDir) {
 		return doltRuntimeState{}, false
 	}
-	if processHasDeletedDataInodes(holderPID, layout.DataDir) {
+	if processHasDeletedDataInodes(holderPID, layout.DataDir) != probeNo {
+		// Only a confirmed-clean process is worth adopting; probeUnknown means
+		// we could not rule out that it is writing into a replaced data dir.
 		return doltRuntimeState{}, false
 	}
 	managedPID, _ := findManagedDoltPID(layout, port)
