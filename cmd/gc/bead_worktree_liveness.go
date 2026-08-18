@@ -1,9 +1,7 @@
 package main
 
 import (
-	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -44,57 +42,33 @@ type liveWorktreeState struct {
 // standing up real processes.
 var collectLiveWorktreeStateFn = collectLiveWorktreeState
 
-// collectLiveWorktreeState walks /proc/<pid>/cwd for every process on the host
-// and records their canonical working directories. On a host without /proc (or
-// when the top-level /proc walk fails outright) it returns scanned=false so the
-// caller fails closed and reaps nothing.
+// collectLiveWorktreeState enumerates the working directories of every process
+// on the host. It is implemented per platform, because the process table is not
+// portable: Linux reads /proc/<pid>/cwd (bead_worktree_liveness_linux.go) and
+// Darwin shells out to lsof (bead_worktree_liveness_darwin.go), which is the
+// same signal the dolt reaper already uses on this platform. Any other GOOS
+// returns scanned=false (bead_worktree_liveness_other.go) so the caller keeps
+// failing closed rather than reaping on an unknown platform.
 //
-// Per-process readlink failures are skipped, not fatal: a process may exit
-// mid-walk, and a process owned by another user may have a cwd this process
-// cannot resolve. The fleet runs every agent as the same user, so agent
-// worktree cwds are always visible here; the active-session-directory
-// cross-check plus the git-clean and closed-bead gates back-stop any process
-// this scan cannot see. This matches the dolt reaper's posture: the /proc
-// signal protects, it never authorizes a deletion the other gates would refuse.
-func collectLiveWorktreeState() liveWorktreeState {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return liveWorktreeState{scanned: false}
-	}
-	seen := make(map[string]struct{})
-	var cwds []string
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
-			continue // not a PID directory
-		}
-		link, err := os.Readlink(filepath.Join("/proc", entry.Name(), "cwd"))
-		if err != nil || link == "" {
-			continue
-		}
-		// A cwd whose inode has been unlinked carries a trailing " (deleted)"
-		// marker. The directory is gone, so it can never match a live worktree
-		// path on disk — drop it rather than canonicalize a bogus path. (The
-		// rare live directory literally named "... (deleted)" would be dropped
-		// too; that only ever loses protection for a pathological path the
-		// fleet never creates, and the git-clean gate still applies.)
-		if strings.HasSuffix(link, " (deleted)") {
-			continue
-		}
-		canon := pathutil.NormalizePathForCompare(link)
-		if canon == "" {
-			continue
-		}
-		if _, ok := seen[canon]; ok {
-			continue
-		}
-		seen[canon] = struct{}{}
-		cwds = append(cwds, canon)
-	}
-	return liveWorktreeState{cwds: cwds, scanned: true}
-}
+// Every implementation must honor the same contract:
+//
+//   - Return scanned=false when the process table could not be enumerated AT
+//     ALL. The caller (bead_worktree_reaper.go) treats that as "liveness
+//     indeterminate" and protects every candidate worktree.
+//   - Skip, never fail, on a per-process error. A process may exit mid-scan,
+//     and a process owned by another user may have a cwd this process cannot
+//     resolve. The fleet runs every agent as the same user, so agent worktree
+//     cwds are always visible; the active-session-directory cross-check plus
+//     the git-clean and closed-bead gates back-stop anything the scan misses.
+//   - Return canonical (symlink-resolved, absolute) deduplicated paths, so
+//     pathAtOrUnder can compare lexically without re-resolving symlinks on
+//     every process × worktree pair.
+//
+// The posture is the dolt_cleanup fail-closed precedent: this signal PROTECTS,
+// it never authorizes a deletion the other gates would refuse. A scanner that
+// silently reports "nothing is live" is far more dangerous than one that
+// reports "I could not tell" — the former deletes live work
+// (gastownhall/gascity#4492), the latter merely defers.
 
 // worktreeIsLive reports whether any live signal sits at or beneath
 // worktreePath: a live process cwd, or a recorded active-session working

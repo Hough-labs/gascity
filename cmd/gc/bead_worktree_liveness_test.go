@@ -2,9 +2,11 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -79,12 +81,14 @@ func TestWorktreeIsLive_NothingMatches(t *testing.T) {
 }
 
 func TestCollectLiveWorktreeState_IncludesOwnCWD(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skipf("collectLiveWorktreeState relies on /proc; GOOS=%s has none", runtime.GOOS)
+	// Both linux (/proc) and darwin (lsof) have a real implementation; every
+	// other GOOS deliberately reports scanned=false so the reaper fails closed.
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skipf("collectLiveWorktreeState has no process table on GOOS=%s", runtime.GOOS)
 	}
 	live := collectLiveWorktreeState()
 	if !live.scanned {
-		t.Fatal("collectLiveWorktreeState scanned = false on linux, want true")
+		t.Fatalf("collectLiveWorktreeState scanned = false on %s, want true", runtime.GOOS)
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -97,6 +101,52 @@ func TestCollectLiveWorktreeState_IncludesOwnCWD(t *testing.T) {
 		}
 	}
 	t.Fatalf("collectLiveWorktreeState did not include this process's cwd %q in %d entries", want, len(live.cwds))
+}
+
+// TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess is the end-to-end
+// guarantee the reaper actually depends on: a directory with a live process
+// working in it must come back as live, so worktreeIsLive protects it.
+//
+// The own-cwd test above proves the scanner enumerates SOMETHING. This one
+// proves it enumerates a foreign process's cwd — the real case, since the
+// reaper runs in the witness while the process to protect is an agent. On
+// Darwin that is the difference between reading this process's state and
+// successfully parsing the whole lsof process table.
+func TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skipf("collectLiveWorktreeState has no process table on GOOS=%s", runtime.GOOS)
+	}
+	dir := t.TempDir()
+
+	// A real child process parked in dir, standing in for an agent mid-stage
+	// in its worktree.
+	cmd := exec.Command("sleep", "30")
+	cmd.Dir = dir
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	// The process table is not guaranteed to reflect a just-forked child
+	// instantly. Poll briefly rather than racing it.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		live := collectLiveWorktreeState()
+		if !live.scanned {
+			t.Fatalf("collectLiveWorktreeState scanned = false on %s, want true", runtime.GOOS)
+		}
+		if isLive, why := worktreeIsLive(dir, live, nil); isLive {
+			t.Logf("protected as expected: %s", why)
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("live process cwd %q never appeared in the scan; the reaper would treat it as reapable", dir)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 func TestLiveSessionWorktreeDirs_CollectsAndDedups(t *testing.T) {
