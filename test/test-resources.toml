@@ -4,32 +4,59 @@ version = 2
 # manifest alone fails; an intentional policy change updates the Go policy,
 # this file, and the generated TESTING.md table under council review.
 
+# Reviewed increments. Growth is only ever banked here with a LIVE owner and a
+# justification; a bump without one is the drift this ledger exists to catch.
+# Each increment names its owner inline in the affected rows' resource_owner,
+# so the row itself says why the number moved. owner_bead is NOT reused for
+# this: it tracks who must drive the whole ratchet to zero, which is never the
+# bead that added one call site.
+#
+# gascity-4zf / df0f1ad31 (gc-zxxy Darwin worktree liveness) is the +1 call and
+# +1 file on untagged subprocess and untagged fixed_sleep, in every scope that
+# counts them. Both land in cmd/gc/bead_worktree_liveness_test.go, which had
+# neither resource before, in TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess:
+#   - exec.Command("sleep", "30") parks a real child process in a temp dir.
+#     The test proves the scanner reads a FOREIGN process's cwd, which is the
+#     production case (the reaper runs in the witness; the process it must not
+#     reap is an agent). A second process is inherent to what is asserted.
+#   - time.Sleep(200ms) is the poll interval of a deadline-bounded retry loop,
+#     not a naive delay: the loop returns as soon as the cwd appears and
+#     t.Fatalf's at a 10s deadline, so it can neither hang nor pass on timing.
+# The production Darwin lsof call site is NOT counted here; the census scans
+# *_test.go only (census.go scanFiles).
+#
+# The ga-80po0c.* owner_bead ids below are all dangling (gc doctor: 8 findings,
+# tracked by gascity-82e). They are left untouched deliberately: re-pointing
+# only the rows this increment happens to touch would split ga-80po0c.2.1,
+# which also owns environment / cwd / slow_process_gate and four medium rows,
+# leaving it dangling anyway. Each family should be re-pointed whole.
+
 # These broad rows retain the audit's point-in-time source needles. They do
 # not classify tests. The AST baselines below ignore comments and strings;
 # reported_* preserves the historical regex totals for comparison.
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 545
-baseline_files = 164
+baseline_calls = 546
+baseline_files = 165
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
 invariant = "tracked test source totals remain visible as audit evidence"
-resource_owner = "ga-80po0c.2 owns this point-in-time source census"
+resource_owner = "ga-80po0c.2 owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess)"
 migration_target = "P0.4a"
 expires = "2026-10-01"
 
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 428
-baseline_files = 158
+baseline_calls = 429
+baseline_files = 159
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
 invariant = "tracked test source totals remain visible as audit evidence"
-resource_owner = "ga-80po0c.2 owns this point-in-time source census"
+resource_owner = "ga-80po0c.2 owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess)"
 migration_target = "P0.4a"
 expires = "2026-10-01"
 
@@ -51,26 +78,26 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 406
-baseline_files = 113
+baseline_calls = 407
+baseline_files = 114
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
 invariant = "untagged subprocess call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each process-owning test removes or replaces its source call site"
+resource_owner = "each process-owning test removes or replaces its source call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess)"
 migration_target = "D1/D2/D5/D6/E6"
 expires = "2026-10-01"
 
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 283
-baseline_files = 112
+baseline_calls = 284
+baseline_files = 113
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-80po0c.2"
 invariant = "untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each owning test replaces elapsed wall time with its lifecycle signal"
+resource_owner = "each owning test replaces elapsed wall time with its lifecycle signal; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess)"
 migration_target = "W1-W5"
 expires = "2026-10-01"
 
@@ -333,26 +360,26 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 401
-baseline_files = 110
+baseline_calls = 402
+baseline_files = 111
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"
 invariant = "untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners remove or replace each process call site"
+resource_owner = "non-Medium lexical owners remove or replace each process call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess)"
 migration_target = "D1/D2/D5/D6/E6"
 expires = "2026-10-01"
 
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 283
-baseline_files = 112
+baseline_calls = 284
+baseline_files = 113
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-80po0c.2.1"
 invariant = "untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners replace elapsed wall time with lifecycle signals"
+resource_owner = "non-Medium lexical owners replace elapsed wall time with lifecycle signals; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess)"
 migration_target = "W1-W5"
 expires = "2026-10-01"
 
