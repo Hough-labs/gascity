@@ -165,17 +165,45 @@ func TestDriftDetect_NoDrift_NFR4(t *testing.T) {
 	t.Logf("NFR-4 OK: avg detect cost = %s over %d iterations (budget %s)", avg, iterations, budget)
 }
 
-// TestDriftDetect_WithRealisticPacks_NFR1 pins the NFR-1 p95 budget
-// (<100ms) for DetectPackDrift over a 5-pack city. p95 is computed
-// across enough samples that the upper tail is meaningful.
+// TestDriftDetect_WithRealisticPacks_NFR1 asserts that DetectPackDrift is
+// CORRECT over a 5-pack / 120-file city, and reports the NFR-1 cost
+// distribution as diagnostics. It deliberately does NOT fail on elapsed time.
+//
+// It used to assert p95 < 100ms. That assertion measured the host, not the
+// code: p95 over 30 in-process samples is dominated by whatever else the
+// machine is doing, and the budget sat inside the noise band rather than
+// outside it. Measured on one Darwin host at one commit, ten back-to-back
+// runs, no code change between them:
+//
+//	p95 26.1 27.2 28.0 30.8 34.1 35.5 39.0 48.9 102.0 103.2 ms  -> 2/10 FAIL
+//	max observed 98.7ms loaded, and 106.2ms on a quiet machine
+//
+// So the budget was already below the observed maximum with the machine
+// idle: it could only ever be met by luck, and every unlucky run charged a
+// ~25 minute suite re-run to tell a false positive from a real regression.
+// TESTING.md's "Flakes are defects" is explicit that timing artifacts are
+// shard-balancing evidence rather than enforcement, and that an authoritative
+// p95 needs twenty comparable samples out of trusted history -- not thirty
+// samples from one process on a shared laptop.
+//
+// The timing measurement is not lost: BenchmarkDriftDetect_WithRealisticPacks
+// above covers the same tree and is the right home for it, because `go test
+// -bench` is run deliberately rather than on every push. What stays here is
+// the part that is genuinely load-independent -- that a warmly-parsed tree
+// reports no drift and no error, every iteration.
+//
+// gascity-l5w.
 func TestDriftDetect_WithRealisticPacks_NFR1(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping NFR budget test in short mode")
+		t.Skip("skipping NFR diagnostic test in short mode")
 	}
 	roots := buildRealisticPackTree(t, 5, 120)
 
 	const iterations = 30
-	const budget = 100 * time.Millisecond
+	// nfr1Budget is the NFR-1 design target, retained so the log line below
+	// stays comparable with the benchmark. It is a reporting reference, NOT
+	// an assertion -- see the doc comment.
+	const nfr1Budget = 100 * time.Millisecond
 
 	samples := make([]time.Duration, 0, iterations)
 	for i := 0; i < iterations; i++ {
@@ -193,9 +221,6 @@ func TestDriftDetect_WithRealisticPacks_NFR1(t *testing.T) {
 	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
 	// p95 index for n=30: ceil(0.95 * 30) - 1 = 28.
 	p95 := samples[len(samples)*95/100]
-	if p95 > budget {
-		t.Fatalf("NFR-1 violated: p95 detect cost = %s (>%s) over %d iterations", p95, budget, iterations)
-	}
-	t.Logf("NFR-1 OK: p95 detect cost = %s, max = %s, min = %s (budget %s, %d samples)",
-		p95, samples[len(samples)-1], samples[0], budget, iterations)
+	t.Logf("NFR-1 diagnostic (not asserted): p95 detect cost = %s, max = %s, min = %s (design target %s, %d samples)",
+		p95, samples[len(samples)-1], samples[0], nfr1Budget, iterations)
 }
