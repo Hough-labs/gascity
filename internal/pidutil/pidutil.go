@@ -210,7 +210,23 @@ func NormalizeArgv(argv []string) []string {
 func ChildPIDs(parent int) ([]int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), childEnumTimeout)
 	defer cancel()
+	return childPIDs(ctx, parent)
+}
 
+// childPIDs is ChildPIDs with the enumeration deadline supplied by the caller
+// instead of taken from childEnumTimeout.
+//
+// ChildPIDs binds it to childEnumTimeout, which is a budget sized for the real
+// ps. Tests that assert on the parsing and self-exclusion logic shadow ps on
+// PATH with a fake, and a fake is a brand-new executable that pays costs the
+// real ps does not — a PATH walk, a fork+exec of a shell, and on darwin a
+// first-execution syspolicy check. Under process-creation pressure those costs
+// exceed the production budget and the deadline SIGKILLs the fake, so a test
+// about which rows get filtered fails as "ps enumeration failed: signal:
+// killed" instead (gascity-gs8). Injecting the deadline lets such a test buy
+// enough headroom for its own fixture without touching the production
+// constant, which stays covered by TestChildPIDsReturnsErrorWhenPSHangs.
+func childPIDs(ctx context.Context, parent int) ([]int, error) {
 	cmd := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=")
 	out, err := cmd.Output()
 	if err != nil {

@@ -1,6 +1,7 @@
 package pidutil
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -243,6 +244,18 @@ func TestChildPIDsReturnsErrorWhenPSHangs(t *testing.T) {
 	}
 }
 
+// fakePSEnumTimeout is the enumeration deadline tests give childPIDs when they
+// shadow ps on PATH with a fake. It is deliberately far larger than the
+// production childEnumTimeout: a fake ps is a brand-new executable in a
+// t.TempDir(), so calling it costs a PATH walk, a fork+exec of a shell and, on
+// darwin, a first-execution syspolicy check — costs the real ps never pays.
+// Under the process-creation pressure of the -p=4 test-mac sweep those costs
+// alone exceed a second, and a test asserting on which rows ChildPIDs filters
+// would fail as "ps enumeration failed: signal: killed" (gascity-gs8). The
+// bound stays finite so a genuinely wedged fixture still fails rather than
+// hanging until the go test timeout.
+const fakePSEnumTimeout = 30 * time.Second
+
 // TestChildPIDsExcludesItsOwnEnumerationHelper is a regression test: ps is
 // itself alive, and a child of the caller, at the instant it captures the
 // process table, so an unfiltered ChildPIDs(os.Getpid()) always reports at
@@ -264,12 +277,19 @@ func TestChildPIDsExcludesItsOwnEnumerationHelper(t *testing.T) {
 	}
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 
-	pids, err := ChildPIDs(os.Getpid())
+	// childPIDs, not ChildPIDs: this asserts on the self-exclusion filter, not
+	// on the production enumeration budget, so it must not be gated on whether
+	// this fake fits inside childEnumTimeout. ChildPIDs' own binding of that
+	// constant stays covered by TestChildPIDsReturnsErrorWhenPSHangs.
+	ctx, cancel := context.WithTimeout(context.Background(), fakePSEnumTimeout)
+	defer cancel()
+
+	pids, err := childPIDs(ctx, os.Getpid())
 	if err != nil {
-		t.Fatalf("ChildPIDs(%d): %v", os.Getpid(), err)
+		t.Fatalf("childPIDs(%d): %v", os.Getpid(), err)
 	}
 	if len(pids) != 0 {
-		t.Fatalf("ChildPIDs(%d) = %v, want empty — the only ps row was the enumeration helper's own (self, parent) pair and must be excluded, not reported as a leaked child", os.Getpid(), pids)
+		t.Fatalf("childPIDs(%d) = %v, want empty — the only ps row was the enumeration helper's own (self, parent) pair and must be excluded, not reported as a leaked child", os.Getpid(), pids)
 	}
 }
 
