@@ -348,13 +348,14 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 // without contracts landing is debt, and the next renewal should say so.
 //
 // Since that renewal the acp default-directory composition has been contracted
-// too (TestACPDefaultDirConformance), so seven waivers now share this date. Its
-// renewal verdict — "acp has no short-path socket fallback, so a default-dir
-// proof cannot pass on Darwin" — was measured and did not hold: sockPath hashes
-// the session name to s{8 hex}.sock, which keeps os.TempDir()/gc-acp sockets at
-// 70 bytes there, well inside the 104-byte sun_path cap and independent of name
-// length. Only the WithDir fixture, which nests its own MkdirTemp root, needed
-// the /tmp short-path treatment.
+// too (TestACPDefaultDirConformance), so seven waivers now share this date. The
+// open risk there was Darwin's 104-byte sun_path cap: NewSeamBacked is pinned
+// to os.TempDir()/gc-acp, and on Darwin os.TempDir() is the long /var/folders
+// path, so a default-dir proof looked like it might not fit. Measured, it does:
+// sockPath hashes the session name to s{8 hex}.sock, which lands that socket at
+// 70 bytes, well inside the cap and independent of name length. Only the WithDir
+// fixture, which nests its own MkdirTemp root, needed the /tmp short-path
+// treatment.
 var runtimeWaiverExpiry = time.Date(2026, time.August, 26, 0, 0, 0, 0, time.UTC)
 
 func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {

@@ -48,11 +48,14 @@ func TestACPConformance(t *testing.T) {
 // concurrent runs on one machine from colliding there. Isolating the directory
 // is deliberately NOT done here: that is the WithDir proof that already exists.
 //
-// Only the fakeacp binary comes from the shared fixture; its short-path root
-// (see prepareACPConformanceFixture) is irrelevant to this test, because the
-// hashed sockKey keeps os.TempDir()/gc-acp/s{8 hex}.sock at 70 bytes on Darwin
-// — well inside that platform's 104-byte sun_path cap, and independent of how
-// long the session name is.
+// The fixture is per-test, not shared with TestACPConformance, because
+// prepareACPConformanceFixture registers its cleanup on the owning *testing.T:
+// one package-level fixture would let whichever test finished first delete the
+// fakeacp binary out from under the other. Only the binary is used here — the
+// fixture's Darwin short-path root is irrelevant to this test, because the
+// hashed sockKey keeps os.TempDir()/gc-acp/s{8 hex}.sock at 70 bytes there,
+// well inside that platform's 104-byte sun_path cap and independent of how long
+// the session name is.
 func TestACPDefaultDirConformance(t *testing.T) {
 	var fixture acpConformanceFixture
 	var counter int64
