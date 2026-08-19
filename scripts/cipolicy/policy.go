@@ -19,7 +19,7 @@ const (
 	// approximating shell semantics: any execution change requires explicit
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
-	expectedCITriggersHash       = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
+	expectedCITriggersHash = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
 	// reviewed delta (merge of upstream v1.4.1 into edge-integration): upstream's
 	// BD_VERSION v1.1.0 -> v1.2.2 matrix bump, PLUS the three CI customizations this
 	// fork already carried on edge-integration and deliberately retains:
