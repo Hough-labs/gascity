@@ -542,6 +542,50 @@ fast unit-only baseline; the integration contribution comes from the
 shard-specific `coverage.integration-*.txt` profiles and their matching
 Codecov flags.
 
+#### `cmd/gc` is sharded out of the default `make test` sweep
+
+`go test`'s `-timeout` is a per-test-binary deadline, not a per-invocation one,
+so a single oversized package can fail the whole sweep on its own. `cmd/gc` was
+that package: its fast-unit binary measured 804-863s solo on quiet hosts —
+89-96% of the sweep's 15m budget — and crossed the deadline at 903s once the
+sweep's own `-p=4` contention was added. `make test` therefore failed on a clean
+checkout, and because the deadline panic dumps whichever test happened to be in
+flight, every occurrence accused a different innocent test and read as a flake
+in it rather than as a package budget problem (gascity-cgh).
+
+`make test` now sweeps `$(UNIT_PKGS_NONCMDGC)` — every unit package except
+`cmd/gc` — and then runs `cmd/gc` as `CMD_GC_UNIT_TOTAL` (default 6) shards
+through `scripts/test-go-test-shard`, each with its own 15m budget.
+
+Sharding, not a bigger deadline, is what makes this survive load. Measured on
+one Darwin host at load average ~40-50, back to back:
+
+| Shape | Result |
+| --- | --- |
+| `cmd/gc` as one binary, 15m budget | timed out at 903s |
+| `cmd/gc` as one binary, 25m budget | timed out at 1504s |
+| `cmd/gc` as 6 shards, 15m each | shard 1 285.6s, shard 2 424.2s — inside budget |
+
+Raising the deadline does not converge: the single binary blew a 25m budget too.
+Sharding changes the exponent instead of the constant — each shard carries ~1/6
+of the package, so adding tests to `cmd/gc` now moves six numbers a sixth as
+fast rather than walking one binary toward one cliff. The shards pay no
+throughput penalty for this, because only ~1.7% of `cmd/gc`'s tests call
+`t.Parallel()` (137 call sites across 8209 top-level tests); there is almost no
+intra-package overlap for a split to lose.
+
+The shard loop is sequential on purpose. Only one `cmd/gc` test binary is ever
+live, which is strictly less concurrent than the old sweep (where `cmd/gc` ran
+alongside up to three other packages), so the gate cannot reproduce the
+shared-host contention failures that concurrent `cmd/gc` shards show under
+`make test-cmd-gc-process-parallel` (gascity-4h5, gascity-4nv). The trade is
+wall-clock: `cmd/gc` no longer overlaps the rest of the sweep. Use
+`make test-fast-parallel` when you want the same coverage with the shards fanned
+out and are willing to accept that contention.
+
+`make test-mac` shares the same `$(UNIT_PKGS_NONCMDGC)` list and still leaves
+`cmd/gc` entirely to the Mac sharded CI matrix job.
+
 ### Cross-category runners, timing, and resource isolation
 
 For broad local runs, prefer the repo's sharded wrappers over raw `go test`

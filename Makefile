@@ -397,6 +397,16 @@ test-ci-policy:
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/cipolicy
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts
 
+# UNIT_PKGS_NONCMDGC is every unit package except cmd/gc (formerly MAC_UNIT_PKGS,
+# which was Mac-only). cmd/gc is excluded from every unit sweep because its
+# fast-unit test binary alone runs ~14.4 minutes; both `test` and `test-mac`
+# below cover it through the per-package shard runner instead.
+UNIT_PKGS_NONCMDGC = $(shell go list ./... | grep -v '/cmd/gc$$')
+
+# CMD_GC_UNIT_TOTAL is how many ways `test` splits the cmd/gc fast-unit suite.
+# Matches CMD_GC_COVER_TOTAL so the two sharded cmd/gc paths stay comparable.
+CMD_GC_UNIT_TOTAL ?= 6
+
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
 ## `make test-cmd-gc-process` locally and the CI `cmd/gc process suite` job.
@@ -405,16 +415,47 @@ test-ci-policy:
 ## reports actual test results instead of hanging after PASS while Go computes
 ## cache input hashes over local working files.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
+##
+## cmd/gc runs as CMD_GC_UNIT_TOTAL sequential shards rather than inside the
+## sweep (gascity-cgh). `-timeout` is a per-test-binary deadline, so one
+## oversized package can fail the whole sweep by itself: the cmd/gc fast-unit
+## binary measured 804-863s solo on quiet hosts — 89-96% of the sweep's 15m
+## budget — and crossed the deadline at 903s under the sweep's own -p=4
+## contention. `make test` then failed on a clean tree, and because the deadline
+## panic names whichever test was in flight, each occurrence accused a different
+## innocent test and read as a flake in it.
+##
+## A bigger deadline does not converge. Measured back to back on one Darwin host
+## at load average ~40-50: cmd/gc as a single binary timed out at 903s against
+## 15m AND at 1504s against 25m, while the same package as 6 shards ran 285.6s
+## (shard 1) and 424.2s (shard 2), both inside budget. Sharding moves the
+## exponent, not the constant — each shard carries ~1/6 of the package, so new
+## tests move six numbers a sixth as fast instead of walking one binary toward
+## one cliff. It costs no throughput here: only ~1.7% of cmd/gc's tests call
+## t.Parallel() (137 sites across 8209 top-level tests), so a split loses almost
+## no intra-package overlap.
+##
+## Shards get 15m each, not the 10m of test-cover-cmdgc-shard: that target runs
+## on dedicated CI runners, while this one is the local and refinery gate and
+## runs on hosts carrying a live city, where 10m left the slowest measured shard
+## only 1.4x of headroom. A generous per-shard deadline is free when green; the
+## shard is what bounds the work.
+##
+## The loop is deliberately sequential: only one cmd/gc binary is ever live,
+## which is strictly less concurrent than the old sweep, so this gate cannot
+## reproduce the shared-host contention that makes concurrent cmd/gc shards
+## flake (gascity-4h5, gascity-4nv). The trade is wall clock — cmd/gc no longer
+## overlaps the sweep. `make test-fast-parallel` fans the shards out instead.
 test: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
-
-# MAC_UNIT_PKGS excludes cmd/gc from the Mac unit sweep; cmd/gc runs
-# sharded via the mac-cmd-gc-process CI matrix job instead.
-MAC_UNIT_PKGS = $(shell go list ./... | grep -v '/cmd/gc$$')
+	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m $(UNIT_PKGS_NONCMDGC)
+	@for s in $$(seq 1 $(CMD_GC_UNIT_TOTAL)); do \
+		$(TEST_ENV) GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=15m \
+		./scripts/test-go-test-shard ./cmd/gc "$$s" $(CMD_GC_UNIT_TOTAL) || exit 1; \
+	done
 
 ## test-mac: Mac unit sweep with cmd/gc excluded; cmd/gc covered by the Mac sharded job.
 test-mac: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(MAC_UNIT_PKGS)
+	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(UNIT_PKGS_NONCMDGC)
 
 LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 
