@@ -31,27 +31,27 @@ func sessionBranchRepo(t *testing.T) (rigPath, worktreesRoot string) {
 	worktreesRoot = filepath.Join(root, "city", ".gc", "worktrees")
 
 	seed := filepath.Join(root, "seed")
-	runSessionBranchGit(t, root, "init", "--bare", origin)
-	runSessionBranchGit(t, root, "init", seed)
-	runSessionBranchGit(t, seed, "config", "user.name", "Session Branch Test")
-	runSessionBranchGit(t, seed, "config", "user.email", "session-branch@example.invalid")
-	runSessionBranchGit(t, seed, "checkout", "-b", "main")
+	doctorRunGit(t, root, "init", "--bare", origin)
+	doctorRunGit(t, root, "init", seed)
+	doctorRunGit(t, seed, "config", "user.name", "Session Branch Test")
+	doctorRunGit(t, seed, "config", "user.email", "session-branch@example.invalid")
+	doctorRunGit(t, seed, "checkout", "-b", "main")
 	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("stale\n"), 0o600); err != nil {
 		t.Fatalf("write seed file: %v", err)
 	}
-	runSessionBranchGit(t, seed, "add", "README.md")
-	runSessionBranchGit(t, seed, "commit", "-m", "stale mainline")
-	runSessionBranchGit(t, seed, "checkout", "-b", "edge-integration")
+	doctorRunGit(t, seed, "add", "README.md")
+	doctorRunGit(t, seed, "commit", "-m", "stale mainline")
+	doctorRunGit(t, seed, "checkout", "-b", "edge-integration")
 	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("current\n"), 0o600); err != nil {
 		t.Fatalf("write seed file: %v", err)
 	}
-	runSessionBranchGit(t, seed, "commit", "-am", "current mainline")
-	runSessionBranchGit(t, seed, "remote", "add", "origin", origin)
-	runSessionBranchGit(t, seed, "push", "origin", "main", "edge-integration")
+	doctorRunGit(t, seed, "commit", "-am", "current mainline")
+	doctorRunGit(t, seed, "remote", "add", "origin", origin)
+	doctorRunGit(t, seed, "push", "origin", "main", "edge-integration")
 
-	runSessionBranchGit(t, root, "clone", origin, rigPath)
-	runSessionBranchGit(t, rigPath, "config", "user.name", "Session Branch Test")
-	runSessionBranchGit(t, rigPath, "config", "user.email", "session-branch@example.invalid")
+	doctorRunGit(t, root, "clone", origin, rigPath)
+	doctorRunGit(t, rigPath, "config", "user.name", "Session Branch Test")
+	doctorRunGit(t, rigPath, "config", "user.email", "session-branch@example.invalid")
 	return rigPath, worktreesRoot
 }
 
@@ -60,16 +60,7 @@ func sessionBranchRepo(t *testing.T) (rigPath, worktreesRoot string) {
 func addSessionWorktree(t *testing.T, rigPath, worktreesRoot, branch, upstream string) {
 	t.Helper()
 	wt := filepath.Join(worktreesRoot, "testrig", branch)
-	runSessionBranchGit(t, rigPath, "worktree", "add", wt, "-b", branch, "refs/remotes/origin/"+upstream)
-}
-
-func runSessionBranchGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-	}
+	doctorRunGit(t, rigPath, "worktree", "add", wt, "-b", branch, "refs/remotes/origin/"+upstream)
 }
 
 func TestSessionBranchUpstreamCheck_AllTrackDefault_OK(t *testing.T) {
@@ -127,10 +118,10 @@ func TestSessionBranchUpstreamCheck_TracksStaleMainline_WarnsAdvisory(t *testing
 // on every city.
 func TestSessionBranchUpstreamCheck_IgnoresWorktreesOutsideCityRoot(t *testing.T) {
 	rigPath, worktreesRoot := sessionBranchRepo(t)
-	runSessionBranchGit(t, rigPath, "checkout", "-b", "local-main", "refs/remotes/origin/main")
+	doctorRunGit(t, rigPath, "checkout", "-b", "local-main", "refs/remotes/origin/main")
 
 	outside := filepath.Join(t.TempDir(), "manual")
-	runSessionBranchGit(t, rigPath, "worktree", "add", outside, "-b", "manual-branch", "refs/remotes/origin/main")
+	doctorRunGit(t, rigPath, "worktree", "add", outside, "-b", "manual-branch", "refs/remotes/origin/main")
 
 	c := NewSessionBranchUpstreamCheck(
 		config.Rig{Name: "testrig", Path: rigPath, DefaultBranch: "edge-integration"},
@@ -149,8 +140,8 @@ func TestSessionBranchUpstreamCheck_NoUpstreamIsNotAFinding(t *testing.T) {
 	rigPath, worktreesRoot := sessionBranchRepo(t)
 	wtBranch := "gc-detachedish"
 	wt := filepath.Join(worktreesRoot, "testrig", wtBranch)
-	runSessionBranchGit(t, rigPath, "worktree", "add", wt, "-b", wtBranch, "refs/remotes/origin/edge-integration")
-	runSessionBranchGit(t, rigPath, "branch", "--unset-upstream", wtBranch)
+	doctorRunGit(t, rigPath, "worktree", "add", wt, "-b", wtBranch, "refs/remotes/origin/edge-integration")
+	doctorRunGit(t, rigPath, "branch", "--unset-upstream", wtBranch)
 
 	c := NewSessionBranchUpstreamCheck(
 		config.Rig{Name: "testrig", Path: rigPath, DefaultBranch: "edge-integration"},
@@ -204,11 +195,8 @@ func TestSessionBranchUpstreamCheck_FixRepointsUpstream(t *testing.T) {
 		t.Fatalf("post-fix status = %d (%s), want StatusOK", r.Status, r.Message)
 	}
 
-	out, err := exec.Command("git", "-C", rigPath, "config", "--get", "branch.gc-polecat-abc.merge").Output()
-	if err != nil {
-		t.Fatalf("read repointed upstream: %v", err)
-	}
-	if got := strings.TrimSpace(string(out)); got != "refs/heads/edge-integration" {
+	got := doctorGitOutput(t, rigPath, "config", "--get", "branch.gc-polecat-abc.merge")
+	if got != "refs/heads/edge-integration" {
 		t.Errorf("branch.gc-polecat-abc.merge = %q, want refs/heads/edge-integration", got)
 	}
 }
@@ -219,10 +207,7 @@ func TestSessionBranchUpstreamCheck_FixLeavesBranchTipUntouched(t *testing.T) {
 	rigPath, worktreesRoot := sessionBranchRepo(t)
 	addSessionWorktree(t, rigPath, worktreesRoot, "gc-polecat-abc", "main")
 
-	before, err := exec.Command("git", "-C", rigPath, "rev-parse", "gc-polecat-abc").Output()
-	if err != nil {
-		t.Fatalf("rev-parse before: %v", err)
-	}
+	before := doctorGitOutput(t, rigPath, "rev-parse", "gc-polecat-abc")
 
 	c := NewSessionBranchUpstreamCheck(
 		config.Rig{Name: "testrig", Path: rigPath, DefaultBranch: "edge-integration"},
@@ -232,12 +217,9 @@ func TestSessionBranchUpstreamCheck_FixLeavesBranchTipUntouched(t *testing.T) {
 		t.Fatalf("Fix: %v", err)
 	}
 
-	after, err := exec.Command("git", "-C", rigPath, "rev-parse", "gc-polecat-abc").Output()
-	if err != nil {
-		t.Fatalf("rev-parse after: %v", err)
-	}
-	if string(before) != string(after) {
-		t.Errorf("branch tip moved: %q -> %q", strings.TrimSpace(string(before)), strings.TrimSpace(string(after)))
+	after := doctorGitOutput(t, rigPath, "rev-parse", "gc-polecat-abc")
+	if before != after {
+		t.Errorf("branch tip moved: %q -> %q", before, after)
 	}
 }
 
@@ -264,7 +246,7 @@ func TestSessionBranchUpstreamCheck_NoAgentWorktrees_ReportsZeroScanned(t *testi
 func TestSessionBranchUpstreamCheck_DetachedWorktreeSkipped(t *testing.T) {
 	rigPath, worktreesRoot := sessionBranchRepo(t)
 	detached := filepath.Join(worktreesRoot, "testrig", "detached")
-	runSessionBranchGit(t, rigPath, "worktree", "add", "--detach", detached, "refs/remotes/origin/main")
+	doctorRunGit(t, rigPath, "worktree", "add", "--detach", detached, "refs/remotes/origin/main")
 
 	c := NewSessionBranchUpstreamCheck(
 		config.Rig{Name: "testrig", Path: rigPath, DefaultBranch: "edge-integration"},

@@ -2136,7 +2136,8 @@ func writeDoctorRuntimeState(t *testing.T, fs fsys.FS, dir, port string) {
 	if err := fs.MkdirAll(runtimeDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	state := fmt.Sprintf(`{"running":true,"pid":%d,"port":%s,"data_dir":%q}`,
+	state := fmt.Sprintf(
+		`{"running":true,"pid":%d,"port":%s,"data_dir":%q}`,
 		os.Getpid(),
 		port,
 		filepath.Join(dir, ".beads", "dolt"),
@@ -3407,7 +3408,8 @@ func TestDoltConfigCheck_UsesTrustedCityRuntimeDir(t *testing.T) {
 		t.Fatalf("Listen: %v", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	state := fmt.Sprintf(`{"running":true,"pid":%d,"port":%d,"data_dir":%q}`,
+	state := fmt.Sprintf(
+		`{"running":true,"pid":%d,"port":%d,"data_dir":%q}`,
 		os.Getpid(),
 		ln.Addr().(*net.TCPAddr).Port,
 		filepath.Join(dir, ".beads", "dolt"),
@@ -3926,4 +3928,25 @@ func TestDoltVersionCheck_CanFixFalse(t *testing.T) {
 	if c.CanFix() {
 		t.Error("CanFix() = true, want false")
 	}
+}
+
+// doctorGitOutput runs a git command in dir and returns its trimmed stdout,
+// failing the test on error. It is the read-side companion to doctorRunGit,
+// which discards output.
+//
+// Both live in files that already construct subprocesses, deliberately. The
+// test-resource census (test/test-resources.toml) ratchets the number of test
+// files that build exec.Cmd values, so package-wide git plumbing is funneled
+// through this pair rather than re-inlined in each new check's test file.
+func doctorGitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, stderr.String())
+	}
+	return strings.TrimSpace(string(out))
 }

@@ -25,6 +25,16 @@ version = 2
 # The production Darwin lsof call site is NOT counted here; the census scans
 # *_test.go only (census.go scanFiles).
 #
+# gascity-rwu is +1 call and +0 files on subprocess, in every scope that counts
+# it. The call site is doctorGitOutput in internal/doctor/checks_test.go, the
+# read-side companion to the existing doctorRunGit: it returns trimmed stdout so
+# a test can read git state back independently of the code under test.
+# checks_session_branch_upstream_test.go, which the helper was added for, builds
+# real git repositories and worktrees but constructs no exec.Cmd of its own —
+# every git call it makes routes through doctorRunGit or doctorGitOutput. That
+# is why files does not move: subprocess construction stayed inside the files
+# that already did it, which is what the file ratchet is measuring.
+#
 # The ga-80po0c.* owner_bead ids below are all dangling (gc doctor: 8 findings,
 # tracked by gascity-82e). They are left untouched deliberately: re-pointing
 # only the rows this increment happens to touch would split ga-80po0c.2.1,
@@ -37,13 +47,13 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 546
+baseline_calls = 547
 baseline_files = 165
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
 invariant = "tracked test source totals remain visible as audit evidence"
-resource_owner = "ga-80po0c.2 owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess)"
+resource_owner = "ga-80po0c.2 owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit)"
 migration_target = "P0.4a"
 expires = "2026-10-01"
 
@@ -78,13 +88,13 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 407
+baseline_calls = 408
 baseline_files = 114
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
 invariant = "untagged subprocess call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each process-owning test removes or replaces its source call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess)"
+resource_owner = "each process-owning test removes or replaces its source call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit)"
 migration_target = "D1/D2/D5/D6/E6"
 expires = "2026-10-01"
 
@@ -360,13 +370,13 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 402
+baseline_calls = 403
 baseline_files = 111
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"
 invariant = "untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners remove or replace each process call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess)"
+resource_owner = "non-Medium lexical owners remove or replace each process call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit)"
 migration_target = "D1/D2/D5/D6/E6"
 expires = "2026-10-01"
 
