@@ -908,7 +908,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	recorder := events.Discard
 	var eventProv events.Provider // nil when events disabled or FileRecorder fails
 	if fr, err := newFileEventsRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, stderr); err == nil {
+		filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, stderr,
+	); err == nil {
 		recorder = fr
 		eventProv = fr
 	}
@@ -1023,7 +1024,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
 		PoolDesiredCounts(ComputePoolDesiredStates(
-			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts)),
+			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts,
+		)),
 		sessionBeads,
 		dsResult.PoolScaleCheckPartialTemplates,
 	)
@@ -1367,13 +1369,31 @@ func resolveAgentDir(cityPath, dir string) (string, error) {
 func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) SessionSetupContext {
 	ctx := workdirutil.PathContextForQualifiedName(cityPath, cityName, qualifiedName, *a, rigs)
 	return SessionSetupContext{
-		Agent:     qualifiedName,
-		AgentBase: ctx.AgentBase,
-		Rig:       ctx.Rig,
-		RigRoot:   ctx.RigRoot,
-		CityRoot:  cityPath,
-		CityName:  cityName,
+		Agent:         qualifiedName,
+		AgentBase:     ctx.AgentBase,
+		Rig:           ctx.Rig,
+		RigRoot:       ctx.RigRoot,
+		CityRoot:      cityPath,
+		CityName:      cityName,
+		DefaultBranch: rigDefaultBranchForName(ctx.Rig, rigs),
 	}
+}
+
+// rigDefaultBranchForName returns the recorded default_branch for the named
+// rig, or "" when the agent is city-scoped or the rig has none. Config-only by
+// design: this runs on the reconciler's per-agent path, where a git subprocess
+// per agent per pass would be a real cost, and where a probe would also
+// reintroduce the origin/HEAD drift this value exists to replace.
+func rigDefaultBranchForName(rigName string, rigs []config.Rig) string {
+	if rigName == "" {
+		return ""
+	}
+	for i := range rigs {
+		if rigs[i].Name == rigName {
+			return rigs[i].EffectiveDefaultBranch()
+		}
+	}
+	return ""
 }
 
 func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {

@@ -3296,7 +3296,13 @@ type Agent struct {
 	// SessionSetup is a list of shell commands run after session creation.
 	// Each command is a template string supporting placeholders:
 	// {{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},
-	// {{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.
+	// {{.CityRoot}}, {{.CityName}}, {{.WorkDir}}, {{.ConfigDir}},
+	// {{.DefaultBranch}}.
+	// {{.DefaultBranch}} is the rig's recorded default_branch and expands
+	// empty for city-scoped agents and for rigs that have not set one; it
+	// is read from city.toml and never probed, so a provisioning script
+	// that needs a start point gets the branch the city merges into rather
+	// than whatever refs/remotes/origin/HEAD happens to point at.
 	// Commands run in gc's process (not inside the agent session) via sh -c.
 	// On failure, the last 4 KiB of the command's stdout/stderr is included
 	// in the error and may appear in controller and reconciler logs; avoid

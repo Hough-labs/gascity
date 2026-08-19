@@ -217,6 +217,24 @@ type SessionSetupContext struct {
 	CityName  string // workspace name
 	WorkDir   string // agent working directory
 	ConfigDir string // source directory where agent config was defined
+	// DefaultBranch is the rig's configured mainline branch (city.toml
+	// `default_branch`), or "" for city-scoped agents and for rigs that
+	// have not recorded one.
+	//
+	// It exists so a pre_start worktree provisioner can start an agent's
+	// session branch from the branch the city actually merges into. The
+	// only alternative reachable from a shell script is
+	// `git symbolic-ref refs/remotes/origin/HEAD`, which is a per-clone
+	// pointer that drifts independently of this value; a rig whose
+	// default_branch is "edge-integration" while origin/HEAD still says
+	// "main" produced session branches tracking refs/heads/main, and one
+	// `git pull --rebase` replayed the agent's work onto a stale base
+	// (gascity-rwu).
+	//
+	// Empty means "gc does not know", never "main": callers must be able
+	// to tell an unrecorded default from a real one before deciding
+	// whether to fall back to a probe.
+	DefaultBranch string
 }
 
 // expandSessionSetup expands Go text/template strings in session_setup commands.
