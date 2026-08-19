@@ -36,6 +36,35 @@ func TestACPConformance(t *testing.T) {
 	})
 }
 
+// TestACPDefaultDirConformance runs the same full Provider conformance suite
+// against the constructor cmd/gc's "acp" registration calls when no city path
+// is present: NewSeamBacked, which keeps its control sockets and sidecar meta
+// files in the shared os.TempDir()/gc-acp directory rather than an injected
+// one. TestACPConformance proves only the WithDir sibling, so nothing exercised
+// that composition.
+//
+// That directory is process-shared by design, so session names carry the PID —
+// the suite only asserts membership of its own names, and PID-scoped names keep
+// concurrent runs on one machine from colliding there. Isolating the directory
+// is deliberately NOT done here: that is the WithDir proof that already exists.
+//
+// Only the fakeacp binary comes from the shared fixture; its short-path root
+// (see prepareACPConformanceFixture) is irrelevant to this test, because the
+// hashed sockKey keeps os.TempDir()/gc-acp/s{8 hex}.sock at 70 bytes on Darwin
+// — well inside that platform's 104-byte sun_path cap, and independent of how
+// long the session name is.
+func TestACPDefaultDirConformance(t *testing.T) {
+	var fixture acpConformanceFixture
+	var counter int64
+
+	runtimetest.RunProviderTests(t, func(caseT *testing.T) (runtime.Provider, runtime.Config, string) {
+		return NewSeamBacked(Config{}), runtime.Config{
+			Command: acpConformanceCommand(caseT, t, &fixture),
+			WorkDir: caseT.TempDir(),
+		}, fmt.Sprintf("gc-acp-default-%d-%d", os.Getpid(), atomic.AddInt64(&counter, 1))
+	})
+}
+
 func acpConformanceDir(caseT, ownerT *testing.T, fixture *acpConformanceFixture) string {
 	caseT.Helper()
 	if err := prepareACPConformanceFixture(ownerT, fixture); err != nil {

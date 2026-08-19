@@ -180,9 +180,14 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"acp", "exact:acp", nil,
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
-				"NewSeamBacked always uses shared os.TempDir()/gc-acp state; the WithDir proof does not exercise that composition",
+				"internal/runtime/acp/conformance_test.go",
+				"TestACPDefaultDirConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime/acp", "acpConformanceCommand"),
+				SymbolRef{ImportPath: "os", Name: "Getpid"},
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"),
@@ -341,6 +346,15 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 // hide a stalled track behind a green run; a short one puts the question back
 // in front of the owner while the context is still fresh. Renewing again
 // without contracts landing is debt, and the next renewal should say so.
+//
+// Since that renewal the acp default-directory composition has been contracted
+// too (TestACPDefaultDirConformance), so seven waivers now share this date. Its
+// renewal verdict — "acp has no short-path socket fallback, so a default-dir
+// proof cannot pass on Darwin" — was measured and did not hold: sockPath hashes
+// the session name to s{8 hex}.sock, which keeps os.TempDir()/gc-acp sockets at
+// 70 bytes there, well inside the 104-byte sun_path cap and independent of name
+// length. Only the WithDir fixture, which nests its own MkdirTemp root, needed
+// the /tmp short-path treatment.
 var runtimeWaiverExpiry = time.Date(2026, time.August, 26, 0, 0, 0, 0, time.UTC)
 
 func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
