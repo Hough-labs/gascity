@@ -30,6 +30,16 @@ const (
 	hookClaimReasonStaleSession  = "stale_session"
 )
 
+// Work-action reasons for the same result contract. Only hookClaimReasonClaimed
+// and hookClaimReasonReadyAssignment involve a claim mutation;
+// hookClaimReasonExistingAssignment adopts work this session already holds
+// in_progress and deliberately writes nothing.
+const (
+	hookClaimReasonClaimed            = "claimed"
+	hookClaimReasonExistingAssignment = "existing_assignment"
+	hookClaimReasonReadyAssignment    = "ready_assignment"
+)
+
 var hookClaimMutationTimeout = 10 * time.Second
 
 var hookClaimCommandRunnerWithEnvContext = beads.ExecCommandRunnerWithEnvContext
@@ -167,7 +177,26 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	}
 
 	if result, bead, ok := hookClaimExistingOrAssigned(candidates, *opts); ok {
-		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, stdout, stderr)}
+		claimed, outcome := adoptHookClaimCandidate(result, bead, *opts, *ops, dir, stderr)
+		switch outcome {
+		case hookAdoptPublish:
+			result.BeadID = claimed.ID
+			result.Assignee = claimed.Assignee
+			result.Route = hookClaimRoute(claimed)
+			if strings.TrimSpace(result.Assignee) == "" {
+				result.Assignee = opts.Assignee
+			}
+			return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, *opts, *ops, dir, stdout, stderr)}
+		case hookAdoptReadbackFailed:
+			return hookClaimResult{terminal: true, code: 1}
+		case hookAdoptLost:
+			// Another claimant holds it now. Fall through: a different candidate in
+			// this same batch may still be freshly claimable.
+		case hookAdoptErrored:
+			res := claimFirstEligibleHookCandidate(candidates, *opts, *ops, dir, stdout, stderr)
+			res.claimsErrored = true
+			return res
+		}
 	}
 
 	return claimFirstEligibleHookCandidate(candidates, *opts, *ops, dir, stdout, stderr)
@@ -252,19 +281,13 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			reportHookClaimRejected(candidate, claimed, opts, ops)
 			continue
 		}
-		if len(candidate.Metadata) > 0 {
-			// bd update --claim can return a partial metadata projection. Retain
-			// candidate fields while preferring values returned by the mutation.
-			metadata := maps.Clone(candidate.Metadata)
-			maps.Copy(metadata, claimed.Metadata)
-			claimed.Metadata = metadata
-		}
+		claimed.Metadata = mergeHookClaimMetadata(candidate, claimed)
 		result := hookClaimJSONResult{
 			SchemaVersion: "1",
 			OK:            true,
 			Command:       hookClaimCommandName,
 			Action:        "work",
-			Reason:        "claimed",
+			Reason:        hookClaimReasonClaimed,
 			BeadID:        claimed.ID,
 			Assignee:      claimed.Assignee,
 			Route:         hookClaimRoute(claimed),
@@ -279,6 +302,75 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	}
 
 	return hookClaimResult{claimsErrored: claimsErrored}
+}
+
+// mergeHookClaimMetadata reconciles the metadata a claim mutation returned with
+// the metadata the work query reported. bd update --claim can return a partial
+// projection, so the discovered candidate's fields are retained and the
+// mutation's values win where both are present. Losing them here is not
+// cosmetic: writeHookClaimWorkResultForBead reads gc.root_bead_id and
+// gc.continuation_group off this map to drive continuation pre-assignment.
+func mergeHookClaimMetadata(candidate, claimed beads.Bead) map[string]string {
+	if len(candidate.Metadata) == 0 {
+		return claimed.Metadata
+	}
+	metadata := maps.Clone(candidate.Metadata)
+	maps.Copy(metadata, claimed.Metadata)
+	return metadata
+}
+
+// hookAdoptOutcome is what adoptHookClaimCandidate decided about a bead that
+// hookClaimExistingOrAssigned matched to this session's identity.
+type hookAdoptOutcome int
+
+const (
+	// hookAdoptPublish: the bead is this session's to work and is in_progress —
+	// publish it as the claim result.
+	hookAdoptPublish hookAdoptOutcome = iota
+	// hookAdoptLost: the adopting claim reported a different live claimant. The
+	// bead must not be published; a rejection event has been emitted.
+	hookAdoptLost
+	// hookAdoptErrored: the adopting claim mutation failed. Nothing was published
+	// and the failure must surface as claims_errored rather than idle no_work.
+	hookAdoptErrored
+	// hookAdoptReadbackFailed: the mutation committed but its canonical readback
+	// failed. The assignment is live, so the caller must stop rather than drain.
+	hookAdoptReadbackFailed
+)
+
+// adoptHookClaimCandidate makes an adopted candidate safe to publish as work.
+//
+// An existing_assignment candidate is already in_progress for this session and
+// needs no write. A ready_assignment candidate is not: it is status=open with
+// this session's assignee already set — the shape preassignHookContinuationGroup
+// leaves on every continuation sibling, because hookAssignContinuationWithBdStore
+// writes the assignee alone. Publishing that bead unflipped hands a worker a bead
+// whose post-claim ownership gate refuses it (assignee matches, status does not),
+// which drain-acks the session into a respawn loop against work nothing will
+// advance. So adoption performs the same atomic claim a fresh candidate gets;
+// bd update --claim is idempotent when the bead is already assigned to the
+// claimant, and still refuses when it is not. See gascity-hyl.
+func adoptHookClaimCandidate(result hookClaimJSONResult, candidate beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (beads.Bead, hookAdoptOutcome) {
+	if result.Reason != hookClaimReasonReadyAssignment {
+		return candidate, hookAdoptPublish
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
+	if err != nil {
+		if ok {
+			fmt.Fprintf(stderr, "gc hook --claim: claimed %s but loading canonical bead failed: %v\n", candidate.ID, err) //nolint:errcheck
+			return candidate, hookAdoptReadbackFailed
+		}
+		fmt.Fprintf(stderr, "gc hook --claim: adopting %s: %v\n", candidate.ID, err) //nolint:errcheck
+		return candidate, hookAdoptErrored
+	}
+	if !ok {
+		reportHookClaimRejected(candidate, claimed, opts, ops)
+		return candidate, hookAdoptLost
+	}
+	claimed.Metadata = mergeHookClaimMetadata(candidate, claimed)
+	return claimed, hookAdoptPublish
 }
 
 // hookCandidateClaimable reports whether a work-query candidate is eligible for a
@@ -313,7 +405,7 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 				OK:            true,
 				Command:       hookClaimCommandName,
 				Action:        "work",
-				Reason:        "existing_assignment",
+				Reason:        hookClaimReasonExistingAssignment,
 				BeadID:        candidate.ID,
 				Assignee:      candidate.Assignee,
 				Route:         hookClaimRoute(candidate),
@@ -332,7 +424,7 @@ func hookClaimExistingOrAssigned(candidates []beads.Bead, opts hookClaimOptions)
 				OK:            true,
 				Command:       hookClaimCommandName,
 				Action:        "work",
-				Reason:        "ready_assignment",
+				Reason:        hookClaimReasonReadyAssignment,
 				BeadID:        candidate.ID,
 				Assignee:      candidate.Assignee,
 				Route:         hookClaimRoute(candidate),

@@ -217,3 +217,149 @@ func TestDoHookClaimSkipsBlockedRoutedHeadAndClaimsReadyBehindIt(t *testing.T) {
 		t.Fatalf("claimedBead = %q, want ready-behind (blocked-head must be skipped)", claimedBead)
 	}
 }
+
+// A bead that reaches the ready_assignment adoption path is open and already
+// assigned to this session — the shape preassignHookContinuationGroup leaves on
+// every continuation sibling, since it writes the assignee alone. Handing it back
+// as work without flipping it to in_progress publishes a bead that a worker's
+// post-claim ownership gate is right to refuse (assignee matches, status does
+// not), which drain-acks the session into a respawn loop against a bead nothing
+// will ever move. The adoption must perform the same atomic claim a fresh
+// candidate gets. See gascity-hyl.
+func TestDoHookClaimFlipsReadyAssignmentToInProgress(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[{"id":"step-2","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"pool-workflow"}}]`, nil
+	}
+	var claimed []string
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimed = append(claimed, beadID)
+			return beads.Bead{
+				ID:       beadID,
+				Status:   "in_progress",
+				Assignee: assignee,
+				Metadata: map[string]string{"gc.routed_to": "worker", "gc.root_bead_id": "root-1", "gc.continuation_group": "pool-workflow"},
+			}, true, nil
+		},
+		ListContinuation: func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+			return nil, nil
+		},
+		DrainAck: func(io.Writer) error {
+			t.Fatal("drain acknowledged for adoptable ready work")
+			return nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		DrainAck:           true,
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(ready assignment) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(claimed, ","); got != "step-2" {
+		t.Fatalf("claim attempts = %q, want the adopted bead step-2 to be claimed", got)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "ready_assignment" || result.BeadID != "step-2" {
+		t.Fatalf("unexpected claim result: %+v", result)
+	}
+	if result.Assignee != "worker-1" {
+		t.Fatalf("result assignee = %q, want worker-1", result.Assignee)
+	}
+}
+
+// Adoption is a claim, so it can lose. When the flip reports another claimant won,
+// the bead must not be published as this session's work — publishing it would hand
+// out a bead this session does not own.
+func TestDoHookClaimDoesNotPublishReadyAssignmentLostToAnotherClaimant(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[{"id":"step-2","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	drained := false
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "worker-2"}, false, nil
+		},
+		ListContinuation: func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+			return nil, nil
+		},
+		DrainAck: func(io.Writer) error {
+			drained = true
+			return nil
+		},
+		EmitClaimRejected: func(string, string, string) {},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		DrainAck:           true,
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(lost adoption) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !drained {
+		t.Fatal("lost adoption did not drain")
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "drain" {
+		t.Fatalf("action = %q, want drain; result=%+v", result.Action, result)
+	}
+}
+
+// A failed adoption write is an operational fault, not an idle store. It must
+// drain with claims_errored so the write failure stays visible rather than being
+// laundered into no_work.
+func TestDoHookClaimReportsClaimsErroredWhenReadyAssignmentFlipFails(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[{"id":"step-2","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			return beads.Bead{}, false, errors.New("store write failed")
+		},
+		ListContinuation: func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+			return nil, nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		DrainAck:           true,
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(failed adoption) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != hookClaimReasonClaimsErrored {
+		t.Fatalf("result = %+v, want drain/claims_errored", result)
+	}
+}
