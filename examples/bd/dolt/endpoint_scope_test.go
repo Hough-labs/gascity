@@ -433,3 +433,37 @@ func TestStatusListsPinnedRigWithoutNameColumn(t *testing.T) {
 		t.Fatalf("pinned rig listed without a usable name; want the path basename; got:\n%s", out)
 	}
 }
+
+// TestHealthJSONExternalEndpointHasNoLocalDataDir pins the honest-null rule:
+// for a configured external endpoint GC owns no local store, so server.data_dir
+// must be null rather than this city's managed directory. Emitting the local
+// path there would name the wrong store — the exact error class this change
+// exists to remove.
+func TestHealthJSONExternalEndpointHasNoLocalDataDir(t *testing.T) {
+	cityPath := t.TempDir()
+
+	binDir := t.TempDir()
+	writeFakeGCRigList(t, binDir, map[string]string{})
+	writeFailingDolt(t, binDir)
+
+	out, err := runHealthForScope(t, cityPath, "superlzy-dolt", "3306", binDir, "--json")
+	if err != nil {
+		t.Fatalf("health --json exited nonzero: %v\n%s", err, out)
+	}
+	var report struct {
+		Server struct {
+			Host     string  `json:"host"`
+			External bool    `json:"external"`
+			DataDir  *string `json:"data_dir"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("health --json emitted invalid JSON: %v\n%s", err, out)
+	}
+	if !report.Server.External || report.Server.Host != "superlzy-dolt" {
+		t.Fatalf("health did not classify the endpoint as external: %+v\n%s", report.Server, out)
+	}
+	if report.Server.DataDir != nil {
+		t.Fatalf("server.data_dir = %q for an external endpoint; want null — that path is this city's managed store, not the remote one\n%s", *report.Server.DataDir, out)
+	}
+}

@@ -557,6 +557,17 @@ fi
 # Output.
 timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+# server.data_dir names the store this report describes. For a configured
+# external endpoint GC owns no local store — $data_dir is this city's managed
+# directory and has nothing to do with the remote server — so emit JSON null
+# rather than a path a reader could take for the remote one. Naming the wrong
+# store is the class of error this whole change exists to remove.
+if [ "$is_external" = true ]; then
+  server_data_dir_json="null"
+else
+  server_data_dir_json="\"$(printf '%s' "$data_dir" | sed 's/\\/\\\\/g; s/"/\\"/g')\""
+fi
+
 if [ "$json_output" = true ]; then
   # Build JSON output. `server.reachable` reports whether the SQL
   # handshake actually succeeded (port listening AND server answering
@@ -583,7 +594,7 @@ if [ "$json_output" = true ]; then
     "pid": $server_pid,
     "host": "$(printf '%s' "$host" | sed 's/\\/\\\\/g; s/"/\\"/g')",
     "port": $GC_DOLT_PORT,
-    "data_dir": "$(printf '%s' "$data_dir" | sed 's/\\/\\\\/g; s/"/\\"/g')",
+    "data_dir": $server_data_dir_json,
     "latency_ms": $server_latency
   },
   "databases": [
