@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -97,17 +96,9 @@ func writeFailingDolt(t *testing.T, dir string) {
 
 func runStatusWithPath(t *testing.T, cityPath, host, port, pathPrefix string) (string, error) {
 	t.Helper()
-	root := repoRoot(t)
-	cmd := exec.Command("sh", filepath.Join(root, statusScript))
-	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "PATH"),
-		"GC_CITY_PATH="+cityPath,
-		"GC_PACK_DIR="+root,
-		"GC_DOLT_HOST="+host,
-		"GC_DOLT_PORT="+port,
-		"PATH="+pathPrefix+string(os.PathListSeparator)+os.Getenv("PATH"),
-	)
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	stdout, stderr, err := runPackScript(t, statusScript, cityPath, pathPrefix,
+		[]string{"GC_DOLT_HOST=" + host, "GC_DOLT_PORT=" + port})
+	return stdout + stderr, err
 }
 
 // TestStatusNamesEndpointAndListsPinnedRigs is the core gascity-0zw guard for
@@ -181,21 +172,14 @@ func TestStatusExternalEndpointNamesItself(t *testing.T) {
 
 func runHealthForScope(t *testing.T, cityPath, host, port, pathPrefix string, args ...string) (string, error) {
 	t.Helper()
-	root := repoRoot(t)
-	cmd := exec.Command("sh", append([]string{filepath.Join(root, healthScript)}, args...)...)
-	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
-		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
-		"GC_CITY_PATH="+cityPath,
-		"GC_PACK_DIR="+root,
-		"GC_DOLT_HOST="+host,
-		"GC_DOLT_PORT="+port,
+	stdout, stderr, err := runPackScript(t, healthScript, cityPath, pathPrefix, []string{
+		"GC_DOLT_HOST=" + host,
+		"GC_DOLT_PORT=" + port,
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
-		"PATH="+pathPrefix+string(os.PathListSeparator)+os.Getenv("PATH"),
-	)
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	}, args...)
+	return stdout + stderr, err
 }
 
 // TestHealthHumanNamesEndpointAndListsPinnedRigs is the gascity-0zw guard for
@@ -321,7 +305,6 @@ func TestHealthJSONMarksUnscannedWhenRigListUnavailable(t *testing.T) {
 // pasted into an escalation must carry the endpoint it came from. The line goes
 // to stderr so query results on stdout stay machine-parseable.
 func TestSQLAnnouncesEndpointOnStderr(t *testing.T) {
-	root := repoRoot(t)
 	binDir := t.TempDir()
 	writeFakeDolt(t, binDir)
 
@@ -329,40 +312,27 @@ func TestSQLAnnouncesEndpointOnStderr(t *testing.T) {
 	t.Cleanup(stop)
 
 	cityPath := t.TempDir()
-	cmd := exec.Command("sh", filepath.Join(root, sqlScript), "-q", "SELECT 1")
-	cmd.Env = append(filteredEnv("PATH",
-		"GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
-		"GC_DOLT_PASSWORD", "GC_DOLT_DATA_DIR",
-		"GC_CITY_PATH", "GC_PACK_DIR",
-	),
-		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"GC_CITY_PATH="+cityPath,
-		"GC_PACK_DIR="+root,
+	stdout, stderr, err := runPackScript(t, sqlScript, cityPath, binDir, []string{
 		"GC_DOLT_HOST=127.0.0.1",
-		"GC_DOLT_PORT="+strconv.Itoa(port),
+		"GC_DOLT_PORT=" + strconv.Itoa(port),
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
-	)
-
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("sql.sh exited non-zero: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}, "-q", "SELECT 1")
+	if err != nil {
+		t.Fatalf("sql.sh exited non-zero: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
 	}
 	want := "127.0.0.1:" + strconv.Itoa(port)
-	if !strings.Contains(stderr.String(), want) {
-		t.Fatalf("sql did not announce the endpoint %q on stderr; stderr:\n%s", want, stderr.String())
+	if !strings.Contains(stderr, want) {
+		t.Fatalf("sql did not announce the endpoint %q on stderr; stderr:\n%s", want, stderr)
 	}
-	if strings.Contains(stdout.String(), want) {
-		t.Fatalf("sql wrote endpoint provenance to stdout; it must not pollute query results:\n%s", stdout.String())
+	if strings.Contains(stdout, want) {
+		t.Fatalf("sql wrote endpoint provenance to stdout; it must not pollute query results:\n%s", stdout)
 	}
 }
 
 // TestLogsAnnouncesEndpointAndLogFile pins scope item 3 for `gc dolt logs`:
 // tailed output pasted into an escalation must name the server whose log it is.
 func TestLogsAnnouncesEndpointAndLogFile(t *testing.T) {
-	root := repoRoot(t)
 	cityPath := t.TempDir()
 
 	stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
@@ -374,27 +344,20 @@ func TestLogsAnnouncesEndpointAndLogFile(t *testing.T) {
 		t.Fatalf("write log: %v", err)
 	}
 
-	cmd := exec.Command("sh", filepath.Join(root, logsScript))
-	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "PATH"),
-		"GC_CITY_PATH="+cityPath,
-		"GC_PACK_DIR="+root,
+	stdout, stderr, err := runPackScript(t, logsScript, cityPath, "", []string{
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT=3311",
-		"PATH="+os.Getenv("PATH"),
-	)
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("logs exited non-zero: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	})
+	if err != nil {
+		t.Fatalf("logs exited non-zero: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
 	}
 	for _, want := range []string{"127.0.0.1:3311", logFile} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Fatalf("logs did not announce %q on stderr; stderr:\n%s", want, stderr.String())
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("logs did not announce %q on stderr; stderr:\n%s", want, stderr)
 		}
 	}
-	if !strings.Contains(stdout.String(), "line one") {
-		t.Fatalf("logs stopped emitting the tailed log on stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, "line one") {
+		t.Fatalf("logs stopped emitting the tailed log on stdout:\n%s", stdout)
 	}
 }
 

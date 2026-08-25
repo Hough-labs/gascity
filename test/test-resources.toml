@@ -35,6 +35,18 @@ version = 2
 # is why files does not move: subprocess construction stayed inside the files
 # that already did it, which is what the file ratchet is measuring.
 #
+# gascity-0zw is +1 call and +0 files on subprocess, in every scope that counts
+# it. The call site is runPackScript in examples/bd/dolt/health_test.go: one
+# hermetic runner for the dolt pack's command scripts, sitting beside the
+# repoRoot / filteredEnv / writeExecutable helpers the package already shares.
+# The endpoint-provenance tests it was added for (endpoint_scope_test.go, nine
+# tests across status/health/sql/logs) construct no exec.Cmd of their own —
+# every pack-script invocation routes through the one helper. Written the
+# obvious way those tests would have been +4 calls and +1 file; consolidating
+# first is why the ratchet moves by one and why files does not move at all.
+# Future pack-script tests should reuse runPackScript rather than add a call
+# site, which is the behaviour the file ratchet is meant to produce.
+
 # The ga-80po0c.* owner_bead ids below are all dangling (gc doctor: 8 findings,
 # tracked by gascity-82e). They are left untouched deliberately: re-pointing
 # only the rows this increment happens to touch would split ga-80po0c.2.1,
@@ -47,13 +59,13 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 547
+baseline_calls = 548
 baseline_files = 165
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
 invariant = "tracked test source totals remain visible as audit evidence"
-resource_owner = "ga-80po0c.2 owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit)"
+resource_owner = "ga-80po0c.2 owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit); +1/+0 on 2026-08-25 owned by gascity-0zw (runPackScript in examples/bd/dolt/health_test.go, the one exec site every dolt pack-script test now routes through)"
 migration_target = "P0.4a"
 expires = "2026-10-01"
 
@@ -88,13 +100,13 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 408
+baseline_calls = 409
 baseline_files = 114
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
 invariant = "untagged subprocess call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each process-owning test removes or replaces its source call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit)"
+resource_owner = "each process-owning test removes or replaces its source call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit); +1/+0 on 2026-08-25 owned by gascity-0zw (runPackScript in examples/bd/dolt/health_test.go, the one exec site every dolt pack-script test now routes through)"
 migration_target = "D1/D2/D5/D6/E6"
 expires = "2026-10-01"
 
@@ -370,13 +382,13 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 403
+baseline_calls = 404
 baseline_files = 111
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"
 invariant = "untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners remove or replace each process call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit)"
+resource_owner = "non-Medium lexical owners remove or replace each process call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit); +1/+0 on 2026-08-25 owned by gascity-0zw (runPackScript in examples/bd/dolt/health_test.go, the one exec site every dolt pack-script test now routes through)"
 migration_target = "D1/D2/D5/D6/E6"
 expires = "2026-10-01"
 

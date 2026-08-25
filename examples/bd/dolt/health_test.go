@@ -1041,6 +1041,39 @@ func writeExecutable(t *testing.T, path, contents string) {
 	}
 }
 
+// runPackScript runs one of the dolt pack's command scripts hermetically and
+// returns its stdout and stderr separately. It lives beside repoRoot /
+// filteredEnv / writeExecutable because it is the same kind of package-wide
+// helper, and because keeping every pack-script invocation behind one
+// exec.Command site is what stops each new script test from adding another
+// one to the subprocess ratchet in test/test-resources.toml.
+//
+// pathPrefix, when non-empty, is prepended to PATH — that is how a test puts
+// stub gc/dolt binaries in front of the real ones. extraEnv is appended last,
+// so a caller can override any base entry. stdout and stderr are captured
+// apart because several callers assert that provenance goes to stderr and
+// never pollutes parseable stdout.
+func runPackScript(t *testing.T, script, cityPath, pathPrefix string, extraEnv []string, args ...string) (string, string, error) {
+	t.Helper()
+	root := repoRoot(t)
+	path := os.Getenv("PATH")
+	if pathPrefix != "" {
+		path = pathPrefix + string(os.PathListSeparator) + path
+	}
+	cmd := exec.Command("sh", append([]string{filepath.Join(root, script)}, args...)...)
+	cmd.Env = append(filteredEnv("PATH"),
+		"PATH="+path,
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+	)
+	cmd.Env = append(cmd.Env, extraEnv...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
+}
+
 func TestHealthScriptProbesConfiguredExternalHost(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
