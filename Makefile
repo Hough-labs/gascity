@@ -446,16 +446,36 @@ CMD_GC_UNIT_TOTAL ?= 6
 ## reproduce the shared-host contention that makes concurrent cmd/gc shards
 ## flake (gascity-4h5, gascity-4nv). The trade is wall clock — cmd/gc no longer
 ## overlaps the sweep. `make test-fast-parallel` fans the shards out instead.
+##
+## Both commands run under scripts/gate-slot-run (gascity-6tr) so this lane
+## takes one of the PUSH_GATE_MAX_CONCURRENT slots instead of piling onto the
+## host uncapped; the wrapper sits OUTSIDE $(TEST_ENV) on purpose, since env -i
+## would hide GC_PUSH_GATE_NO_CAP, the CI markers, and GC_SESSION_NAME from
+## it. A busy lane exits 75 (GATE BUSY) without running anything.
+##
+## The shard loop takes ONE slot for the whole loop, not one per shard: the
+## acquire is non-blocking, so every acquire point is another chance to abort
+## a gate that is already running, and holding one slot across the loop also
+## keeps the wrapper's "one lane, one slot" invariant. It costs a `$(SHELL) -c`
+## because gate-slot-run execs a command and a `for` loop is not one; make
+## would have handed this recipe line to the same shell regardless. Note that
+## `test` therefore has two acquire points, so a GATE BUSY on the second
+## reports INDETERMINATE after the sweep has already run — the price of make
+## giving each recipe line its own shell. `test-mac`, the lane agents actually
+## run, is a single line and keeps the fail-in-under-a-second property whole.
 test: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m $(UNIT_PKGS_NONCMDGC)
-	@for s in $$(seq 1 $(CMD_GC_UNIT_TOTAL)); do \
+	./scripts/gate-slot-run test $(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m $(UNIT_PKGS_NONCMDGC)
+	@./scripts/gate-slot-run test-cmd-gc-shards $(SHELL) -c 'for s in $$(seq 1 $(CMD_GC_UNIT_TOTAL)); do \
 		$(TEST_ENV) GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=15m \
 		./scripts/test-go-test-shard ./cmd/gc "$$s" $(CMD_GC_UNIT_TOTAL) || exit 1; \
-	done
+	done'
 
 ## test-mac: Mac unit sweep with cmd/gc excluded; cmd/gc covered by the Mac sharded job.
+## Slot-capped via scripts/gate-slot-run for the same reason as `test` above —
+## this is the Darwin lane that agents run as their configured test_command,
+## so it was the single largest uncapped source of gate contention here.
 test-mac: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(UNIT_PKGS_NONCMDGC)
+	./scripts/gate-slot-run test-mac $(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(UNIT_PKGS_NONCMDGC)
 
 LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 

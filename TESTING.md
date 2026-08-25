@@ -938,14 +938,44 @@ bounded how many heavy-suite invocations could run concurrently, producing
 false-red failures (timeouts, OOM-adjacent slowdowns) indistinguishable
 from real regressions.
 
-`scripts/test-local-parallel` — the one place all four heavy targets
-(`fast`, `cmd-gc-process`, `integration`, `full`) funnel through — acquires
-one of `PUSH_GATE_MAX_CONCURRENT` (default 2) numbered `flock(1)` slots
-under `<city_root>/.gc/gate-slots` (or, outside a city, the repository's
-common git dir — `<repo>/.git/gate-slots` in a normal clone, and the one
-shared common dir for all of a repo's linked worktrees) before running any
-jobs, and holds it for the invocation's entire
-lifetime. The mechanism (`scripts/push-gate-lock-lib.sh`) is adapted from
+Two entrypoints acquire one of `PUSH_GATE_MAX_CONCURRENT` (default 2)
+numbered `flock(1)` slots under `<city_root>/.gc/gate-slots` (or, outside a
+city, the repository's common git dir — `<repo>/.git/gate-slots` in a normal
+clone, and the one shared common dir for all of a repo's linked worktrees)
+before running any jobs, and hold it for the invocation's entire lifetime:
+
+- `scripts/test-local-parallel`, the one place all four heavy targets
+  (`fast`, `cmd-gc-process`, `integration`, `full`) funnel through.
+- `scripts/gate-slot-run`, which wraps the `test` and `test-mac` Makefile
+  targets (gascity-6tr). Those reach `scripts/go-test-observable` directly
+  rather than through `test-local-parallel`, so until they were wrapped the
+  Darwin lane that agents actually run — the rig's configured
+  `test_command`, plus any direct `make test` — bypassed this cap while
+  `test-fast-parallel`, the one lane this host should not be using, was the
+  only one protected.
+
+`make test-mac` is a single command and so holds one slot for the whole gate.
+`make test` is two — the non-`cmd/gc` package sweep, then the sequential
+`cmd/gc` shard loop (gascity-cgh) — and make gives every recipe line its own
+shell, so one slot cannot span both. Each is wrapped separately, and the shard
+loop takes ONE slot for the whole loop rather than one per shard: the acquire
+is non-blocking, so every acquire point is another chance to abort a gate that
+is already running. The residual is that a `GATE BUSY` on the second acquire
+reports INDETERMINATE *after* the sweep has already run, rather than in under
+a second having run nothing. `test-mac`, the lane agents actually run, keeps
+that property whole. Wrapping the loop costs a `$(SHELL) -c` because
+`gate-slot-run` execs a command and a `for` loop is not one; make would have
+handed that recipe line to the same shell regardless.
+
+The cap is deliberately NOT wired inside `scripts/go-test-observable`: it also
+runs as an inner runner beneath `test-local-parallel`'s fan-out (via
+`scripts/test-go-test-shard`), which already holds a slot, so acquiring there
+would have every shard of an already-slotted run compete for the same two
+slots. `gate-slot-run` sits at the top-level Makefile entrypoint instead — the
+same layer at which `test-fast-parallel` is gated — and it closes the slot FD
+before running the gate command, so a leaked daemon cannot pin the slot.
+
+The mechanism (`scripts/push-gate-lock-lib.sh`) is adapted from
 `packs/maintainer-pr-review/scripts/run-lock-lib.sh`'s
 `mpr_acquire_global_slot` in the gc-management meta-repo, with one
 deliberate difference: mpr's caller fails fast, but this gate's caller is
@@ -955,14 +985,34 @@ bounded wait (`PUSH_GATE_MAX_WAIT_SECONDS`, default 600s; polling every
 naming current slot holders the moment it starts waiting. Exhausting the
 wait maps to `exit 75` (`EX_TEMPFAIL`) — distinct from a real test failure
 and from `scripts/push-ownership-guard.sh`'s unrelated `exit 1` contract for
-bead-ownership staleness. That 75 is only visible to callers that invoke
-`scripts/test-local-parallel` directly: the four Makefile targets and
-`.githooks/pre-push` (`exec make test-fast-parallel`) run it under `make`,
-which reports `make: *** [test-fast-parallel] Error 75` and then exits 2.
-Through those paths the distinguishing signal is the stderr text, not the
-process exit code. The kernel releases the lock automatically when the
-holding process exits — success, failure, or crash alike — so a stale slot
-can never survive a dead holder; no PID-file liveness probing is involved.
+bead-ownership staleness.
+
+`scripts/gate-slot-run` defaults that wait to **zero** instead — a
+non-blocking acquire, reported as `not waiting` / `no free slot` rather than a
+timeout, because it never waited. Agents run these gates under harness
+timeouts, and a waiter that blocks on the lock gets SIGTERM'd at its budget
+having run zero tests and relaunches: the same retry loop the cap exists to
+end, now burning the wait instead of the work while holding a queue position.
+Serializing only converts mutual destruction into a queue when the waiter's
+budget exceeds queue-wait *plus* run time, and nothing guarantees that. A busy
+lane therefore reports `GATE BUSY` and `exit 75` in under a second, having run
+nothing — an INDETERMINATE result, explicitly not something to relaunch
+immediately. Export a non-zero `PUSH_GATE_MAX_WAIT_SECONDS` to queue instead.
+`gate-slot-run` also bypasses the cap under `CI`/`GITHUB_ACTIONS`, where one
+job per box means there is no cross-invocation contention to bound and a
+spurious 75 would only turn a green build red.
+
+That 75 survives verbatim only for callers that invoke `test-local-parallel`
+or `gate-slot-run` directly. Under `make` — the four heavy targets,
+`.githooks/pre-push` (`exec make test-fast-parallel`), and now `make test` /
+`make test-mac` — it is reported as `make: *** [<target>] Error 75` and make
+itself exits 2. Through those paths the distinguishing signal is the stderr
+text (`GATE BUSY` / `push-gate:`), not the process exit code, so a wrapper
+that classifies gate outcomes must read stderr rather than trust the 2.
+
+The kernel releases the lock automatically when the holding process exits
+— success, failure, or crash alike — so a stale slot can never survive a
+dead holder; no PID-file liveness probing is involved.
 FD inheritance into test jobs is severed at the fan-out boundary, so a slot
 that stays locked past its gate means a leaked descendant is still holding
 the descriptor (`lsof` on the slot file names it), not a stale file to
@@ -971,19 +1021,22 @@ already lists as required; if it is absent the run proceeds uncapped with a
 warning rather than blocking. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap
 entirely for one invocation.
 
-The slot mechanics are covered by `scripts/test-push-gate-lock.sh`, run
-directly as the `push-gate-lock-selftest` job inside `test-local-parallel`
-itself (`fast` and `full` modes) rather than through a `go test` trampoline.
+The slot mechanics — plus the non-blocking acquire path, `gate-slot-run`'s
+busy/propagate/bypass contract, and static assertions that the `test` and
+`test-mac` recipes still route through it — are covered by
+`scripts/test-push-gate-lock.sh`, run directly as the
+`push-gate-lock-selftest` job inside `test-local-parallel` itself (`fast` and
+`full` modes) rather than through a `go test` trampoline.
 A trampoline's `exec.Command` call would itself add a tracked subprocess
 occurrence to `internal/testpolicy/resourcecensus`'s baselines — including
 the `scope=all` audit row, which fails on any change, growth or shrinkage
 alike, with no per-file exemption available — so driving the script as a
 plain shell job avoids that ratchet entirely instead of bumping it.
 
-Only `scripts/test-local-parallel` is wired to this gate — the same targets
-axis 2 leaves unconfined (`test-acceptance*`, `test-integration`,
-`test-integration-huma`, `test-worker-*`, `test-cover`, and similar direct
-`go test` invocations) are outside this bound too.
+Only `scripts/test-local-parallel` and `scripts/gate-slot-run` are wired to
+this gate — the same targets axis 2 leaves unconfined (`test-acceptance*`,
+`test-integration`, `test-integration-huma`, `test-worker-*`, `test-cover`,
+and similar direct `go test` invocations) are outside this bound too.
 
 This mechanism does not extend `bd` claim-lease heartbeats across the
 wait+run phases. An earlier draft of the originating bead (`ga-owh20p`)

@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+#
+# gate-slot-run — run one heavy local test gate inside a push-gate slot
+# (gascity-6tr).
+#
+# WHY THIS EXISTS
+#   scripts/push-gate-lock-lib.sh already bounds how many heavy suites run on
+#   a host at once, but until this wrapper existed its only consumer was
+#   scripts/test-local-parallel. `make test` and `make test-mac` reach
+#   scripts/go-test-observable directly, so the Darwin lane agents actually
+#   run — the rig's configured test_command, plus any direct `make test` —
+#   bypassed a working cap entirely. Concurrent uncapped gates drive this box
+#   to load 60-90, which is the documented cause of the load-coupled failures
+#   that then get misread as regressions; two looping agents are enough to
+#   make the gate statistically unpassable for everyone else.
+#
+#   The cap is deliberately NOT wired inside go-test-observable: that script
+#   also runs as an inner runner beneath test-local-parallel's fan-out (via
+#   scripts/test-go-test-shard), which already holds a slot for the whole
+#   invocation. Acquiring there would have every shard of an already-slotted
+#   run compete for the same two slots. This wrapper sits at the top-level
+#   Makefile entrypoints instead — the same layer at which test-fast-parallel
+#   is gated — so each lane takes exactly one slot.
+#
+# WHY NON-BLOCKING BY DEFAULT
+#   Agents run these gates under harness timeouts. A waiter that blocks on the
+#   lock gets SIGTERM'd at its budget having run zero tests and relaunches:
+#   the same retry loop this cap exists to end, now burning the wait instead
+#   of the work while holding a queue position. Serializing only converts
+#   mutual destruction into a queue when the waiter's budget exceeds
+#   queue-wait PLUS run time, and nothing guarantees that. So the default here
+#   is a non-blocking acquire (PUSH_GATE_MAX_WAIT_SECONDS=0) reporting a
+#   distinct exit 75 (EX_TEMPFAIL) meaning GATE BUSY: not a pass, not a test
+#   failure, and specifically not something to relaunch immediately. The
+#   caller learns the lane is occupied in under a second instead of consuming
+#   its whole budget discovering it. A caller that genuinely wants to queue
+#   can still export a non-zero PUSH_GATE_MAX_WAIT_SECONDS.
+#
+# PORTABILITY
+#   bash 3.2-compatible (macOS's stock /bin/bash), matching the floor held by
+#   scripts/push-gate-lock-lib.sh and the sibling runner scripts.
+#
+# USAGE
+#   scripts/gate-slot-run <lane> <command> [args...]
+#
+# EXIT STATUS
+#   2   usage error
+#   75  EX_TEMPFAIL — gate busy, nothing ran (INDETERMINATE, do not retry now)
+#   *   the command's own exit status, propagated verbatim
+#
+# Covered by scripts/test-push-gate-lock.sh.
+
+# No `set -e`: the gate command's exit status is this script's product and
+# must be propagated verbatim, including the failures `set -e` would swallow
+# before the trap-based release runs.
+set -uo pipefail
+
+if [ "$#" -lt 2 ]; then
+  echo "usage: scripts/gate-slot-run <lane> <command> [args...]" >&2
+  exit 2
+fi
+
+lane="$1"
+shift
+
+# CI runs one job per box, so there is no cross-invocation contention to bound
+# there — but a self-hosted runner that did land two jobs together would take
+# exit 75 and turn a green build red for a condition the cap exists to make
+# survivable. Bypass in CI, and say so rather than behaving differently in
+# silence.
+gate_in_ci=0
+case "${GITHUB_ACTIONS:-}" in
+  true | 1) gate_in_ci=1 ;;
+esac
+case "${CI:-}" in
+  true | 1) gate_in_ci=1 ;;
+esac
+if [ "$gate_in_ci" -eq 1 ]; then
+  echo "push-gate: CI detected — running ${lane} uncapped (one job per runner)" >&2
+  exec "$@"
+fi
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+
+# shellcheck source=push-gate-lock-lib.sh disable=SC1091
+. "$script_dir/push-gate-lock-lib.sh"
+
+gate_slot_dir="$(push_gate_slots_dir)" || gate_slot_dir="$repo_root/.git/gate-slots"
+gate_fd=""
+gate_label="${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}:${lane}"
+
+# Non-blocking unless the caller deliberately asked to queue. Set as a plain
+# shell variable, not exported: the library reads it from this shell, and
+# leaking it into the gate command's environment would silently re-tune any
+# nested acquire the command makes.
+PUSH_GATE_MAX_WAIT_SECONDS="${PUSH_GATE_MAX_WAIT_SECONDS:-0}"
+
+if ! push_gate_acquire_slot "$gate_slot_dir" gate_fd "$gate_label"; then
+  echo "push-gate: GATE BUSY — ${lane} did not run. This is INDETERMINATE, not a test failure." >&2
+  echo "push-gate: do NOT relaunch immediately; that is the retry loop this cap exists to stop. Wait for a slot to free, or set GC_PUSH_GATE_NO_CAP=1 to bypass the cap for one invocation." >&2
+  exit 75
+fi
+trap 'push_gate_release_slot "$gate_fd"' EXIT
+
+# Sever gate-FD inheritance (ga-owh20p): `go test` spawns test binaries that
+# leak daemons — a tmux server, a dolt sql-server, an escaped `gc` — and any
+# descendant holding a copy of the slot FD pins the slot after this
+# invocation dies. Closing it in the subshell keeps the lock owned solely by
+# this process, which the kernel then releases on any exit. The -n guard is
+# load-bearing: GC_PUSH_GATE_NO_CAP=1 and the missing-flock degrade path both
+# leave gate_fd empty, and `exec >&-` with an empty FD would close stdout.
+(
+  if [ -n "$gate_fd" ]; then
+    eval "exec ${gate_fd}>&-"
+  fi
+  exec "$@"
+)
+exit $?

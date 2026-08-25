@@ -114,7 +114,12 @@
 #       prints an immediate unbuffered diagnostic naming current holders
 #       (FR5), then re-sweeps every POLL_SECONDS until a slot frees or
 #       MAX_WAIT_SECONDS elapses. Returns 0 (acquired) or 1 (timed out —
-#       caller should `exit 75`).
+#       caller should `exit 75`). PUSH_GATE_MAX_WAIT_SECONDS=0 selects a
+#       non-blocking acquire — one sweep, then return 1 without sleeping —
+#       which is what scripts/gate-slot-run uses for the Makefile gate
+#       targets, where a caller under a harness timeout must learn the lane
+#       is occupied rather than spend its whole budget discovering it. That
+#       path reports "not waiting", never a timeout, because it never waited.
 #   push_gate_describe_slots <slot_dir> <max_concurrent>
 #       Print one "slot-<i>: <holder line>" line per currently-occupied
 #       slot, for the FR5 wait message and FR8 operator diagnostics. A slot
@@ -133,8 +138,8 @@
 #   same floor on purpose — see scripts/go-test-observable and
 #   scripts/test-integration-shard.
 #
-# Sourced by scripts/test-local-parallel and directly by
-# scripts/test-push-gate-lock.sh.
+# Sourced by scripts/test-local-parallel and scripts/gate-slot-run, and
+# directly by scripts/test-push-gate-lock.sh.
 
 # Base file-descriptor number for slot <i>; slot <i> always maps to
 # PUSH_GATE_FD_BASE + i. Fixed numbers rather than bash 4.1's `exec {var}<>`
@@ -319,13 +324,25 @@ push_gate_acquire_slot() {
         if [[ "$_pgl_announced" -eq 0 ]]; then
             _pgl_announced=1
             _pgl_start="$(date +%s)"
-            echo "push-gate: all $_pgl_max slot(s) busy, waiting up to ${_pgl_max_wait}s (checking every ${_pgl_poll}s):" >&2
+            if [[ "$_pgl_max_wait" -eq 0 ]]; then
+                echo "push-gate: all $_pgl_max slot(s) busy — not waiting (PUSH_GATE_MAX_WAIT_SECONDS=0):" >&2
+            else
+                echo "push-gate: all $_pgl_max slot(s) busy, waiting up to ${_pgl_max_wait}s (checking every ${_pgl_poll}s):" >&2
+            fi
             push_gate_describe_slots "$_pgl_slot_dir" "$_pgl_max" >&2
         fi
 
         if (( $(date +%s) - _pgl_start >= _pgl_max_wait )); then
-            echo "push-gate: timed out after ${_pgl_max_wait}s waiting for a free slot" >&2
-            push_gate_describe_slots "$_pgl_slot_dir" "$_pgl_max" >&2
+            # A zero wait bound never waited, so reporting an expired wait
+            # sends operators chasing a saturated host when one slot was busy
+            # for one instant. Holders were already named in the announce
+            # above; do not repeat them.
+            if [[ "$_pgl_max_wait" -eq 0 ]]; then
+                echo "push-gate: no free slot (non-blocking acquire)" >&2
+            else
+                echo "push-gate: timed out after ${_pgl_max_wait}s waiting for a free slot" >&2
+                push_gate_describe_slots "$_pgl_slot_dir" "$_pgl_max" >&2
+            fi
             return 1
         fi
 

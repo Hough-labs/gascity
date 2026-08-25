@@ -15,14 +15,19 @@
 # FD inheritance (a detached descendant must not pin a slot), dead-holder
 # diagnostics, the missing-flock degrade path, malformed tunables, the
 # GC_PUSH_GATE_NO_CAP escape hatch, both city-root resolution modes, the
-# slots-dir fallback, and static assertions that scripts/test-local-parallel
-# wires all of it up — including closing the gate FD before the fan-out.
+# slots-dir fallback, the non-blocking acquire path, scripts/gate-slot-run's
+# busy/propagate/bypass contract, `make test`'s cmd/gc shard loop taking one
+# slot for the whole loop, and static assertions that
+# scripts/test-local-parallel and the Makefile gate targets wire all of it
+# up — including closing the gate FD before the fan-out.
 
 set -uo pipefail
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB="$TEST_DIR/push-gate-lock-lib.sh"
 LOCAL_PARALLEL="$TEST_DIR/test-local-parallel"
+GATE_SLOT_RUN="$TEST_DIR/gate-slot-run"
+MAKEFILE="$(cd "$TEST_DIR/.." && pwd)/Makefile"
 
 # shellcheck source=./push-gate-lock-lib.sh disable=SC1091
 . "$LIB"
@@ -283,6 +288,242 @@ if push_gate_acquire_slot "$SLOTS_LINKED_A" FD_LINKED "linked-holder"; then
 else
     record_fail "slots_dir.linked_worktree_can_acquire" "resolved slot directory is not usable: $SLOTS_LINKED_A"
 fi
+
+# ---------------- non-blocking acquire: says so, and never claims a timeout ----------------
+# The heavy Makefile gates (make test / make test-mac) acquire non-blocking
+# (PUSH_GATE_MAX_WAIT_SECONDS=0), because an agent that blocks on the lock
+# under a harness timeout gets SIGTERM'd having run zero tests and relaunches
+# — the retry loop this cap exists to end, now burning the wait instead of the
+# work. That path reported itself as "waiting up to 0s" and then "timed out
+# after 0s", describing a wait that expired when it had never waited at all;
+# an operator reading that reasonably concludes the host is saturated for
+# ten minutes rather than that one slot was busy for one instant.
+PUSH_GATE_MAX_CONCURRENT=1
+NB_SLOTS="$WORK/nonblocking-slots"
+FD_NB=""
+if push_gate_acquire_slot "$NB_SLOTS" FD_NB "holder-NB"; then
+    NB_OUT="$(LIB="$LIB" DIR="$NB_SLOTS" PUSH_GATE_MAX_CONCURRENT=1 PUSH_GATE_MAX_WAIT_SECONDS=0 PUSH_GATE_POLL_SECONDS=1 \
+        bash -c '. "$LIB"; push_gate_acquire_slot "$DIR" z holder-NB2; echo "rc=$?"' 2>&1)"
+    assert_contains "nonblocking.announces_not_waiting" "$NB_OUT" "not waiting"
+    assert_contains "nonblocking.names_current_holder"  "$NB_OUT" "holder-NB"
+    assert_contains "nonblocking.returns_1"             "$NB_OUT" "rc=1"
+    case "$NB_OUT" in
+        *"timed out"*)
+            record_fail "nonblocking.never_reports_timeout" "found 'timed out' in output: $NB_OUT" ;;
+        *)
+            record_pass "nonblocking.never_reports_timeout" ;;
+    esac
+    push_gate_release_slot "$FD_NB"
+else
+    record_fail "nonblocking.announces_not_waiting" "could not acquire a slot to set up the case"
+fi
+
+# ---------------- scripts/gate-slot-run: the Makefile gate wrapper ----------------
+# gascity-6tr: `make test` and `make test-mac` reach go-test-observable
+# directly, so the Darwin lane every agent actually runs bypassed the cap that
+# only test-local-parallel was wired to. gate-slot-run is the wrapper that
+# closes that gap at the Makefile entrypoint layer.
+GSR_CITY="$WORK/gsr-city"
+mkdir -p "$GSR_CITY"
+: >"$GSR_CITY/city.toml"
+GSR_SLOTS="$GSR_CITY/.gc/gate-slots"
+# One-slot lane, deterministic env: the ambient GC_*/CI vars must not decide
+# whether these assertions exercise the capped path or a bypass.
+GSR_ENV=(
+    GC_CITY_PATH="$GSR_CITY" GC_CITY="" GC_CITY_ROOT=""
+    GC_PUSH_GATE_NO_CAP="" CI="" GITHUB_ACTIONS=""
+    PUSH_GATE_MAX_CONCURRENT=1 PUSH_GATE_POLL_SECONDS=1
+)
+
+assert_true "gate_slot_run.is_executable" test -x "$GATE_SLOT_RUN"
+
+GSR_OUT="$(env "${GSR_ENV[@]}" bash "$GATE_SLOT_RUN" selftest-lane sh -c 'echo RAN' 2>&1)"
+GSR_RC=$?
+assert_contains "gate_slot_run.runs_command"        "$GSR_OUT" "RAN"
+assert_eq       "gate_slot_run.propagates_success"  "$GSR_RC"  "0"
+
+env "${GSR_ENV[@]}" bash "$GATE_SLOT_RUN" selftest-lane sh -c 'exit 3' >/dev/null 2>&1
+assert_eq "gate_slot_run.propagates_command_status" "$?" "3"
+
+env "${GSR_ENV[@]}" bash "$GATE_SLOT_RUN" only-a-lane >/dev/null 2>&1
+assert_eq "gate_slot_run.usage_error_exits_2" "$?" "2"
+
+# The gate command must not inherit the slot descriptor: `go test` spawns test
+# binaries that leak daemons (a tmux server, a dolt sql-server, an escaped
+# `gc`), and any of them holding a copy pins the slot past this invocation.
+# Probing PUSH_GATE_FD_BASE directly asserts the sever itself — releasing the
+# lock on exit would mask a missing sever, since flock -u frees the shared
+# open-file-description for inheritors too.
+FD_PROBE="$(env "${GSR_ENV[@]}" bash "$GATE_SLOT_RUN" selftest-lane \
+    bash -c 'if ( true <&'"$PUSH_GATE_FD_BASE"' ) 2>/dev/null; then echo FD_INHERITED; else echo FD_CLOSED; fi' 2>&1)"
+assert_contains "gate_slot_run.severs_slot_fd_inheritance" "$FD_PROBE" "FD_CLOSED"
+
+# Lane fully occupied: BUSY is neither a pass nor a test failure, and the gate
+# command must not have run at all.
+FD_GSR=""
+if push_gate_acquire_slot "$GSR_SLOTS" FD_GSR "holder-occupies-lane"; then
+    BUSY_OUT="$(env "${GSR_ENV[@]}" bash "$GATE_SLOT_RUN" selftest-lane sh -c 'echo SHOULD_NOT_RUN' 2>&1)"
+    BUSY_RC=$?
+    assert_eq       "gate_slot_run.busy_exits_75"           "$BUSY_RC"  "75"
+    assert_contains "gate_slot_run.busy_says_gate_busy"     "$BUSY_OUT" "GATE BUSY"
+    assert_contains "gate_slot_run.busy_says_indeterminate" "$BUSY_OUT" "INDETERMINATE"
+    case "$BUSY_OUT" in
+        *SHOULD_NOT_RUN*)
+            record_fail "gate_slot_run.busy_does_not_run_command" "the gate command ran on a busy lane" ;;
+        *)
+            record_pass "gate_slot_run.busy_does_not_run_command" ;;
+    esac
+
+    NOCAP_OUT_RUN="$(env "${GSR_ENV[@]}" GC_PUSH_GATE_NO_CAP=1 bash "$GATE_SLOT_RUN" selftest-lane sh -c 'echo RAN_UNCAPPED' 2>&1)"
+    assert_contains "gate_slot_run.no_cap_bypasses_busy_lane" "$NOCAP_OUT_RUN" "RAN_UNCAPPED"
+
+    # CI runs one job per box; queueing behind itself would turn a green build
+    # into an exit-75 red for a contention condition that cannot occur there.
+    CI_OUT_RUN="$(env "${GSR_ENV[@]}" GITHUB_ACTIONS=true bash "$GATE_SLOT_RUN" selftest-lane sh -c 'echo RAN_IN_CI' 2>&1)"
+    assert_contains "gate_slot_run.ci_bypasses_busy_lane" "$CI_OUT_RUN" "RAN_IN_CI"
+
+    push_gate_release_slot "$FD_GSR"
+else
+    record_fail "gate_slot_run.busy_exits_75" "could not occupy the lane to set up the case"
+fi
+PUSH_GATE_MAX_CONCURRENT=2
+
+# ---------------- static wiring assertions against the Makefile gate targets ----------------
+# The uncapped lane was the defect: the cap existed and worked, but `make test`
+# and `make test-mac` never called it. Assert the wiring, not just the library.
+assert_true "wiring.gate_slot_run_sources_lib"  grep -q 'push-gate-lock-lib.sh' "$GATE_SLOT_RUN"
+assert_true "wiring.gate_slot_run_acquires"     grep -q 'push_gate_acquire_slot' "$GATE_SLOT_RUN"
+assert_true "wiring.gate_slot_run_exits_75"     grep -q 'exit 75'               "$GATE_SLOT_RUN"
+assert_true "wiring.gate_slot_run_has_override" grep -q 'GC_PUSH_GATE_NO_CAP'   "$GATE_SLOT_RUN"
+assert_true "wiring.gate_slot_run_releases_slot_on_exit" \
+    grep -qE 'trap .*push_gate_release_slot.*EXIT' "$GATE_SLOT_RUN"
+
+# Print a Makefile target's recipe lines (the tab-indented block after it).
+makefile_recipe() {
+    awk -v target="$1" '
+        index($0, target ":") == 1 { found = 1; next }
+        found && /^\t/ { print; next }
+        found { exit }
+    ' "$MAKEFILE"
+}
+
+for gate_target in test test-mac; do
+    RECIPE="$(makefile_recipe "$gate_target")"
+    assert_contains "wiring.make_${gate_target}_uses_gate_slot_run" "$RECIPE" "scripts/gate-slot-run"
+    # The wrapper must sit OUTSIDE the env -i TEST_ENV allowlist, or it cannot
+    # see GC_PUSH_GATE_NO_CAP, the CI markers, or GC_SESSION_NAME for the
+    # holder label — the cap would then be unbypassable and unattributable.
+    assert_true "wiring.make_${gate_target}_gates_before_test_env" \
+        test "${RECIPE%%scripts/gate-slot-run*}" "!=" "$RECIPE"
+    if [[ "${RECIPE%%scripts/gate-slot-run*}" == *'$(TEST_ENV)'* ]]; then
+        record_fail "wiring.make_${gate_target}_gate_outside_env_i" "gate-slot-run runs inside TEST_ENV's env -i: $RECIPE"
+    else
+        record_pass "wiring.make_${gate_target}_gate_outside_env_i"
+    fi
+    # Capping must not have replaced the observable runner it wraps.
+    assert_contains "wiring.make_${gate_target}_keeps_observable_runner" "$RECIPE" "scripts/go-test-observable"
+done
+
+# ---------------- the `test` target's cmd/gc shard loop ----------------
+# `make test` grew a SECOND command when cmd/gc left the package sweep
+# (gascity-cgh): a sequential shard loop. Make gives every recipe line its own
+# shell, so the sweep's slot cannot span the loop and the loop has to take one
+# of its own. Pin both that it is capped at all, and that it takes ONE slot for
+# the whole loop rather than one per shard — the acquire is non-blocking, so an
+# acquire inside the loop body would make every shard another chance to abort a
+# gate that is already running, and would drop the lane between shards.
+TEST_RECIPE="$(makefile_recipe test)"
+assert_eq "wiring.make_test_caps_both_commands" \
+    "$(grep -c 'scripts/gate-slot-run' <<<"$TEST_RECIPE")" "2"
+assert_contains "wiring.make_test_shard_loop_covers_cmd_gc" \
+    "$TEST_RECIPE" "./scripts/test-go-test-shard ./cmd/gc"
+assert_contains "wiring.make_test_shard_loop_is_capped" \
+    "$(grep 'for s in' <<<"$TEST_RECIPE")" "scripts/gate-slot-run"
+case "${TEST_RECIPE#*for s in}" in
+    *scripts/gate-slot-run*)
+        record_fail "wiring.make_test_shard_loop_takes_one_slot" \
+            "gate-slot-run appears inside the shard loop, so the loop acquires a slot per shard" ;;
+    *)
+        record_pass "wiring.make_test_shard_loop_takes_one_slot" ;;
+esac
+
+# Re-applying this wrapper over a STALE recipe body is how this change was
+# rejected once already — the wrapper landed on the pre-cgh `./...` sweep. Pin
+# the post-cgh body so a future rebase cannot quietly undo gascity-cgh here.
+TEST_SWEEP_LINE="$(grep 'scripts/go-test-observable test --' <<<"$TEST_RECIPE")"
+assert_contains "wiring.make_test_sweep_excludes_cmd_gc" "$TEST_SWEEP_LINE" '$(UNIT_PKGS_NONCMDGC)'
+case "$TEST_SWEEP_LINE" in
+    *'./...'*)
+        record_fail "wiring.make_test_sweep_drops_dot_dot_dot" \
+            "sweep still passes ./..., pulling cmd/gc back under one deadline: $TEST_SWEEP_LINE" ;;
+    *)
+        record_pass "wiring.make_test_sweep_drops_dot_dot_dot" ;;
+esac
+assert_contains "wiring.make_test_mac_shares_the_package_list" \
+    "$(makefile_recipe test-mac)" '$(UNIT_PKGS_NONCMDGC)'
+
+# ---------------- behavioural: the wrapped shard loop actually runs ----------------
+# Taking one slot for the whole loop costs a `$(SHELL) -c '...'`, because
+# gate-slot-run execs a command and a `for` loop is not one. That puts
+# TEST_ENV's env -i allowlist, $$s and the backslash continuations inside
+# single quotes, where a quoting slip changes what runs without changing what
+# the recipe looks like. So run the Makefile's own shard-loop recipe lines,
+# lifted verbatim rather than restated, against stubs.
+SHARD_PROBE="$WORK/shard-loop-probe"
+mkdir -p "$SHARD_PROBE/scripts"
+cat >"$SHARD_PROBE/scripts/gate-slot-run" <<'PROBE_WRAPPER'
+#!/bin/sh
+# Stands in for the real wrapper (whose own contract is asserted above): logs
+# one line per acquisition so the loop's slot granularity is observable, then
+# runs the gate command verbatim and propagates its status.
+echo "ACQUIRE $1" >>"$PROBE_LOG"
+probe_lane="$1"
+shift
+"$@"
+probe_rc=$?
+echo "RELEASE $probe_lane $probe_rc" >>"$PROBE_LOG"
+exit $probe_rc
+PROBE_WRAPPER
+cat >"$SHARD_PROBE/scripts/test-go-test-shard" <<'PROBE_SHARD'
+#!/bin/sh
+echo "SHARD $2/$3 $1 fast=$GC_FAST_UNIT count=$GO_TEST_COUNT timeout=$GO_TEST_TIMEOUT" >>"$PROBE_LOG"
+[ "$2" = "${PROBE_FAIL_SHARD:-}" ] && exit 7
+exit 0
+PROBE_SHARD
+chmod +x "$SHARD_PROBE/scripts/gate-slot-run" "$SHARD_PROBE/scripts/test-go-test-shard"
+{
+    printf 'TEST_ENV = env -i PATH="$$PATH" PROBE_LOG="$$PROBE_LOG" PROBE_FAIL_SHARD="$${PROBE_FAIL_SHARD-}"\n'
+    printf 'CMD_GC_UNIT_TOTAL ?= 3\n'
+    printf 'probe:\n'
+    awk '
+        /^test:/ { in_target = 1; next }
+        in_target && /^\t/ {
+            if (index($0, "for s in") > 0) { capture = 1 }
+            if (capture) { print }
+            next
+        }
+        in_target { exit }
+    ' "$MAKEFILE"
+} >"$SHARD_PROBE/Makefile"
+
+PROBE_LOG="$SHARD_PROBE/log"
+: >"$PROBE_LOG"
+if ( cd "$SHARD_PROBE" && PROBE_LOG="$PROBE_LOG" make probe ) >/dev/null 2>&1; then
+    record_pass "shard_loop.clean_run_succeeds"
+else
+    record_fail "shard_loop.clean_run_succeeds" "make probe failed; log: $(cat "$PROBE_LOG")"
+fi
+assert_eq "shard_loop.takes_one_slot_for_the_whole_loop" "$(grep -c '^ACQUIRE ' "$PROBE_LOG")" "1"
+assert_eq "shard_loop.runs_every_shard"                  "$(grep -c '^SHARD '   "$PROBE_LOG")" "3"
+assert_contains "shard_loop.passes_shard_index_and_total" "$(cat "$PROBE_LOG")" "SHARD 2/3 ./cmd/gc"
+assert_contains "shard_loop.keeps_fast_unit_budget"       "$(cat "$PROBE_LOG")" "fast=1 count=1 timeout=15m"
+
+# `|| exit 1` inside the quoted loop is exactly what a quoting slip drops, and
+# dropping it would let a red cmd/gc shard pass the gate.
+: >"$PROBE_LOG"
+( cd "$SHARD_PROBE" && PROBE_LOG="$PROBE_LOG" PROBE_FAIL_SHARD=2 make probe ) >/dev/null 2>&1
+assert_true "shard_loop.failing_shard_fails_the_gate" test "$?" -ne 0
+assert_eq "shard_loop.failing_shard_stops_the_loop" "$(grep -c '^SHARD ' "$PROBE_LOG")" "2"
 
 # ---------------- static wiring assertions against test-local-parallel ----------------
 assert_true "wiring.sources_lib"   grep -q 'push-gate-lock-lib.sh' "$LOCAL_PARALLEL"
