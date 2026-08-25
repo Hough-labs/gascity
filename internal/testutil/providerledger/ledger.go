@@ -65,7 +65,9 @@ const (
 	// runtimeDoubleBoundaryPath is the designated runtime.Provider double source.
 	runtimeDoubleBoundaryPath = "internal/runtime/fake.go"
 	// runtimeContractWaiverOwner owns the remaining production-runtime gaps.
-	runtimeContractWaiverOwner = "ga-80po0c.3"
+	// It must name a bead that resolves in a rig registered with this city:
+	// validateClaim only checks the field is non-empty, so a dead id stays green.
+	runtimeContractWaiverOwner = "gascity-82e"
 
 	// MarkdownStart begins the generated TESTING.md table.
 	MarkdownStart = "<!-- BEGIN CHECKED RUNTIME PROVIDER LEDGER -->"
@@ -330,33 +332,54 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 }
 
 // runtimeWaiverExpiry dates every remaining runtime.Provider waiver owned by
-// runtimeContractWaiverOwner. The prior 2026-08-12 date lapsed and turned the
-// whole ledger check red, so this is a renewal, not a first grant.
+// runtimeContractWaiverOwner. This is renewal #3 — the third value this expiry
+// has ever held — and the renewal the previous comment asked to account for
+// itself.
+//
+// The record, so the next renewal does not have to reconstruct it:
+//
+//	2026-07-13  granted, expiring 2026-08-12. It lapsed unrenewed: the whole
+//	            ledger check went red and the pre-push gate rejected every
+//	            push rig-wide, unrelated changes included, until it was
+//	            extended rather than re-decided.
+//	2026-08-11  renewed to 2026-08-26 (450c2b5f2), landing the subprocess
+//	            default-dir contract in the same commit: 9 waived -> 8.
+//	2026-08-25  renewed to 2026-09-25. This one. 7 waived, 0 contracted here.
+//
+// One contract has landed since the previous renewal: the acp default-directory
+// composition on 2026-08-18 (f84568925, gascity-0wp), taking 8 waived to 7.
+// Nothing has moved since. The migration is running at roughly one contracted
+// constructor per renewal against seven remaining gaps, so this renewal buys
+// time it has not yet earned.
+//
+// The owner changed with this renewal. Every prior grant named a gastown-era id
+// that resolves in no rig registered in this city (the commit introducing this
+// renewal names the retired id), so the "put the question back in front of the
+// owner" step that the deliberately-short horizon exists to force had nobody to
+// put it in front of.
+//
+// The owner is now gascity-82e, a live bead carrying the gap inventory and the
+// migration history. Renewing a date against a dead id is what reproduced the
+// lapse on schedule; that is fixed here, not worked around.
+//
+// gascity-82e carries a standing obligation: if nothing has moved across two
+// consecutive renewals, fund the migration or retire the waived entries
+// deliberately rather than renew a third time. Read literally that trigger has
+// not fired — one constructor was contracted in each of the last two renewal
+// intervals — but this is nonetheless the third grant of the same waiver set,
+// and the decision it guards is now due on the merits. It has been
+// escalated to Hunter; the resolution belongs on gascity-82e. That this
+// deadline can redden an unrelated push at all is gascity-8v7.
 //
 // Each gap was re-checked against cmd/gc/runtime_registry.go at renewal: all
-// eight constructors are still live registrations, and none has gained a
-// runnable full contract, so none was retired as stale. The subprocess
-// default-directory composition is the one that could be contracted instead of
-// renewed, and it was.
+// seven constructors are still live registrations, and none has gained a
+// runnable full contract, so none was retired as stale.
 //
-// Two weeks, deliberately, and not the 90-day maxWaiverHorizon the validator
-// permits. ga-80po0c.3's only open child has not moved since 2026-07-18, and
-// the same nine waivers already lapsed once and were extended — not
-// re-decided — to this date to unblock an unrelated PR. A long horizon would
-// hide a stalled track behind a green run; a short one puts the question back
-// in front of the owner while the context is still fresh. Renewing again
-// without contracts landing is debt, and the next renewal should say so.
-//
-// Since that renewal the acp default-directory composition has been contracted
-// too (TestACPDefaultDirConformance), so seven waivers now share this date. The
-// open risk there was Darwin's 104-byte sun_path cap: NewSeamBacked is pinned
-// to os.TempDir()/gc-acp, and on Darwin os.TempDir() is the long /var/folders
-// path, so a default-dir proof looked like it might not fit. Measured, it does:
-// sockPath hashes the session name to s{8 hex}.sock, which lands that socket at
-// 70 bytes, well inside the cap and independent of name length. Only the WithDir
-// fixture, which nests its own MkdirTemp root, needed the /tmp short-path
-// treatment.
-var runtimeWaiverExpiry = time.Date(2026, time.August, 26, 0, 0, 0, 0, time.UTC)
+// Thirty days, deliberately, and not the 90-day maxWaiverHorizon the validator
+// permits, and not an extension taken to avoid revisiting this. A long horizon
+// hides a stalled track behind a green run; a short one puts the question back
+// in front of an owner who now actually exists.
+var runtimeWaiverExpiry = time.Date(2026, time.September, 25, 0, 0, 0, 0, time.UTC)
 
 func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
 	return ContractClaim{
