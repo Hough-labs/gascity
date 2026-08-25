@@ -8,7 +8,13 @@
 # running" (su-deol8). The dolt-health order uses the structured
 # `gc dolt health --json | gc dolt health-check` diagnostics.
 #
-# Environment: GC_CITY_PATH, GC_DOLT_HOST, GC_DOLT_PORT
+# Every result is followed by the endpoint-provenance block: this command can
+# observe exactly ONE endpoint, and a rig pinned to its own (gc.endpoint_origin:
+# explicit) is invisible to it. Naming the endpoint and listing the unchecked
+# rigs is what keeps a status line from being read as city-wide (gascity-0zw).
+#
+# Environment: GC_CITY_PATH, GC_DOLT_HOST, GC_DOLT_PORT,
+#              GC_DOLT_RIG_LIST_TIMEOUT_SECS
 set -e
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
@@ -30,6 +36,7 @@ if GC_CITY_PATH="$GC_CITY_PATH" "$GC_BEADS_BD_SCRIPT" probe >/dev/null 2>&1; the
   else
     echo "Dolt server: reachable (external endpoint $host:$GC_DOLT_PORT)"
   fi
+  dolt_print_endpoint_scope
   exit 0
 fi
 
@@ -38,4 +45,5 @@ if is_local_dolt_host "$host"; then
 else
   echo "Dolt server: unreachable (external endpoint $host:$GC_DOLT_PORT)"
 fi
+dolt_print_endpoint_scope
 exit 1

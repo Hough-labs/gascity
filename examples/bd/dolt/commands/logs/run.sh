@@ -3,6 +3,12 @@
 #
 # Usage: gc dolt logs [-n LINES] [-f]
 #
+# The endpoint and log-file path are announced on stderr before the tail, so a
+# log excerpt pasted into an escalation says which server produced it. This
+# command reads the MANAGED server's on-disk log and nothing else — a rig
+# pinned to its own endpoint logs on its own host (gascity-0zw). stderr keeps
+# stdout carrying only log lines.
+#
 # Environment: GC_CITY_PATH (set by gc pack command infrastructure)
 set -e
 
@@ -50,5 +56,7 @@ args="-n${lines}"
 if [ "$follow" = true ]; then
   args="$args -f"
 fi
+
+printf 'gc dolt logs: %s\ngc dolt logs: log file %s\n' "$(dolt_endpoint_description)" "$log_file" >&2
 
 exec tail $args "$log_file"

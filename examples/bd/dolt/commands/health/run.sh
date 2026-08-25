@@ -16,26 +16,22 @@ PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
 metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
 
-  if command -v gc >/dev/null 2>&1; then
-    # Bound the gc rig list call: if gc is itself in a bad state (the
-    # failure mode this patrol is meant to detect) we must not block
-    # here. Degrade to the fallback rig scan below. The bound (default in
-    # runtime.sh, shared with the compact command) must absorb a
-    # slow-but-healthy gc on a busy host (~16s observed) because the
-    # fallback scan only sees the city directory and silently drops
-    # external rig databases (gascity#2740).
-    rig_paths=$(run_bounded "$GC_DOLT_RIG_LIST_TIMEOUT_SECS" gc rig list --json 2>/dev/null \
-      | if command -v jq >/dev/null 2>&1; then
-          jq -r '.rigs[].path' 2>/dev/null
-        else
-          grep '"path"' | sed 's/.*"path": *"//;s/".*//'
-        fi) || true
-    if [ -n "$rig_paths" ]; then
-      printf '%s\n' "$rig_paths" | while IFS= read -r p; do
-        [ -n "$p" ] && printf '%s\n' "$p/.beads/metadata.json"
-      done
-      return
-    fi
+  # $_rig_rows is written once by dolt_write_rig_paths (runtime.sh), which owns
+  # the bounded `gc rig list --json` call: if gc is itself in a bad state (the
+  # failure mode this patrol is meant to detect) it must not block here, and it
+  # degrades to the fallback rig scan below. The bound (default in runtime.sh,
+  # shared with the compact command) must absorb a slow-but-healthy gc on a busy
+  # host (~16s observed) because the fallback scan only sees the city directory
+  # and silently drops external rig databases (gascity#2740). Reading the shared
+  # file means the endpoint-provenance scan below reuses that one call rather
+  # than paying for a second on every patrol tick.
+  if [ "$rig_rows_ok" = true ]; then
+    rig_row_tab=$(printf '\t')
+    while IFS= read -r rig_row; do
+      p="${rig_row#*"$rig_row_tab"}"
+      [ -n "$p" ] && printf '%s\n' "$p/.beads/metadata.json"
+    done < "$_rig_rows"
+    return
   fi
 
   # Fallback: scan local rigs/ directory only. Cannot discover external rigs
@@ -175,8 +171,17 @@ _meta_cache=$(mktemp)
 # mutated through the pipe); the survivors are spooled here and read back in
 # the parent shell.
 _zombie_scan_out=$(mktemp)
+# Rig roster, enumerated ONCE and read by both consumers below: metadata_files
+# (per-database counts) and the endpoint-provenance scan. rig_rows_ok separates
+# "no rigs registered" from "could not enumerate" — gc being wedged is one of
+# the failures this patrol detects, so the two must never render alike.
+_rig_rows=$(mktemp)
+rig_rows_ok=false
+if dolt_write_rig_paths "$_rig_rows"; then
+  rig_rows_ok=true
+fi
 metadata_files > "$_meta_cache"
-trap 'rm -f "$_meta_cache" "$_zombie_scan_out"' EXIT
+trap 'rm -f "$_meta_cache" "$_zombie_scan_out" "$_rig_rows"' EXIT
 
 # Collect database info.
 #
@@ -536,6 +541,19 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
   done < "$_zombie_scan_out"
 fi
 
+# Endpoint provenance. This report describes exactly ONE endpoint; a rig that
+# pins its own (gc.endpoint_origin: explicit) lives on a different server and is
+# invisible here — and the managed server can hold a same-named but EMPTY
+# database for such a rig, so an unqualified report answers a question about it
+# with a confident zero. Enumerate those rigs so the omission is visible, and
+# distinguish "none pinned" from "could not look" (gascity-0zw).
+pinned_endpoints=""
+pinned_scanned=false
+if [ "$rig_rows_ok" = true ]; then
+  pinned_scanned=true
+  pinned_endpoints=$(dolt_pinned_rig_endpoints_from "$_rig_rows")
+fi
+
 # Output.
 timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
@@ -551,6 +569,10 @@ if [ "$json_output" = true ]; then
   # `server.running` / `server.pid` are local-process defaults (false / 0) and
   # MUST NOT be read as a downed server — a reachable remote endpoint is
   # healthy at `server.reachable=true, server.external=true` (su-deol8).
+  #
+  # `server.host` and `server.data_dir` name the endpoint and store this whole
+  # document describes, so a consumer never has to infer it from the port alone
+  # (gascity-0zw).
   cat <<JSONEOF
 {
   "timestamp": "$timestamp",
@@ -559,7 +581,9 @@ if [ "$json_output" = true ]; then
     "reachable": $server_reachable,
     "external": $is_external,
     "pid": $server_pid,
+    "host": "$(printf '%s' "$host" | sed 's/\\/\\\\/g; s/"/\\"/g')",
     "port": $GC_DOLT_PORT,
+    "data_dir": "$(printf '%s' "$data_dir" | sed 's/\\/\\\\/g; s/"/\\"/g')",
     "latency_ms": $server_latency
   },
   "databases": [
@@ -603,6 +627,22 @@ JSONEOF
   cat <<JSONEOF
 
   ],
+  "unchecked_endpoints": {
+    "scanned": $pinned_scanned,
+    "rigs": [
+JSONEOF
+  first=true
+  echo "$pinned_endpoints" | while IFS='|' read -r rig_name rig_addr; do
+    [ -z "$rig_name" ] && continue
+    if [ "$first" = true ]; then first=false; else echo ","; fi
+    rig_host="${rig_addr%:*}"
+    rig_port="${rig_addr##*:}"
+    printf '      {"rig": "%s", "host": "%s", "port": "%s"}' "$rig_name" "$rig_host" "$rig_port"
+  done
+  cat <<JSONEOF
+
+    ]
+  },
   "processes": {
     "zombie_count": $zombie_count,
     "zombie_pids": [$(echo "$zombie_pids" | tr -s ' ' ',' | sed 's/^,//;s/,$//')]
@@ -624,13 +664,27 @@ fi
 # local-process "not running" signal that would misread as a downed server
 # (su-deol8).
 if [ "$server_running" = true ]; then
-  echo "Server: running (PID $server_pid, port $GC_DOLT_PORT, latency ${server_latency}ms)"
+  echo "Server: running (PID $server_pid, $host:$GC_DOLT_PORT, latency ${server_latency}ms)"
 elif [ "$is_external" = true ] && [ "$server_reachable" = true ]; then
   echo "Server: external endpoint reachable ($host:$GC_DOLT_PORT, latency ${server_latency}ms)"
 elif [ "$is_external" = true ]; then
   echo "Server: external endpoint unreachable ($host:$GC_DOLT_PORT)"
 else
-  echo "Server: not running"
+  echo "Server: not running ($host:$GC_DOLT_PORT)"
+fi
+
+printf 'Endpoint: %s\n' "$(dolt_endpoint_description)"
+printf 'Scope: this report covers ONLY that endpoint.\n'
+if [ "$pinned_scanned" != true ]; then
+  printf 'Not checked: UNKNOWN — rig enumeration unavailable; run gc doctor to probe every rig endpoint\n'
+elif [ -n "$pinned_endpoints" ]; then
+  printf 'Not checked (rigs pinned to their own endpoint — run gc doctor to probe them):\n'
+  printf '%s\n' "$pinned_endpoints" | while IFS='|' read -r rig_name rig_addr; do
+    [ -n "$rig_name" ] || continue
+    printf '  %s -> %s\n' "$rig_name" "$rig_addr"
+  done
+else
+  printf 'Not checked: none (no rig pins its own Dolt endpoint)\n'
 fi
 
 if [ -n "$db_info" ]; then

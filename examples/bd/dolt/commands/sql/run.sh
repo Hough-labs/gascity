@@ -6,6 +6,13 @@
 # arguments are forwarded verbatim to `dolt sql`, so non-interactive
 # use is supported via `gc dolt sql -q "QUERY"`.
 #
+# Before connecting, the endpoint (or the embedded data directory) is announced
+# on stderr so query output pasted into an escalation carries its own
+# provenance. This command reaches exactly one server; a rig pinned to its own
+# endpoint is not it, and a same-named-but-empty database on the managed server
+# will answer a query about that rig with a confident zero (gascity-0zw).
+# stderr keeps stdout clean for callers parsing result rows.
+#
 # Environment: GC_CITY_PATH, GC_DOLT_HOST, GC_DOLT_PORT, GC_DOLT_USER,
 #              GC_DOLT_PASSWORD (all optional except GC_CITY_PATH)
 set -e
@@ -36,6 +43,7 @@ if is_running; then
     host="127.0.0.1"
   fi
   args="--host $host --port $GC_DOLT_PORT --user $GC_DOLT_USER --no-tls"
+  printf 'gc dolt sql: connected to %s\n' "$(dolt_endpoint_description)" >&2
   # Always export DOLT_CLI_PASSWORD so dolt's credential parser skips
   # the TTY password prompt. When GC_DOLT_PASSWORD is empty (the
   # managed-local default — root has no password), an unset env var
@@ -58,5 +66,6 @@ else
     echo "gc dolt sql: no dolt server running and no databases found" >&2
     exit 1
   fi
+  printf 'gc dolt sql: no server reachable; opened embedded from data_dir %s\n' "$data_dir" >&2
   exec dolt --data-dir "$data_dir" sql "$@"
 fi
