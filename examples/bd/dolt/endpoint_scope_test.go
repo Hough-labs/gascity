@@ -22,31 +22,43 @@ import (
 
 // The fixture rigs mirror the topology the defect was measured against: one
 // rig pinned to its own endpoint on a different port from the managed server,
-// and one inheriting the city endpoint.
+// and one inheriting the city endpoint. secondPinnedRig* adds a third shape the
+// live topology also has — a SECOND rig pinned to its own endpoint — which is
+// what makes the multi-entry paths of the not-checked list reachable.
 const (
-	pinnedRigName    = "winnow"
-	pinnedRigHost    = "127.0.0.1"
-	pinnedRigPort    = "3307"
-	inheritedRigName = "feryn"
+	pinnedRigName       = "winnow"
+	pinnedRigHost       = "127.0.0.1"
+	pinnedRigPort       = "3307"
+	secondPinnedRigName = "corvid"
+	secondPinnedRigPort = "3399"
+	inheritedRigName    = "feryn"
 )
 
-// writePinnedRig creates a rig directory whose .beads/config.yaml pins its own
-// external Dolt endpoint, and returns the rig's absolute path. The rig
-// directory is named for the rig so the name is recoverable from the path
-// alone — the roster falls back to basename when the name column is empty.
-func writePinnedRig(t *testing.T, parent string) string {
+// writePinnedRigNamed creates a rig directory whose .beads/config.yaml pins its
+// own external Dolt endpoint at the given port, and returns the rig's absolute
+// path. The rig directory is named for the rig so the name is recoverable from
+// the path alone — the roster falls back to basename when the name column is
+// empty.
+func writePinnedRigNamed(t *testing.T, parent, name, port string) string {
 	t.Helper()
-	rigPath := filepath.Join(parent, pinnedRigName)
+	rigPath := filepath.Join(parent, name)
 	beadsDir := filepath.Join(rigPath, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatalf("mkdir rig beads dir: %v", err)
 	}
 	cfg := fmt.Sprintf("issue_prefix: %s\ndolt.mode: \"server\"\ngc.endpoint_origin: explicit\ngc.endpoint_status: verified\ndolt.host: %s\ndolt.port: %s\n",
-		pinnedRigName, pinnedRigHost, pinnedRigPort)
+		name, pinnedRigHost, port)
 	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
 		t.Fatalf("write rig config.yaml: %v", err)
 	}
 	return rigPath
+}
+
+// writePinnedRig creates the canonical single pinned rig used by most tests in
+// this file.
+func writePinnedRig(t *testing.T, parent string) string {
+	t.Helper()
+	return writePinnedRigNamed(t, parent, pinnedRigName, pinnedRigPort)
 }
 
 // writeInheritedRig creates a rig directory that inherits the city endpoint.
@@ -263,6 +275,69 @@ func TestHealthJSONCarriesEndpointProvenance(t *testing.T) {
 		report.UncheckedEndpoints.Rigs[0].Rig != "winnow" ||
 		report.UncheckedEndpoints.Rigs[0].Port != "3307" {
 		t.Fatalf("unchecked_endpoints.rigs = %+v; want winnow at 127.0.0.1:3307\n%s", report.UncheckedEndpoints.Rigs, out)
+	}
+}
+
+// TestHealthJSONListsEveryPinnedRig pins the array-separator contract for
+// unchecked_endpoints. That array is assembled by hand in shell, and the comma
+// between entries comes from a first-iteration flag carried across iterations
+// of a `while read` loop inside a pipeline subshell — the one place in this
+// change where a second entry can turn a parseable report into a syntax error,
+// which for a JSON consumer is indistinguishable from the data plane being
+// down. A single pinned rig never emits a separator, so the one-rig tests above
+// cannot reach it; a city with two pinned rigs is the live topology and this is
+// the test that covers it. The inherited rig is present here too, so the
+// assertion is exact rather than a containment check: it must be absent.
+func TestHealthJSONListsEveryPinnedRig(t *testing.T) {
+	cityPath := t.TempDir()
+
+	rigParent := t.TempDir()
+	first := writePinnedRig(t, rigParent)
+	second := writePinnedRigNamed(t, rigParent, secondPinnedRigName, secondPinnedRigPort)
+	inherited := writeInheritedRig(t, rigParent)
+
+	binDir := t.TempDir()
+	writeFakeGCRigList(t, binDir, map[string]string{
+		pinnedRigName:       first,
+		secondPinnedRigName: second,
+		inheritedRigName:    inherited,
+	})
+	writeFailingDolt(t, binDir)
+
+	port, stop := startAcceptingListener(t)
+	t.Cleanup(stop)
+
+	out, err := runHealthForScope(t, cityPath, "127.0.0.1", strconv.Itoa(port), binDir, "--json")
+	if err != nil {
+		t.Fatalf("health --json exited nonzero: %v\n%s", err, out)
+	}
+	var report struct {
+		UncheckedEndpoints struct {
+			Rigs []struct {
+				Rig  string `json:"rig"`
+				Port string `json:"port"`
+			} `json:"rigs"`
+		} `json:"unchecked_endpoints"`
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("health --json emitted invalid JSON for two pinned rigs: %v\n%s", err, out)
+	}
+	got := make(map[string]string, len(report.UncheckedEndpoints.Rigs))
+	for _, rig := range report.UncheckedEndpoints.Rigs {
+		got[rig.Rig] = rig.Port
+	}
+	want := map[string]string{
+		pinnedRigName:       pinnedRigPort,
+		secondPinnedRigName: secondPinnedRigPort,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("unchecked_endpoints.rigs = %+v; want exactly %v — the inherited rig IS covered by this endpoint\n%s",
+			report.UncheckedEndpoints.Rigs, want, out)
+	}
+	for name, wantPort := range want {
+		if got[name] != wantPort {
+			t.Fatalf("unchecked_endpoints.rigs[%q].port = %q; want %q\n%s", name, got[name], wantPort, out)
+		}
 	}
 }
 
