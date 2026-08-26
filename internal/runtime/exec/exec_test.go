@@ -19,6 +19,18 @@ import (
 const (
 	startupWatchNoHangTestTimeout = 10 * time.Second
 	startupWatchBlockingSleep     = "30"
+
+	// Liveness bounds for the cancellation tests. They exist to stop a genuine
+	// hang, not to measure how fast a loaded host can fork a shell -- three
+	// concurrent test sweeps on a Darwin host beat the previous 5s readiness
+	// bound and reddened untouched code. See gascity-l5w.
+	cancellationReadyTimeout = 60 * time.Second
+	// cancellationReturnTimeout must stay well BELOW the foreground child's
+	// 30s sleep and cannot simply be widened like the others. The defect these
+	// tests catch is a process-only interrupt, which defers the shell's trap
+	// until that sleep returns; a bound at or above 30s would observe the
+	// resulting late completion as success and silently neuter the test.
+	cancellationReturnTimeout = 15 * time.Second
 )
 
 // writeScript creates an executable shell script in dir and returns its path.
@@ -29,6 +41,28 @@ func writeScript(t *testing.T, dir, content string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// withGenerousCancellationGrace widens the rollback-trap grace for a test that
+// asserts the trap RAN.
+//
+// These tests prove that a cooperative interrupt reaches a foreground child of
+// the adapter rather than only the shell leader. The evidence is the trap's
+// marker file. Under the production 2s grace that evidence doubles as a
+// wall-clock assertion -- the trap must be scheduled, run, and write within two
+// seconds or the group is force-killed and the marker never appears -- so a
+// busy Darwin host reddened the test in code nobody had touched.
+//
+// Widening the grace does not weaken the assertion: a process-only interrupt
+// never runs the trap no matter how long the grace, so the test still fails for
+// the defect it was written to catch. It only stops the test from also
+// measuring the host. The surrounding liveness deadlines still bound a genuine
+// hang. See gascity-l5w.
+func withGenerousCancellationGrace(t *testing.T) {
+	t.Helper()
+	previous := execCancellationGrace
+	execCancellationGrace = 60 * time.Second
+	t.Cleanup(func() { execCancellationGrace = previous })
 }
 
 // allOpsScript returns a script body that handles all operations with
@@ -1301,6 +1335,7 @@ func TestUnknownOperation_exit2(t *testing.T) {
 func TestProvider_StartCancellationInterruptsCooperativeScript(t *testing.T) {
 	for _, interruptExitCode := range []int{0, 2} {
 		t.Run(fmt.Sprintf("interrupt_exit_%d", interruptExitCode), func(t *testing.T) {
+			withGenerousCancellationGrace(t)
 			dir := t.TempDir()
 			readyFile := filepath.Join(dir, "ready")
 			interruptFile := filepath.Join(dir, "interrupted")
@@ -1323,7 +1358,7 @@ esac
 				done <- p.Start(ctx, "test-sess", runtime.Config{})
 			}()
 
-			readyDeadline := time.NewTimer(5 * time.Second)
+			readyDeadline := time.NewTimer(cancellationReadyTimeout)
 			defer readyDeadline.Stop()
 			readyPoll := time.NewTicker(10 * time.Millisecond)
 			defer readyPoll.Stop()
@@ -1348,7 +1383,7 @@ esac
 				if !errors.Is(err, context.Canceled) {
 					t.Fatalf("Start error = %v, want context.Canceled", err)
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(cancellationReturnTimeout):
 				t.Fatal("Start did not return after cancellation")
 			}
 
@@ -1381,6 +1416,7 @@ esac
 // window made this test fail on roughly one Darwin run in six, always leaving
 // an orphaned `sleep` behind as the signature of the missed signal.
 func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
+	withGenerousCancellationGrace(t)
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
 	interruptFile := filepath.Join(dir, "interrupted")
@@ -1403,7 +1439,7 @@ esac
 	}()
 
 	// Wait until the adapter is blocked in the foreground sleep.
-	readyDeadline := time.NewTimer(5 * time.Second)
+	readyDeadline := time.NewTimer(cancellationReadyTimeout)
 	defer readyDeadline.Stop()
 	readyPoll := time.NewTicker(10 * time.Millisecond)
 	defer readyPoll.Stop()
@@ -1428,7 +1464,7 @@ esac
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Start error = %v, want context.Canceled", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(cancellationReturnTimeout):
 		t.Fatal("Start did not return after cancellation; foreground child blocked the rollback trap")
 	}
 

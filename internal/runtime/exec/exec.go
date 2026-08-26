@@ -44,6 +44,17 @@ type startupWatchEvent struct {
 
 var startupWatchFirstEventTimeout = runtime.StartupDialogTimeout
 
+// execCancellationGrace bounds how long a cooperatively-interrupted adapter has
+// to run its rollback trap before its process group is force-killed.
+//
+// A package var rather than a literal so tests that assert the trap actually
+// RAN can widen it. At 2s, "the marker exists" asserts that a loaded host
+// scheduled a shell trap within two seconds -- a property of the machine, not
+// of signal delivery -- and when it lost, the trap was SIGKILLed before it
+// could write and the failure read as a cancellation bug in untouched code.
+// Production behavior is unchanged. See gascity-l5w.
+var execCancellationGrace = 2 * time.Second
+
 const startupWatchCloseTimeout = 200 * time.Millisecond
 
 // NewProvider returns an exec [Provider] that delegates to the given script.
@@ -87,7 +98,7 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	// the adapter already created (e.g. a Docker container). The grace also
 	// ensures Go forcibly closes I/O pipes after the context expires, even if
 	// grandchild processes (e.g. sleep in a shell script) still hold them open.
-	cancellationAccepted := execgrace.Apply(cmd, 2*time.Second)
+	cancellationAccepted := execgrace.Apply(cmd, execCancellationGrace)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
