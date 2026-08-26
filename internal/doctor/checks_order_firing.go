@@ -11,8 +11,10 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 const (
@@ -145,7 +147,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	// Track severity contributions across error-level entries. Warnings should
 	// stay visible without converting an advisory error into a blocking gate.
 	var blockingErrors, advisoryErrors int
-	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg)
+	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
 
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
@@ -217,7 +219,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 }
 
 func scanOrderFiringCurrentOrders(cityPath string, cfg *config.City) ([]orders.Order, error) {
-	scanCfg := orderFiringCurrentScanConfig(cfg)
+	scanCfg := orderFiringCurrentScanConfig(cfg, cityPath)
 	scanCfg = orderFiringCurrentPruneSuspendedOnlyWildcardOverrides(cityPath, cfg, scanCfg)
 	allOrders, err := orderdiscovery.ScanAll(cityPath, scanCfg, orderFiringCurrentScanOptions(cityPath))
 	if err != nil {
@@ -236,11 +238,11 @@ func orderFiringCurrentScanOptions(cityPath string) orderdiscovery.ScanOptions {
 	}
 }
 
-func orderFiringCurrentScanConfig(cfg *config.City) *config.City {
+func orderFiringCurrentScanConfig(cfg *config.City, cityPath string) *config.City {
 	if cfg == nil {
 		return nil
 	}
-	suspended := orderFiringCurrentSuspendedRigs(cfg)
+	suspended := orderFiringCurrentSuspendedRigs(cfg, cityPath)
 	if len(suspended) == 0 {
 		return cfg
 	}
@@ -279,7 +281,7 @@ func orderFiringCurrentPruneSuspendedOnlyWildcardOverrides(cityPath string, orig
 	if originalCfg == nil || scanCfg == nil || len(scanCfg.Orders.Overrides) == 0 {
 		return scanCfg
 	}
-	suspended := orderFiringCurrentSuspendedRigs(originalCfg)
+	suspended := orderFiringCurrentSuspendedRigs(originalCfg, cityPath)
 	if len(suspended) == 0 {
 		return scanCfg
 	}
@@ -325,13 +327,37 @@ func orderFiringCurrentScanWithoutOverrides(cityPath string, cfg *config.City) (
 	return orderdiscovery.ScanAll(cityPath, &clone, orderFiringCurrentScanOptions(cityPath))
 }
 
-func orderFiringCurrentSuspendedRigs(cfg *config.City) map[string]bool {
+// orderFiringCurrentSuspendedRigs returns the rigs whose orders should be
+// exempt from staleness checking: those that are EFFECTIVELY suspended right
+// now. The runtime override in .gc/runtime/suspension-state.json wins;
+// the authored `suspended_on_start` default (with the deprecated `suspended`
+// key as its alias) applies only where the runtime state is silent.
+//
+// gascity-u4a: this previously read the raw legacy `rig.Suspended` field,
+// which made the exemption dead code in any city satisfying the
+// legacy-suspended-field check, so every dormant rig raised a permanent
+// false blocking ERROR. Reading the authored default alone is not the fix
+// either — it points the wrong way for a rig that carries
+// `suspended_on_start = true` but has since been resumed, silently
+// suppressing genuine staleness on a LIVE rig.
+func orderFiringCurrentSuspendedRigs(cfg *config.City, cityPath string) map[string]bool {
 	out := make(map[string]bool)
 	if cfg == nil {
 		return out
 	}
-	for _, rig := range cfg.Rigs {
-		if rig.Suspended && strings.TrimSpace(rig.Name) != "" {
+	var st suspensionstate.State
+	if cityPath != "" {
+		// Best effort: a missing or unreadable file yields the zero state,
+		// which falls back to the authored defaults rather than failing the
+		// whole check.
+		st, _ = suspensionstate.Load(fsys.OSFS{}, cityPath)
+	}
+	for i := range cfg.Rigs {
+		rig := &cfg.Rigs[i]
+		if strings.TrimSpace(rig.Name) == "" {
+			continue
+		}
+		if suspensionstate.EffectiveRigSuspended(st, rig.Name, rig.EffectiveSuspendedOnStart()) {
 			out[rig.Name] = true
 		}
 	}

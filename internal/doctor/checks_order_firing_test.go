@@ -236,6 +236,98 @@ func TestOrderFiringCurrent_SkipsSuspendedRigOrders(t *testing.T) {
 	}
 }
 
+func orderFiringWriteSuspensionState(t *testing.T, cityPath string, rigs map[string]bool) {
+	t.Helper()
+	dir := filepath.Join(cityPath, ".gc", "runtime")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("creating runtime dir: %v", err)
+	}
+	entries := make([]string, 0, len(rigs))
+	for name, susp := range rigs {
+		entries = append(entries, fmt.Sprintf("%q:{%q:%t}", name, "suspended", susp))
+	}
+	body := fmt.Sprintf(`{"rigs":{%s}}`, strings.Join(entries, ","))
+	if err := os.WriteFile(filepath.Join(dir, "suspension-state.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("writing suspension state: %v", err)
+	}
+}
+
+func orderFiringSuspensionCity(t *testing.T, now time.Time) (string, *config.City) {
+	t.Helper()
+	cityPath, cfg := orderFiringTestCity(t)
+	rigPath := filepath.Join(cityPath, "rigs", "parked")
+	rigOrders := filepath.Join(rigPath, "orders")
+	if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+		t.Fatalf("creating rig orders dir: %v", err)
+	}
+	cfg.FormulaLayers.Rigs = map[string][]string{
+		"parked": {cfg.FormulaLayers.City[0], filepath.Join(rigPath, "formulas")},
+	}
+	writeOrderFiringTestOrderInDir(t, rigOrders, "gate-sweep", "cooldown", "1m")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "gate-sweep:rig:parked", Ts: now.Add(-24 * time.Hour)},
+	)
+	cfg.Rigs = []config.Rig{{Name: "parked", Path: rigPath}}
+	return cityPath, cfg
+}
+
+func TestOrderFiringCurrent_SkipsRigSuspendedOnStart(t *testing.T) {
+	// Regression for gascity-u4a. Modern suspension writes `suspended_on_start`
+	// (what `gc rig add --start-suspended` produces); `suspended` is only the
+	// deprecated alias. Reading the raw legacy field made this exemption dead
+	// code in any city that satisfies the legacy-suspended-field check, so
+	// every dormant rig's orders raised a permanent false blocking ERROR.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringSuspensionCity(t, now)
+	cfg.Rigs[0].SuspendedOnStart = true
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK for suspended_on_start rig; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if strings.Contains(strings.Join(result.Details, "\n"), "parked") {
+		t.Fatalf("details = %v, suspended_on_start rig order should be skipped", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_SkipsRigSuspendedOnlyAtRuntime(t *testing.T) {
+	// gascity-u4a, second direction. winnow is suspended by `gc rig suspend`
+	// and carries NO suspended_on_start in city.toml, so a config-only read
+	// still reports its paused orders as CRITICAL stale.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringSuspensionCity(t, now)
+	orderFiringWriteSuspensionState(t, cityPath, map[string]bool{"parked": true})
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK for runtime-suspended rig; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if strings.Contains(strings.Join(result.Details, "\n"), "parked") {
+		t.Fatalf("details = %v, runtime-suspended rig order should be skipped", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_ChecksResumedRigDespiteSuspendedOnStart(t *testing.T) {
+	// gascity-u4a, the direction that matters most. gascity carries
+	// `suspended_on_start = true` but has been RESUMED, so the runtime
+	// override says active. Exempting it on the authored default alone would
+	// silence genuine staleness on a live rig — strictly worse than the false
+	// positive this bead started from.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringSuspensionCity(t, now)
+	cfg.Rigs[0].SuspendedOnStart = true
+	orderFiringWriteSuspensionState(t, cityPath, map[string]bool{"parked": false})
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status == StatusOK {
+		t.Fatalf("status = OK, want stale reported for a resumed rig; details = %v", result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "parked") {
+		t.Fatalf("details = %v, resumed rig order must still be checked", result.Details)
+	}
+}
+
 func TestOrderFiringCurrent_SkipsSuspendedRigOverrides(t *testing.T) {
 	// Suspended rig orders are pruned from the doctor scan; matching overrides
 	// must be pruned with them so a harmless paused rig does not become a scan
