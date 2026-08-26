@@ -4616,6 +4616,13 @@ func sessionHasAwakeAssignedWorkInStoreByIdentifiers(store beads.Store, identifi
 			if has, err := sessionHasReadyAssignedWorkForTier(store, assignee, tierMode); err != nil || has {
 				return has, err
 			}
+			// Ready() hides non-root formula steps (readyExcludeTypes), so the
+			// probe above structurally cannot see a session holding an open
+			// submit step. That is liveness, not discovery — see
+			// openAssignedStepIsExecutable (gascity-t2c).
+			if has, err := sessionHasOpenAssignedStepWorkForTier(store, assignee, tierMode); err != nil || has {
+				return has, err
+			}
 		}
 	}
 	return false, nil

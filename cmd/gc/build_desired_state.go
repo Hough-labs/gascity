@@ -1231,11 +1231,13 @@ func collectAssignedWorkBeadsWithStores(
 			// live-session step beads in the same range are skipped untouched.
 			if openRouted, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open"}); err == nil {
 				appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openRouted, seen, source.store, source.ref)
+				appendOpenAssignedStepWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openRouted, seen, source.store, source.ref)
 				appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 			} else {
 				errs = append(errs, fmt.Errorf("List(open): %w", err))
 				if beads.IsPartialResult(err) && len(openRouted) > 0 {
 					appendOpenAssignedMoleculeWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openRouted, seen, source.store, source.ref)
+					appendOpenAssignedStepWorkUnique(&result, &resultStores, &resultStoreRefs, readyIDs, openRouted, seen, source.store, source.ref)
 					appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
 				}
 			}
@@ -2221,10 +2223,58 @@ func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Sto
 	}
 }
 
+// appendOpenAssignedStepWorkUnique includes open assigned formula step beads
+// whose blocking dependencies have closed. Ready() hides non-root steps from
+// generic work queues (readyExcludeTypes, #1039) so `bd ready` shows the parent
+// molecule instead of its scaffolding — right for discovery, wrong for wake
+// demand. Without a readiness verdict these beads reach AwakeWorkBead with
+// Ready=false, workBeadHasAwakeDemand returns false, and ComputeAwakeSet raises
+// no "assigned-work" demand for a session that is mid-molecule; the session is
+// drained and never re-woken to run its submit step (gascity-t2c).
+//
+// It runs BEFORE appendOpenRoutedWorkUnique so a step bead is captured here,
+// with its verdict, rather than by the orphan-release pass that admits beads
+// with no readiness gate. The dependency gate lives in
+// openAssignedStepIsExecutable and is what keeps a blocked step from becoming
+// wake demand (ga-3ox7rk).
+func appendOpenAssignedStepWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+	now := time.Now().UTC()
+	candidates := make([]beads.Bead, 0, 4)
+	ids := make([]string, 0, 4)
+	for _, b := range beadList {
+		if !openAssignedStepCandidate(b, now) {
+			continue
+		}
+		candidates = append(candidates, b)
+		ids = append(ids, b.ID)
+	}
+	// The overwhelmingly common case is a store with no open assigned steps.
+	// Returning here keeps this pass free for those ticks — the dependency
+	// resolution below is the only extra store traffic it ever adds.
+	if len(candidates) == 0 {
+		return
+	}
+	deps, err := stepDependencies(store, ids)
+	if err != nil {
+		log.Printf("appendOpenAssignedStepWorkUnique: resolving step dependencies in %q: %v", storeRef, err)
+		return
+	}
+	closedByID := make(map[string]bool)
+	for _, b := range candidates {
+		if !stepBlockingDepsClosed(store, deps[b.ID], closedByID) {
+			continue
+		}
+		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
+			markReadyAssigned(readyIDs, b)
+		}
+	}
+}
+
 // markReadyAssigned records a bead ID as wake-demand-ready. It is called only
 // by the assigned-work passes that establish real readiness (in-progress,
-// store-Ready()/deps, and assigned molecule roots) — never by the open-routed
-// orphan-release pass, whose beads have not passed any readiness gate.
+// store-Ready()/deps, assigned molecule roots, and executable assigned formula
+// steps) — never by the open-routed orphan-release pass, whose beads have not
+// passed any readiness gate.
 func markReadyAssigned(readyIDs map[string]bool, b beads.Bead) {
 	if readyIDs == nil {
 		return
