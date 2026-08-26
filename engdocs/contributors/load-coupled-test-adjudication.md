@@ -218,7 +218,7 @@ debug against a premise we invented. Keep open; the bead's existing instruction 
 which `recordOperation`/`storageStep` sequence actually runs on a failing run before
 touching any constant — is still the correct first move.
 
-## cmd/gc isolated runs
+## cmd/gc isolated runs — and the cmd/gc-lane verdicts
 
 35 named tests (the union of iql + 4h5 + 4nv + tqi), `-count=3 -p 1`, serial, isolated
 env. Guard: the `-run` regex was verified with `go test -list` to match exactly 35 tests,
