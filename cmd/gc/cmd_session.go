@@ -1818,11 +1818,20 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// Each Update fires the bd on_update hook, which emits a bead.updated
 	// event the supervisor's CachingStore absorbs — the cache-update event
 	// the close path was previously missing (gastownhall/gascity#2625).
+	//
+	// The fallback route is the retired session's own template. Clearing the
+	// assignee is only half a release: a bead whose gc.routed_to was consumed
+	// by the claim ends up open, unassigned and unrouted, which no discovery
+	// probe in the city matches — not the assigned-work lookup (keys on session
+	// identity), not the pool demand probe (requires a route), not the refinery
+	// find-work query (requires an assignee). ReleaseWorkBead stamps the
+	// fallback only on a bead that is otherwise unrouted, so an explicitly
+	// routed bead keeps its own route (gascity-t2c).
 	var rigStores map[string]beads.Store
 	if cityErr == nil && cfg != nil {
 		rigStores = buildStandaloneRigStores(cfg, cityPath, stderr)
 	}
-	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, closedSessionBead, "", stderr)
+	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, closedSessionBead, retiredSessionFallbackRoute(closedSessionBead), stderr)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
