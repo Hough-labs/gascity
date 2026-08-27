@@ -99,3 +99,26 @@ func TestStatusScriptLocalRunningPrintsManagedText(t *testing.T) {
 		t.Fatalf("local managed status must not use external-endpoint phrasing:\n%s", out)
 	}
 }
+
+// TestStatusScriptLocalIndeterminatePrintsUnknownText covers the gascity-bh0
+// exit-3 path: op_probe reports "indeterminate" when a port-holder probe did not
+// complete while the port is nevertheless answering. Status must surface that as
+// an unknown, not fold it into the confirmed-stopped "not running" wording, which
+// is what an operator would otherwise act on.
+func TestStatusScriptLocalIndeterminatePrintsUnknownText(t *testing.T) {
+	cityPath := t.TempDir()
+	writeFakeBeadsBD(t, cityPath, 3)
+
+	out, err := runStatus(t, cityPath, "127.0.0.1", "3311")
+	if err == nil {
+		t.Fatalf("status exited 0 for an indeterminate probe; want nonzero\n%s", out)
+	}
+	for _, want := range []string{"state unknown", "managed", "port-holder probe did not complete"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("status output missing %q; got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "not running") {
+		t.Fatalf("status reported an indeterminate probe as a confirmed-stopped server:\n%s", out)
+	}
+}

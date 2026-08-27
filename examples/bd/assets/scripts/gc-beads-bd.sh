@@ -752,6 +752,14 @@ load_managed_process_inspection_from_gc() {
     GC_PORT_HOLDER_PID=""
     GC_PORT_HOLDER_OWNED="false"
     GC_PORT_HOLDER_DELETED="false"
+    # The *_probed flags say whether the underlying lsof probe COMPLETED, not
+    # what it found. They default to "true" so a helper predating gascity-4k6
+    # (which does not emit them) keeps its old meaning: absent evidence of a
+    # timeout is treated as a completed probe. Defaulting to "false" would make
+    # every such call look indeterminate and refuse to start.
+    GC_MANAGED_DELETED_PROBED="true"
+    GC_PORT_HOLDER_PROBED="true"
+    GC_PORT_HOLDER_DELETED_PROBED="true"
     while IFS="$(printf '	')" read -r key value; do
         case "$key" in
             managed_pid)
@@ -763,14 +771,23 @@ load_managed_process_inspection_from_gc() {
             managed_deleted_inodes)
                 GC_MANAGED_DELETED="$value"
                 ;;
+            managed_deleted_inodes_probed)
+                GC_MANAGED_DELETED_PROBED="$value"
+                ;;
             port_holder_pid)
                 [ "$value" != "0" ] && GC_PORT_HOLDER_PID="$value"
+                ;;
+            port_holder_probed)
+                GC_PORT_HOLDER_PROBED="$value"
                 ;;
             port_holder_owned)
                 GC_PORT_HOLDER_OWNED="$value"
                 ;;
             port_holder_deleted_inodes)
                 GC_PORT_HOLDER_DELETED="$value"
+                ;;
+            port_holder_deleted_inodes_probed)
+                GC_PORT_HOLDER_DELETED_PROBED="$value"
                 ;;
         esac
     done <<EOF
@@ -789,6 +806,8 @@ load_probe_managed_from_gc() {
     GC_PROBE_PORT_HOLDER_OWNED="false"
     GC_PROBE_PORT_HOLDER_DELETED="false"
     GC_PROBE_TCP_REACHABLE="false"
+    # See load_managed_process_inspection_from_gc for why this defaults to true.
+    GC_PROBE_PORT_HOLDER_PROBED="true"
     [ -n "$gc_bin" ] || return 1
     GC_PROBE_USED="true"
     output=$("$gc_bin" dolt-state probe-managed --city "$GC_CITY_PATH" --host "$host" --port "$DOLT_PORT" </dev/null 2>/dev/null)
@@ -801,6 +820,10 @@ load_probe_managed_from_gc() {
                 ;;
             port_holder_pid)
                 [ "$value" != "0" ] && GC_PROBE_PORT_HOLDER_PID="$value"
+                parsed=true
+                ;;
+            port_holder_probed)
+                GC_PROBE_PORT_HOLDER_PROBED="$value"
                 parsed=true
                 ;;
             port_holder_owned)
@@ -824,6 +847,22 @@ EOF
         return 1
     fi
     [ "$status" -eq 0 ]
+}
+
+# port_probe_unanswered_blocks_start returns 0 when the port must be treated as
+# held even though the helper reported no holder PID.
+#
+# The helper's port-holder lookup is an lsof call under a fixed timeout
+# (gascity-4k6). When it does not complete it reports port_holder_pid 0 with
+# port_holder_probed false — indistinguishable, to a reader that ignores the
+# flag, from a genuinely free port. Starting a server on that assumption races
+# a live one. So when the probe did not complete, resolve the unknown with an
+# independent mechanism: a TCP connect. If something answers, the port is held
+# by a process we simply could not name, and the caller must refuse to start.
+# If nothing answers, both mechanisms agree the port is free.
+port_probe_unanswered_blocks_start() {
+    [ "${GC_PROBE_PORT_HOLDER_PROBED:-true}" = "true" ] && return 1
+    tcp_check_port "$DOLT_PORT"
 }
 
 load_existing_managed_from_gc() {
@@ -1603,6 +1642,7 @@ EOF
 
 wait_for_concurrent_start_ready() {
     local existing_pid="" existing_port="" holder="" timeout_ms deadline_ms now_ms remaining_ms wait_ms
+    GC_CONCURRENT_WAIT_PROBE_UNANSWERED="false"
     timeout_ms="$CONCURRENT_START_READY_TIMEOUT_MS"
     case "$timeout_ms" in
         ''|*[!0-9]*)
@@ -1643,6 +1683,12 @@ wait_for_concurrent_start_ready() {
                     save_state "$holder" true
                     return 0
                 fi
+            elif [ "$GC_PROBE_PORT_HOLDER_PROBED" != "true" ]; then
+                # running=false only because the holder lookup timed out — the
+                # winner's state was never established. Keep waiting rather
+                # than treating the unknown as a negative, and record it so a
+                # timeout is reported as "unknown", not "never started".
+                GC_CONCURRENT_WAIT_PROBE_UNANSWERED="true"
             fi
         fi
         if [ "$GC_EXISTING_USED" != "true" ] && [ "$GC_PROBE_USED" != "true" ]; then
@@ -2178,6 +2224,9 @@ op_start() {
         if wait_for_concurrent_start_ready; then
             exit 0
         fi
+        if [ "${GC_CONCURRENT_WAIT_PROBE_UNANSWERED:-false}" = "true" ]; then
+            die "could not acquire dolt start lock ($LOCK_FILE); a concurrent starter holds it and the port-holder probe never completed, so whether its server came up is unknown (check $LOG_FILE)"
+        fi
         die "could not acquire dolt start lock ($LOCK_FILE)"
     fi
 
@@ -2258,6 +2307,8 @@ op_start() {
                     sleep 1
                 fi
             fi
+        elif port_probe_unanswered_blocks_start; then
+            die "refusing to start dolt: port $DOLT_PORT is answering but its holder could not be identified (the port-holder probe did not complete); starting here would race a live server (check $LOG_FILE)"
         fi
     else
         if [ -z "$holder" ]; then
@@ -2952,7 +3003,12 @@ op_health() {
 }
 
 # op_probe checks if the dolt server is available.
-# Exit 0 = running, exit 2 = not running.
+#
+# Exit 0 = running, exit 2 = confirmed not running, exit 3 = indeterminate:
+# a port-holder probe did not complete AND something is answering the port, so
+# "not running" was never established. Callers that branch only on exit 0 are
+# unaffected; exit 3 exists so an unanswered probe is never reported as a
+# confirmed-stopped server (gascity-bh0).
 op_probe() {
     if is_remote; then
         # Remote server — check TCP.
@@ -2963,11 +3019,18 @@ op_probe() {
         fi
     fi
 
+    local indeterminate=false
     if load_probe_managed_from_gc; then
         if [ "$GC_PROBE_RUNNING" = "true" ]; then
             exit 0
         fi
-        exit 2
+        # running=false is a confirmed negative only when the port-holder probe
+        # actually completed. If it timed out, fall through to the independent
+        # local checks below instead of reporting "not running".
+        if [ "$GC_PROBE_PORT_HOLDER_PROBED" = "true" ]; then
+            exit 2
+        fi
+        indeterminate=true
     fi
 
     # Local server — check port holder and verify identity.
@@ -2980,9 +3043,19 @@ op_probe() {
             fi
             exit 2
         fi
+        if [ "$GC_PORT_HOLDER_PROBED" != "true" ]; then
+            indeterminate=true
+        fi
     fi
     holder=$(find_port_holder)
     if [ -z "$holder" ]; then
+        # No probe named a holder. If one of them never completed and the port
+        # is nevertheless answering, something is listening that we could not
+        # identify — report the unknown rather than a confirmed negative.
+        if [ "$indeterminate" = "true" ] && tcp_check; then
+            echo "warning: dolt port $DOLT_PORT is answering but the port-holder probe did not complete; cannot confirm whether the managed server is running" >&2
+            exit 3
+        fi
         exit 2
     fi
 

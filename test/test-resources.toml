@@ -66,6 +66,29 @@ version = 2
 #     pass on timing. Same shape as the gascity-4zf sleep banked above.
 # The production fix itself adds no resource: the census scans *_test.go only.
 
+# gascity-bh0 (bd-script port-probe ambiguity) is +1 call and +1 file on
+# subprocess and on net_listen, in every scope that counts them. Both land in
+# cmd/gc/gc_beads_bd_port_probe_test.go, which had neither resource before, and
+# both are inherent to what the file proves: gc-beads-bd.sh never read the
+# port_holder_probed flag, so an lsof probe that timed out was indistinguishable
+# from a free port and op_start could launch a second dolt against a port that
+# was actually held.
+#   - runBdScriptHarness is the file's ONLY exec.Command site. The subject under
+#     test is a shell script, so proving its branch behaviour requires running
+#     it; the four tests sweep parse capture, the start refusal, and op_probe's
+#     exit codes. Written inline that would have been +4 calls; consolidating
+#     first is why this moves by one, following the precedent gascity-0zw set
+#     for runPackScript and gascity-t8r1 for startLivenessSubject. New tests in
+#     that file reuse the helper rather than add a call site.
+#   - listeningPort is the file's ONLY net.Listen site. "The port answers but
+#     its holder cannot be named" is the exact state the fix has to refuse to
+#     start on, and a real bound loopback port is the only way to produce it —
+#     a fake helper can claim a port is held, but only a listener makes the
+#     script's independent TCP connect agree. closedPort reuses it (bind, read
+#     the port, release) so the free-port case is exercised without a second
+#     call site, and both start and probe tests share the one helper.
+# The production fix itself adds no resource: the census scans *_test.go only.
+
 # The ga-80po0c.* owner_bead ids below are all dangling (gc doctor: 8 findings,
 # tracked by gascity-82e). They are left untouched deliberately: re-pointing
 # only the rows this increment happens to touch would split ga-80po0c.2.1,
@@ -78,13 +101,13 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 549
-baseline_files = 166
+baseline_calls = 550
+baseline_files = 167
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
 invariant = "tracked test source totals remain visible as audit evidence"
-resource_owner = "ga-80po0c.2 owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit); +1/+0 on 2026-08-25 owned by gascity-0zw (runPackScript in examples/bd/dolt/health_test.go, the one exec site every dolt pack-script test now routes through); +1/+1 on 2026-08-26 owned by gascity-t8r1 (startLivenessSubject in cmd/gc/cmd_start_drift_pid_liveness_test.go, the file's single exec site; the four pidGone/waitForPIDExit subjects route through it)"
+resource_owner = "ga-80po0c.2 owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit); +1/+0 on 2026-08-25 owned by gascity-0zw (runPackScript in examples/bd/dolt/health_test.go, the one exec site every dolt pack-script test now routes through); +1/+1 on 2026-08-26 owned by gascity-t8r1 (startLivenessSubject in cmd/gc/cmd_start_drift_pid_liveness_test.go, the file's single exec site; the four pidGone/waitForPIDExit subjects route through it); +1/+1 on 2026-08-26 owned by gascity-bh0 (runBdScriptHarness in cmd/gc/gc_beads_bd_port_probe_test.go, the one exec site every bd-script port-probe test routes through)"
 migration_target = "P0.4a"
 expires = "2026-10-01"
 
@@ -119,13 +142,13 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 410
-baseline_files = 115
+baseline_calls = 411
+baseline_files = 116
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
 invariant = "untagged subprocess call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each process-owning test removes or replaces its source call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit); +1/+0 on 2026-08-25 owned by gascity-0zw (runPackScript in examples/bd/dolt/health_test.go, the one exec site every dolt pack-script test now routes through); +1/+1 on 2026-08-26 owned by gascity-t8r1 (startLivenessSubject in cmd/gc/cmd_start_drift_pid_liveness_test.go, the file's single exec site; the four pidGone/waitForPIDExit subjects route through it)"
+resource_owner = "each process-owning test removes or replaces its source call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit); +1/+0 on 2026-08-25 owned by gascity-0zw (runPackScript in examples/bd/dolt/health_test.go, the one exec site every dolt pack-script test now routes through); +1/+1 on 2026-08-26 owned by gascity-t8r1 (startLivenessSubject in cmd/gc/cmd_start_drift_pid_liveness_test.go, the file's single exec site; the four pidGone/waitForPIDExit subjects route through it); +1/+1 on 2026-08-26 owned by gascity-bh0 (runBdScriptHarness in cmd/gc/gc_beads_bd_port_probe_test.go, the one exec site every bd-script port-probe test routes through)"
 migration_target = "D1/D2/D5/D6/E6"
 expires = "2026-10-01"
 
@@ -210,13 +233,13 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 95
-baseline_files = 36
+baseline_calls = 96
+baseline_files = 37
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-80po0c.2.2.2"
 invariant = "untagged stream-listener call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each owning test closes its stream listener and removes duplicate listener-backed coverage"
+resource_owner = "each owning test closes its stream listener and removes duplicate listener-backed coverage; +1/+1 on 2026-08-26 owned by gascity-bh0 (listeningPort in cmd/gc/gc_beads_bd_port_probe_test.go, the one listener site the port-probe tests share to prove a held port)"
 migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
@@ -401,13 +424,13 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 405
-baseline_files = 112
+baseline_calls = 406
+baseline_files = 113
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"
 invariant = "untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners remove or replace each process call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit); +1/+0 on 2026-08-25 owned by gascity-0zw (runPackScript in examples/bd/dolt/health_test.go, the one exec site every dolt pack-script test now routes through); +1/+1 on 2026-08-26 owned by gascity-t8r1 (startLivenessSubject in cmd/gc/cmd_start_drift_pid_liveness_test.go, the file's single exec site; the four pidGone/waitForPIDExit subjects route through it)"
+resource_owner = "non-Medium lexical owners remove or replace each process call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit); +1/+0 on 2026-08-25 owned by gascity-0zw (runPackScript in examples/bd/dolt/health_test.go, the one exec site every dolt pack-script test now routes through); +1/+1 on 2026-08-26 owned by gascity-t8r1 (startLivenessSubject in cmd/gc/cmd_start_drift_pid_liveness_test.go, the file's single exec site; the four pidGone/waitForPIDExit subjects route through it); +1/+1 on 2026-08-26 owned by gascity-bh0 (runBdScriptHarness in cmd/gc/gc_beads_bd_port_probe_test.go, the one exec site every bd-script port-probe test routes through)"
 migration_target = "D1/D2/D5/D6/E6"
 expires = "2026-10-01"
 
@@ -492,13 +515,13 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 93
-baseline_files = 35
+baseline_calls = 94
+baseline_files = 36
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-80po0c.2.2.2"
 invariant = "untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener"
+resource_owner = "non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener; +1/+1 on 2026-08-26 owned by gascity-bh0 (listeningPort in cmd/gc/gc_beads_bd_port_probe_test.go, the one listener site the port-probe tests share to prove a held port)"
 migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 

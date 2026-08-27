@@ -28,8 +28,11 @@ fi
 
 host="${GC_DOLT_HOST:-127.0.0.1}"
 
-# probe exits 0 if the server is reachable, non-zero otherwise. Capture the
+# probe exits 0 if the server is reachable, 2 when it is confirmed stopped, and
+# 3 when a port-holder probe did not complete while the port is nevertheless
+# answering — an unknown rather than a negative (gascity-bh0). Capture the
 # result via `if` so `set -e` does not abort before we print status text.
+probe_status=0
 if GC_CITY_PATH="$GC_CITY_PATH" "$GC_BEADS_BD_SCRIPT" probe >/dev/null 2>&1; then
   if is_local_dolt_host "$host"; then
     echo "Dolt server: running (managed, 127.0.0.1:$GC_DOLT_PORT)"
@@ -38,6 +41,16 @@ if GC_CITY_PATH="$GC_CITY_PATH" "$GC_BEADS_BD_SCRIPT" probe >/dev/null 2>&1; the
   fi
   dolt_print_endpoint_scope
   exit 0
+else
+  probe_status=$?
+fi
+
+# Exit 3 is only reachable on the managed-local path: the remote branch of
+# probe is a plain TCP check and answers 0 or 2.
+if [ "$probe_status" -eq 3 ]; then
+  echo "Dolt server: state unknown (managed, 127.0.0.1:$GC_DOLT_PORT) — the port is answering but the port-holder probe did not complete, so the listener could not be confirmed"
+  dolt_print_endpoint_scope
+  exit 1
 fi
 
 if is_local_dolt_host "$host"; then
