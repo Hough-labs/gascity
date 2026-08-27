@@ -14,30 +14,58 @@ import (
 	"github.com/gastownhall/gascity/internal/strandedwork"
 )
 
-// gitBranchProber answers strandedwork.BranchProber from one repository. It
-// memoizes the repository's default branch (including a failure to resolve it)
-// so a patrol pass costs at most one default-branch lookup per repository, and
-// none at all on the healthy path where no bead reaches the probe.
+// strandedWorkGitProbe is the slice of internal/git.Git the patrol uses.
+// Defined as an interface so tests can inject a fake — and, in particular,
+// count the subprocesses a pass actually spawns.
+type strandedWorkGitProbe interface {
+	IsRepo() bool
+	RefExists(fullRef string) (bool, error)
+	CountCommitsAhead(base, tip string) (int, error)
+	DefaultBranch() (string, error)
+}
+
+// newStrandedWorkGitProbe returns a probe scoped to workDir. Indirected through
+// a package-level var so tests can stub the git invocations.
+var newStrandedWorkGitProbe = func(workDir string) strandedWorkGitProbe { return git.New(workDir) }
+
+// gitBranchProber answers strandedwork.BranchProber from one repository.
+//
+// Every git question it asks is deferred to the first branch actually probed
+// and memoized thereafter — whether the directory is a repository at all, and
+// what the repository's default branch is (including a failure to resolve it).
+// That keeps a patrol pass at zero subprocesses on the healthy path, where no
+// bead matches the cheap metadata half and no branch reaches the probe, and at
+// one repository check per scope on the path where some do. The controller
+// ticks every 30s over every scope, so a question asked before it is needed is
+// one paid forever.
 type gitBranchProber struct {
-	repo             *git.Git
+	repo             strandedWorkGitProbe
+	isRepo           bool
+	isRepoResolved   bool
 	defaultTarget    string
 	defaultTargetErr error
 	defaultResolved  bool
 }
 
 // newGitBranchProber returns a prober backed by repo.
-func newGitBranchProber(repo *git.Git) *gitBranchProber {
+func newGitBranchProber(repo strandedWorkGitProbe) *gitBranchProber {
 	return &gitBranchProber{repo: repo}
 }
 
 // ProbeBranch reports the repository's view of branch measured against target,
 // resolving the repository default when target is empty.
 //
-// An absent branch short-circuits: there is nothing to count and nothing to
-// publish, so the remaining probes are skipped. Every other failure is returned
-// rather than degraded into a zero value — a caller deciding whether committed
-// work is at risk must not read "git could not answer" as "nothing is there".
+// A directory that is not a git repository, and an absent branch, both
+// short-circuit: there is nothing to count and nothing to publish, so the
+// remaining probes are skipped. A scope with no repository is the normal shape
+// for a city that holds beads but no source, not a failure to investigate.
+// Every other failure is returned rather than degraded into a zero value — a
+// caller deciding whether committed work is at risk must not read "git could
+// not answer" as "nothing is there".
 func (p *gitBranchProber) ProbeBranch(branch, target string) (strandedwork.BranchState, error) {
+	if !p.repository() {
+		return strandedwork.BranchState{}, nil
+	}
 	branchRef := "refs/heads/" + branch
 	localExists, err := p.repo.RefExists(branchRef)
 	if err != nil {
@@ -69,6 +97,16 @@ func (p *gitBranchProber) ProbeBranch(branch, target string) (strandedwork.Branc
 		CommitsAhead: ahead,
 		OnOrigin:     onOrigin,
 	}, nil
+}
+
+// repository reports, once per prober, whether the directory is a git
+// repository at all.
+func (p *gitBranchProber) repository() bool {
+	if !p.isRepoResolved {
+		p.isRepo = p.repo.IsRepo()
+		p.isRepoResolved = true
+	}
+	return p.isRepo
 }
 
 // repositoryDefault resolves and caches the repository's default branch, used
@@ -113,34 +151,60 @@ type strandedWorkScope struct {
 // A scope with no store, no configured path, or a path that is not a git
 // repository yields nothing without an error: a city that is not itself a
 // checkout holds no work branches, which is the normal case rather than a
-// failure to investigate.
+// failure to investigate. The repository check belongs to the prober rather
+// than to this function so that it, like every other git question, is only
+// asked once a bead has matched the cheap metadata half.
 func scanStrandedWorkScope(scope strandedWorkScope) ([]strandedwork.Finding, error) {
 	if scope.store == nil || strings.TrimSpace(scope.repoPath) == "" {
 		return nil, nil
 	}
-	repo := git.New(scope.repoPath)
-	if !repo.IsRepo() {
-		return nil, nil
-	}
-	return strandedwork.Scan(scope.storeRef, scope.store, newGitBranchProber(repo))
+	prober := newGitBranchProber(newStrandedWorkGitProbe(scope.repoPath))
+	return strandedwork.Scan(scope.storeRef, scope.store, prober)
 }
 
-// strandedWorkThrottle collapses an unchanged finding to a single emission.
+// strandedWorkScanInterval bounds how often the patrol looks.
+//
+// A strand is a slow condition: gascity-cgh sat unreachable for six days, and
+// gascity-3vr for a day. Detecting one within five minutes is far inside any
+// response an operator can act on, while rescanning at the 30s tick rate would
+// charge every store a list and every repository whose beads match a probe,
+// 2,880 times a day, to learn nothing changed.
+const strandedWorkScanInterval = 5 * time.Minute
+
+// strandedWorkThrottle bounds both halves of the patrol's cost: how often it
+// scans, and how often an unchanged finding is restated.
 //
 // The controller ticks every 30s and a stranded bead stays stranded until
-// somebody acts on it, so an unthrottled patrol would restate the same finding
-// thousands of times a day and bury the signal it exists to raise. State is
-// per-process by design: it is a de-duplication window, not a record, and a
-// controller restart re-announcing what is still stranded is the right
-// behavior.
+// somebody acts on it, so an unthrottled patrol would both re-scan every store
+// twice a minute and restate the same finding thousands of times a day, burying
+// the signal it exists to raise. State is per-process by design: it is a
+// de-duplication window, not a record, and a controller restart both re-scanning
+// immediately and re-announcing what is still stranded is the right behavior.
 type strandedWorkThrottle struct {
 	// reported maps a finding's identity to the fingerprint last emitted for it.
 	reported map[string]string
+	// interval is the minimum gap between scans.
+	interval time.Duration
+	// lastScan is when the patrol last scanned. Its zero value lets the first
+	// pass through, so a freshly started controller looks immediately.
+	lastScan time.Time
 }
 
-// newStrandedWorkThrottle returns an empty throttle.
+// newStrandedWorkThrottle returns an empty throttle scanning at the default
+// interval.
 func newStrandedWorkThrottle() *strandedWorkThrottle {
-	return &strandedWorkThrottle{reported: map[string]string{}}
+	return &strandedWorkThrottle{reported: map[string]string{}, interval: strandedWorkScanInterval}
+}
+
+// beginScan reports whether this pass should scan, recording the attempt when
+// it does. It mutates rather than answering as a pure predicate so the caller
+// cannot scan without also charging the interval.
+func (t *strandedWorkThrottle) beginScan(now time.Time) bool {
+	if now.Sub(t.lastScan) < t.interval {
+		return false
+	}
+	t.lastScan = now
+	return true
 }
 
 // admit returns the subset of findings worth emitting: those not seen before,
@@ -263,9 +327,16 @@ func (cr *CityRuntime) strandedWorkScopes() []strandedWorkScope {
 // calls that belong to an operator or a pack.
 //
 // It runs after route recovery so a bead whose route was just restored is no
-// longer reported as unrouted. Best-effort: a scope that cannot be scanned is
-// logged and the remaining scopes still run.
-func (cr *CityRuntime) patrolStrandedWork() {
+// longer reported as unrouted, and on its own interval rather than on every
+// tick. Best-effort: a scope that cannot be scanned is logged and the remaining
+// scopes still run.
+func (cr *CityRuntime) patrolStrandedWork(now time.Time) {
+	if cr.strandedWork == nil {
+		cr.strandedWork = newStrandedWorkThrottle()
+	}
+	if !cr.strandedWork.beginScan(now) {
+		return
+	}
 	var findings []strandedwork.Finding
 	for _, scope := range cr.strandedWorkScopes() {
 		scoped, err := scanStrandedWorkScope(scope)
@@ -273,9 +344,6 @@ func (cr *CityRuntime) patrolStrandedWork() {
 			fmt.Fprintf(cr.stderr, "%s: stranded-work patrol (%s): %v\n", cr.logPrefix, scope.storeRef, err) //nolint:errcheck // best-effort stderr
 		}
 		findings = append(findings, scoped...)
-	}
-	if cr.strandedWork == nil {
-		cr.strandedWork = newStrandedWorkThrottle()
 	}
 	emitStrandedWorkEvents(cr.rec, cr.strandedWork.admit(findings), cr.logPrefix, cr.stderr)
 }

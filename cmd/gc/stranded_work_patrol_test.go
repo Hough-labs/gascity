@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -311,12 +312,198 @@ func TestPatrolStrandedWorkEmitsOncePerUnchangedStrand(t *testing.T) {
 		logPrefix:           "gc supervisor",
 	}
 
-	cr.patrolStrandedWork()
+	// The second pass is placed past the scan interval deliberately: otherwise
+	// the cadence gate would suppress it and this test would prove nothing
+	// about emission throttling.
+	now := time.Now()
+	cr.patrolStrandedWork(now)
 	if len(rec.Events) != 1 {
 		t.Fatalf("first patrol recorded %d events, want 1: %s", len(rec.Events), stderr.String())
 	}
-	cr.patrolStrandedWork()
+	cr.patrolStrandedWork(now.Add(strandedWorkScanInterval))
 	if len(rec.Events) != 1 {
 		t.Fatalf("second patrol recorded %d events, want the unchanged strand throttled to 1", len(rec.Events))
+	}
+}
+
+func TestPatrolStrandedWorkScansOnItsOwnCadenceRatherThanEveryTick(t *testing.T) {
+	// A strand is a condition measured in hours and days — gascity-cgh sat
+	// unreachable for six — so rescanning every 30s controller tick buys no
+	// detection speed an operator can use, and charges every store a list and
+	// every repository a probe to learn nothing changed.
+	dir := strandedRepo(t)
+	patrolBranch(t, dir, "polecat/gascity-cgh", 3)
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "the cmd/gc test-budget fix",
+		Metadata: beads.StringMap{beadmeta.BranchMetadataKey: "polecat/gascity-cgh"},
+	}); err != nil {
+		t.Fatalf("seeding bead: %v", err)
+	}
+	var stderr bytes.Buffer
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "gc",
+		cfg:                 &config.City{Rigs: []config.Rig{{Name: "gascity", Path: dir}}},
+		standaloneRigStores: map[string]beads.Store{"gascity": store},
+		strandedWork:        newStrandedWorkThrottle(),
+		rec:                 events.NewFake(),
+		stderr:              &stderr,
+		logPrefix:           "gc supervisor",
+	}
+	counter := withCountingStrandedWorkProbe(t)
+
+	now := time.Now()
+	cr.patrolStrandedWork(now)
+	afterFirst := counter.calls
+	if afterFirst == 0 {
+		t.Fatalf("first patrol made no git calls; it did not scan: %s", stderr.String())
+	}
+
+	// A tick later, well inside the interval: no scan, so no git at all.
+	cr.patrolStrandedWork(now.Add(30 * time.Second))
+	if counter.calls != afterFirst {
+		t.Errorf("patrol one tick later made %d extra git call(s), want 0", counter.calls-afterFirst)
+	}
+
+	// Once the interval has elapsed it scans again — the patrol is throttled,
+	// not disabled.
+	cr.patrolStrandedWork(now.Add(strandedWorkScanInterval))
+	if counter.calls == afterFirst {
+		t.Error("patrol did not scan again after its interval elapsed")
+	}
+}
+
+func TestStrandedWorkThrottleScansOnTheFirstPass(t *testing.T) {
+	// A controller that has just started has never scanned; the gate must not
+	// make it wait out an interval before the first look.
+	if !newStrandedWorkThrottle().beginScan(time.Now()) {
+		t.Error("beginScan refused the first pass")
+	}
+}
+
+// countingStrandedWorkProbe wraps a real probe and counts every git invocation
+// it forwards, so the patrol's cost on the healthy path can be asserted rather
+// than assumed.
+type countingStrandedWorkProbe struct {
+	inner strandedWorkGitProbe
+	calls int
+}
+
+func (p *countingStrandedWorkProbe) IsRepo() bool {
+	p.calls++
+	return p.inner.IsRepo()
+}
+
+func (p *countingStrandedWorkProbe) RefExists(fullRef string) (bool, error) {
+	p.calls++
+	return p.inner.RefExists(fullRef)
+}
+
+func (p *countingStrandedWorkProbe) CountCommitsAhead(base, tip string) (int, error) {
+	p.calls++
+	return p.inner.CountCommitsAhead(base, tip)
+}
+
+func (p *countingStrandedWorkProbe) DefaultBranch() (string, error) {
+	p.calls++
+	return p.inner.DefaultBranch()
+}
+
+// withCountingStrandedWorkProbe swaps the patrol's git factory for one that
+// counts invocations, returning the counter.
+func withCountingStrandedWorkProbe(t *testing.T) *countingStrandedWorkProbe {
+	t.Helper()
+	counter := &countingStrandedWorkProbe{}
+	original := newStrandedWorkGitProbe
+	newStrandedWorkGitProbe = func(workDir string) strandedWorkGitProbe {
+		counter.inner = git.New(workDir)
+		return counter
+	}
+	t.Cleanup(func() { newStrandedWorkGitProbe = original })
+	return counter
+}
+
+func TestScanStrandedWorkScopeRunsNoGitWhenNoBeadIsACandidate(t *testing.T) {
+	// The healthy path is the one that runs forever: the controller ticks every
+	// 30s over every scope, and almost always nothing is stranded. A patrol that
+	// shells out before it has a candidate pays a git subprocess per scope per
+	// tick in perpetuity for an answer it never needed.
+	dir := strandedRepo(t)
+	store := beads.NewMemStore()
+	// Open beads that fail the cheap metadata half: one routed, one with no
+	// branch recorded at all.
+	for _, meta := range []beads.StringMap{
+		{beadmeta.BranchMetadataKey: "polecat/gascity-cgh", beadmeta.RoutedToMetadataKey: "gascity/gastown.polecat"},
+		{},
+	} {
+		if _, err := store.Create(beads.Bead{Title: "not stranded", Metadata: meta}); err != nil {
+			t.Fatalf("seeding bead: %v", err)
+		}
+	}
+	counter := withCountingStrandedWorkProbe(t)
+
+	got, err := scanStrandedWorkScope(strandedWorkScope{storeRef: "rig:gascity", repoPath: dir, store: store})
+	if err != nil {
+		t.Fatalf("scanStrandedWorkScope: %v", err)
+	}
+	if got != nil {
+		t.Errorf("scanStrandedWorkScope = %+v, want no findings", got)
+	}
+	if counter.calls != 0 {
+		t.Errorf("healthy pass made %d git call(s), want 0", counter.calls)
+	}
+}
+
+func TestScanStrandedWorkScopeChecksTheRepositoryOnceAcrossManyCandidates(t *testing.T) {
+	// The repository check is per-scope information, not per-bead: paying it
+	// again for every candidate would scale the patrol's subprocess count with
+	// the size of the strand it is reporting.
+	dir := strandedRepo(t)
+	for _, branch := range []string{"polecat/gascity-cgh", "polecat/gascity-3vr"} {
+		patrolBranch(t, dir, branch, 1)
+	}
+	store := beads.NewMemStore()
+	for _, branch := range []string{"polecat/gascity-cgh", "polecat/gascity-3vr"} {
+		if _, err := store.Create(beads.Bead{
+			Title:    "stranded",
+			Metadata: beads.StringMap{beadmeta.BranchMetadataKey: branch, beadmeta.TargetMetadataKey: "edge-integration"},
+		}); err != nil {
+			t.Fatalf("seeding bead: %v", err)
+		}
+	}
+	counter := withCountingStrandedWorkProbe(t)
+
+	got, err := scanStrandedWorkScope(strandedWorkScope{storeRef: "rig:gascity", repoPath: dir, store: store})
+	if err != nil {
+		t.Fatalf("scanStrandedWorkScope: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("scanStrandedWorkScope = %+v, want both strands reported", got)
+	}
+	// One IsRepo, then per candidate: branch ref, target ref, count, origin ref.
+	if want := 1 + 2*4; counter.calls != want {
+		t.Errorf("git calls = %d, want %d (one repository check plus four probes per candidate)", counter.calls, want)
+	}
+}
+
+func TestScanStrandedWorkScopeReportsNothingWhenTheScopeIsNotARepository(t *testing.T) {
+	// A candidate bead in a directory that is not a checkout (a city that holds
+	// beads but no source) strands nothing: there are no refs to hold work.
+	// It must degrade to "no findings", not to an error an operator must triage.
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "candidate in a non-repository scope",
+		Metadata: beads.StringMap{beadmeta.BranchMetadataKey: "polecat/gascity-cgh"},
+	}); err != nil {
+		t.Fatalf("seeding bead: %v", err)
+	}
+
+	got, err := scanStrandedWorkScope(strandedWorkScope{storeRef: "city:gc", repoPath: t.TempDir(), store: store})
+	if err != nil {
+		t.Errorf("scanStrandedWorkScope error = %v, want none", err)
+	}
+	if got != nil {
+		t.Errorf("scanStrandedWorkScope = %+v, want no findings", got)
 	}
 }

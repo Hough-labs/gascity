@@ -550,7 +550,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// just restored is not reported as unrouted, and it only reports: what to do
 	// with an unpublished branch is an operator decision (gascity-g7nf).
 	startupStrandedWorkStart := time.Now()
-	cr.safeTick(cr.patrolStrandedWork, "startup-stranded-work-patrol")
+	cr.safeTick(func() { cr.patrolStrandedWork(time.Now()) }, "startup-stranded-work-patrol")
 	logPhaseElapsed("startup-stranded-work-patrol", startupStrandedWorkStart)
 	if ctx.Err() != nil {
 		return
@@ -1131,11 +1131,12 @@ func (cr *CityRuntime) tick(
 
 	// Report work beads holding committed work no discovery probe can reach:
 	// open, unassigned, unrouted, with a branch carrying unmerged commits. Runs
-	// after route recovery so a just-restored route is not read as unrouted.
-	// Detection only — the recovery decision belongs to an operator or a pack
-	// (gascity-g7nf).
+	// after route recovery so a just-restored route is not read as unrouted, and
+	// self-gates to strandedWorkScanInterval, so most ticks return without
+	// touching a store. Detection only — the recovery decision belongs to an
+	// operator or a pack (gascity-g7nf).
 	phaseStart = time.Now()
-	cr.patrolStrandedWork()
+	cr.patrolStrandedWork(phaseStart)
 	recordPhase(TraceSiteControllerTickPhase, "patrol_stranded_work", phaseStart, nil)
 	if ctx.Err() != nil {
 		return
