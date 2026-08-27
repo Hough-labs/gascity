@@ -1756,8 +1756,9 @@ func managedDoltDoctorProcessOwnsRuntime(pid int, dataDir, configPath string) bo
 			return true
 		}
 	}
-	cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
-	if err == nil && sameDoctorScope(cwd, dataDir) {
+	// A cwd probe that never completed says nothing about where the process is
+	// rooted, so only a completed probe may establish ownership.
+	if cwd, probed := managedDoltDoctorProcessCWD(pid); probed && sameDoctorScope(cwd, dataDir) {
 		return true
 	}
 	return false
