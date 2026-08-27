@@ -1,5 +1,29 @@
 version: "2"
 
+run:
+  # golangci-lint otherwise serializes every run on this machine behind ONE
+  # lock file: runCommand.preRunE calls acquireFileLock, which locks
+  # filepath.Join(os.TempDir(), "golangci-lint.lock") -- a path derived from
+  # $TMPDIR alone, independent of GOLANGCI_LINT_CACHE, of the module, and of
+  # the working directory. Every worktree and every agent on the box therefore
+  # contends on the same file, and the wait is bounded at 5s: a run that
+  # cannot take the lock in time exits 3 with "parallel golangci-lint is
+  # running". On a machine running several agents that makes the lint gate
+  # frequently unrunnable rather than merely slow, and the failure is
+  # indistinguishable from a real lint failure to whatever invoked it
+  # (gascity-ipk5).
+  #
+  # The lock's purpose is to stop concurrent runs from corrupting a *shared*
+  # cache. gascity-p1l scoped GOLANGCI_LINT_CACHE to $(CURDIR), so runs in
+  # different worktrees no longer share one and the thing the lock protects no
+  # longer exists here. Those two settings are coupled and must move together;
+  # scripts/golangci_lint_parallel_test.go asserts that.
+  #
+  # allow-serial-runners is deliberately not used instead: it keeps the lock
+  # and only drops the 5s timeout, trading an unrunnable gate for an unbounded
+  # one on an already-saturated box.
+  allow-parallel-runners: true
+
 severity:
   default: error
 
