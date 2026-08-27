@@ -5,7 +5,9 @@ description: Per-call-site verdicts on whether Gas City's procfs fallbacks are a
 
 # Darwin `/proc` fallback audit (gascity-t8r1, gc-zxxy facet 2)
 
-**Status:** complete. One defect found and fixed; three residual gaps filed.
+**Status:** complete. One defect found and fixed; three residual gaps filed, of
+which gascity-232 has since closed one (the `managedDoltDoctorProcessOwnsRuntime`
+cwd arm).
 **Scope:** the six fallback-bearing `/proc` call sites named in gascity-t8r1,
 audited per call site rather than per file.
 **Host:** `darwin/arm64`, Darwin 25.6.0 (`hammer`). `/proc` does not exist.
@@ -180,16 +182,24 @@ read as "nothing holds this port."
 |---|---|---|---|---|
 | 1797, 1825, 1837 | `managedDoltDoctorPortHolderFromProc` | not checked → `...FromLsof` | live: `managedDoltDoctorPortHolderPID(51160) = 19479, checked=true`; `(1) = 0, checked=true` — unheld and unknown stay distinct | ✅ |
 | 1767 | `managedDoltDoctorProcCmdline` | → `ps -p <pid> -o args=` | live: full argv for pid 19479 | ✅ |
-| 1759 | `managedDoltDoctorProcessOwnsRuntime` cwd arm | no fallback; always fails | live: verdict correct via the cmdline arm for the real config, `false` for a config the argv does not name | ⚠️ gascity-4w46 |
+| 1759 | `managedDoltDoctorProcessOwnsRuntime` cwd arm | → `lsof -a -p <pid> -d cwd -Fn` | live (pre-fix): verdict correct via the cmdline arm for the real config, `false` for a config the argv does not name | ✅ fixed in gascity-232 |
 
-The cwd arm is the second of two independent ownership signals, and only the
-first is portable. The production shape — a server spawned as `dolt sql-server
---config <configFile>` — is answered by the cmdline arm, so the verdict is
-right where it counts. A server whose argv does not name the configured path
-gets a false negative on Darwin where Linux would still prove ownership. It is
-a diagnostic false negative, not a destructive one, which is why it is filed
-rather than fixed here; the note on that bead records that the fix should move
-`processCWDFromLsof` somewhere shared rather than copy its parsing.
+The cwd arm is the second of two independent ownership signals. Before
+gascity-232 only the first was portable: the production shape — a server
+spawned as `dolt sql-server --config <configFile>` — is answered by the cmdline
+arm, so the verdict was right where it counts, but a server whose argv did not
+name the configured path got a false negative on Darwin where Linux would still
+prove ownership. A diagnostic false negative, not a destructive one, which is
+why it was filed rather than fixed during the audit.
+
+gascity-232 closed it by porting a doctor-local `lsof -d cwd` probe into
+`internal/doctor` (`dolt_cwd_probe.go`) rather than hoisting `cmd/gc`'s
+`processCWDFromLsof` into a shared package. `internal/` cannot import `cmd/gc`,
+and the file already contains the precedent: `managedDoltDoctorPortHolderFromLsof`
+is itself a doctor-local reimplementation of `cmd/gc`'s
+`findPortHolderPIDFromLsof`. The probe returns `(cwd, probed)` per the
+gascity-4k6 contract, so a timed-out or absent `lsof` stays distinguishable from
+a genuinely unreadable cwd and never establishes ownership.
 
 ### `cmd/gc/cmd_supervisor_lifecycle.go` — workspace-service cleanup
 
@@ -233,7 +243,6 @@ executable path on macOS. Display only — not filed.
 |---|---|---|
 | gascity-si96 (P2) | `internal/workspacesvc/orphan_reap.go` | outside the audited six; the honest-signal fix and the full `ps -Eww` port are different sizes and want a decision |
 | gascity-38vz (P2) | `cmd/gc/doctor_fork_rate.go` | split item 2 of the originating bead — needs a feasibility decision first, since macOS has no cumulative fork counter and a wrong proxy is worse than the honest skip |
-| gascity-4w46 (P3) | `internal/doctor/checks.go:1759` | diagnostic false negative; the fix needs `processCWDFromLsof` to move out of `package main` first |
 
 ## What this audit does not cover
 
