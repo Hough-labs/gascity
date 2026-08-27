@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+#
+# install-pinned-go-tool — install a Go tool at an exact pinned version, and
+# keep it there.
+#
+# WHY THIS EXISTS
+#   The Makefile used to install golangci-lint through a plain file-existence
+#   target (`$(BIN_DIR)/golangci-lint:`). Make runs such a recipe only when the
+#   file is ABSENT, so a binary already on disk was never compared against
+#   GOLANGCI_LINT_VERSION. A wrong-version binary in the shared GOPATH bin —
+#   which every worktree and every other Go repo on the machine also writes to —
+#   therefore shadowed the pin forever, and `make install-tools` could not
+#   correct it. On this host a dirty 2.0.0 build shadowed the 2.12.0 pin for
+#   ~3 months: every `make lint`, `make fmt-check` and `make check` ran an
+#   unpinned linter of unknown provenance, and its findings could not be trusted
+#   as evidence for anything (gascity-430j).
+#
+#   This script is the shared replacement for that shape. Tools pin their
+#   version here once instead of each growing its own guard.
+#
+# USAGE
+#   install-pinned-go-tool <bin-dir> <tool-name> <version> <module-path> [version-arg ...]
+#
+#   version-arg defaults to `version`; pass what the tool actually answers to
+#   (gofumpt and oapi-codegen want `--version`).
+#
+# CONTRACT
+#   - A binary already reporting the pinned version is left alone and costs one
+#     exec, no network. Every lint and fmt gate takes this as a prerequisite, so
+#     the cheap path is the load-bearing one.
+#   - Anything else — missing, not executable, version probe fails, version
+#     unparseable, or a different version — is treated as a mismatch and
+#     reinstalled. Never silently accepted.
+#   - The install is retried (default 5 attempts, exponential backoff) so a
+#     flaky module fetch does not fail the gate.
+#   - The install is staged: `go install` writes into a scratch GOBIN beside the
+#     destination and the result is moved into place only after it is verified
+#     to report the pin. Staging is not a nicety — `go install` refuses to write
+#     over a destination that is not a Go object file ("build output ... already
+#     exists and is not an object file"), so installing straight into BIN_DIR
+#     cannot repair the very case this script exists to repair. Staging in the
+#     destination directory also keeps the move a same-filesystem rename, so a
+#     concurrent gate never observes a half-written binary.
+#   - A freshly installed binary that still does not report the pin is reported
+#     as an error rather than accepted. Accepting it would mean either a
+#     silently unpinned tool (the original bug) or a reinstall on every gate run.
+#
+# ENVIRONMENT
+#   PINNED_TOOL_INSTALL_ATTEMPTS  install attempts before failing (default 5)
+#   PINNED_TOOL_INSTALL_DELAY     seconds before the first retry, doubling
+#                                 thereafter (default 2)
+
+set -euo pipefail
+
+if [ "$#" -lt 4 ]; then
+	echo "usage: install-pinned-go-tool <bin-dir> <tool-name> <version> <module-path> [version-arg ...]" >&2
+	exit 2
+fi
+
+bin_dir=$1
+tool=$2
+pin=${3#v}
+module=$4
+shift 4
+# Written this way rather than testing ${#version_args[@]} so the script stays
+# safe under `set -u` on bash 3.2, where an array assigned no elements is
+# still unset.
+if [ "$#" -eq 0 ]; then
+	version_args=(version)
+else
+	version_args=("$@")
+fi
+
+attempts=${PINNED_TOOL_INSTALL_ATTEMPTS:-5}
+delay=${PINNED_TOOL_INSTALL_DELAY:-2}
+bin="$bin_dir/$tool"
+
+# detect_version prints the version the binary at $1 reports, or fails if it
+# cannot be executed or says nothing version-shaped. It takes the first
+# whitespace-separated token that starts like a semver, which is how both
+# `golangci-lint version` ("golangci-lint has version 2.12.0 built with
+# go1.26.5 ...") and `oapi-codegen --version` (module path, then "v2.6.0")
+# report it. Matching on token start keeps the Go toolchain's own "go1.26.5"
+# from being mistaken for the tool's version.
+detect_version() {
+	local candidate=$1
+	local out
+	if [ ! -x "$candidate" ]; then
+		return 1
+	fi
+	if ! out=$("$candidate" "${version_args[@]}" 2>&1); then
+		return 1
+	fi
+	printf '%s\n' "$out" |
+		awk '{for (i = 1; i <= NF; i++) if ($i ~ /^v?[0-9]+\.[0-9]+\.[0-9]+/) {sub(/^v/, "", $i); print $i; exit}}' |
+		grep . || return 1
+}
+
+current=$(detect_version "$bin") || current=""
+if [ "$current" = "$pin" ]; then
+	exit 0
+fi
+
+if [ -n "$current" ]; then
+	reason="$bin reports $current"
+elif [ -e "$bin" ]; then
+	reason="$bin reports no usable version"
+else
+	reason="$bin is missing"
+fi
+echo "Installing $tool v$pin ($reason)..." >&2
+
+mkdir -p "$bin_dir"
+staging=$(mktemp -d "$bin_dir/.install-pinned-go-tool.XXXXXX")
+trap 'rm -rf "$staging"' EXIT INT TERM
+
+attempt=1
+while [ "$attempt" -le "$attempts" ]; do
+	echo "$tool install attempt $attempt/$attempts" >&2
+	if GOBIN="$staging" go install "$module@v$pin"; then
+		if [ ! -e "$staging/$tool" ]; then
+			echo "ERROR: $module@v$pin installed no binary named $tool" >&2
+			exit 1
+		fi
+		installed=$(detect_version "$staging/$tool") || installed=""
+		if [ "$installed" = "$pin" ]; then
+			mv -f "$staging/$tool" "$bin"
+			echo "Installed $tool v$pin" >&2
+			exit 0
+		fi
+		echo "ERROR: installed $tool reports ${installed:-no usable version}, want v$pin" >&2
+		exit 1
+	fi
+	if [ "$attempt" -lt "$attempts" ]; then
+		echo "$tool install failed; retrying in ${delay}s..." >&2
+		sleep "$delay"
+		delay=$((delay * 2))
+	fi
+	attempt=$((attempt + 1))
+done
+echo "ERROR: failed to install $tool v$pin after $attempts attempts" >&2
+exit 1

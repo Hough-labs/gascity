@@ -1,4 +1,5 @@
 GOLANGCI_LINT_VERSION := 2.12.0
+OAPI_CODEGEN_VERSION := 2.6.0
 BUILDX_VERSION := 0.21.2
 
 # Detect OS and arch for binary download.
@@ -7,6 +8,13 @@ GOARCH := $(shell go env GOARCH)
 
 BIN_DIR := $(shell go env GOPATH)/bin
 GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
+
+# Shared installer for version-pinned Go tools. It reinstalls whenever the
+# binary on disk does not report the pinned version, so a stale binary in the
+# machine-wide GOPATH bin cannot shadow a pin (gascity-430j). Absolute path:
+# recipes are invoked from $(CURDIR), which is not this file's directory when
+# make is run with -f from elsewhere.
+INSTALL_PINNED_GO_TOOL := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/install-pinned-go-tool
 
 # golangci-lint caches analyzer issues under a deliberately worktree-independent
 # key: internal/cache.computePkgHash rewrites each file's absolute name to
@@ -283,15 +291,15 @@ CI_STATIC_GO ?= go
 lint: lint-full
 
 ## lint-full: run golangci-lint across all packages
-lint-full: $(GOLANGCI_LINT)
+lint-full: install-golangci-lint
 	$(GOLANGCI_LINT) run $(LINT_FLAGS) ./...
 
 ## lint-new: run golangci-lint for issues introduced since LINT_BASE
-lint-new: $(GOLANGCI_LINT)
+lint-new: install-golangci-lint
 	$(GOLANGCI_LINT) run $(LINT_FLAGS) --new-from-merge-base=$(LINT_BASE) --whole-files ./...
 
 ## lint-changed: run golangci-lint only for packages touched by changed Go files
-lint-changed: $(GOLANGCI_LINT)
+lint-changed: install-golangci-lint
 	@case "$(LINT_CHANGED_SCOPE)" in \
 		staged) \
 			files="$$(git diff --cached --name-only --diff-filter=ACMRT -- '*.go')"; \
@@ -327,19 +335,19 @@ lint-changed: $(GOLANGCI_LINT)
 	$(GOLANGCI_LINT) run $(LINT_FLAGS) $$pkgs
 
 ## lint-affected: lint packages affected by changed Go build inputs or embedded files
-lint-affected: $(GOLANGCI_LINT)
+lint-affected: install-golangci-lint
 	@"$(CI_STATIC_SELECT)" lint-affected "$(GOLANGCI_LINT)" "$(CI_STATIC_GO)" $(LINT_FLAGS)
 
 ## fmt-check: fail if formatting would change files
-fmt-check: $(GOLANGCI_LINT)
+fmt-check: install-golangci-lint
 	$(GOLANGCI_LINT) fmt --diff ./...
 
 ## fmt-check-changed: fail if formatting would change a regular changed Go file
-fmt-check-changed: $(GOLANGCI_LINT)
+fmt-check-changed: install-golangci-lint
 	@"$(CI_STATIC_SELECT)" fmt-check-changed "$(GOLANGCI_LINT)"
 
 ## fmt: auto-fix formatting
-fmt: $(GOLANGCI_LINT)
+fmt: install-golangci-lint
 	$(GOLANGCI_LINT) fmt ./...
 
 ## vet: run go vet
@@ -790,34 +798,21 @@ cover: test-cover
 	go tool cover -func=coverage.txt
 
 ## install-tools: install pinned golangci-lint + oapi-codegen
-install-tools: $(GOLANGCI_LINT) install-oapi-codegen
+install-tools: install-golangci-lint install-oapi-codegen
 
-$(GOLANGCI_LINT):
-	@echo "Installing golangci-lint v$(GOLANGCI_LINT_VERSION)..."
-	@attempt=1; max_attempts=5; delay=2; \
-	while [ $$attempt -le $$max_attempts ]; do \
-		echo "golangci-lint install attempt $$attempt/$$max_attempts"; \
-		if GOBIN=$(BIN_DIR) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION); then \
-			exit 0; \
-		fi; \
-		if [ $$attempt -lt $$max_attempts ]; then \
-			echo "golangci-lint install failed; retrying in $${delay}s..." >&2; \
-			sleep $$delay; \
-		fi; \
-		attempt=$$((attempt + 1)); \
-		delay=$$((delay * 2)); \
-	done; \
-	echo "ERROR: failed to install golangci-lint v$(GOLANGCI_LINT_VERSION) after $$max_attempts attempts" >&2; \
-	exit 1
+## install-golangci-lint: install the pinned golangci-lint, replacing any other version
+# Every lint and fmt gate takes this as a prerequisite, so the already-pinned
+# path stays cheap -- one exec to read the version, and the network only when
+# that version is not the pin.
+.PHONY: install-golangci-lint
+install-golangci-lint:
+	@"$(INSTALL_PINNED_GO_TOOL)" "$(BIN_DIR)" golangci-lint "$(GOLANGCI_LINT_VERSION)" github.com/golangci/golangci-lint/v2/cmd/golangci-lint version
 
 ## install-oapi-codegen: install pinned oapi-codegen so the spec→client drift
 ## test (TestGeneratedClientInSync) can regenerate client_gen.go without skipping.
 .PHONY: install-oapi-codegen
 install-oapi-codegen:
-	@if ! command -v oapi-codegen >/dev/null; then \
-		echo "Installing oapi-codegen..." >&2; \
-		go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0; \
-	fi
+	@"$(INSTALL_PINNED_GO_TOOL)" "$(BIN_DIR)" oapi-codegen "$(OAPI_CODEGEN_VERSION)" github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen --version
 
 ## install-buildx: install docker buildx plugin
 install-buildx:
