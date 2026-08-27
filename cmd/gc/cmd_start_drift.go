@@ -563,30 +563,19 @@ func waitForPIDExit(pid int, timeout, escalate time.Duration) error {
 // Both cases mean the process can no longer hold ports or files, so
 // the supervisor restart can safely proceed.
 //
-// We probe via signal-zero first because it covers both "PID never
-// existed" and "PID was reaped" without an extra /proc syscall. The
-// /proc/<pid>/status fallback handles the zombie case that signal
-// zero reports as alive.
+// This is the negation of the shared liveness probe rather than its own
+// procfs read. The earlier local implementation probed signal-zero and then
+// read /proc/<pid>/status for the zombie case, returning os.IsNotExist(err)
+// when that read failed. That is right on Linux — a status file that vanished
+// between the two syscalls means the entry was reaped — but on a host with no
+// procfs at all the read fails with ENOENT for every PID, so every live
+// process was reported gone. waitForPIDExit then returned success on its first
+// poll without the old supervisor having exited, and gc start raced a
+// replacement onto a control socket the previous one still held.
+// pidutil.Alive keeps the signal-zero probe and the /proc/<pid>/stat zombie
+// check, and falls back to `ps -o stat=` where there is no procfs.
 func pidGone(pid int) bool {
-	if err := syscall.Kill(pid, syscall.Signal(0)); err == syscall.ESRCH {
-		return true
-	}
-	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
-	if err != nil {
-		// If /proc/<pid>/status is missing, the kernel has already
-		// torn down the entry — ESRCH-equivalent.
-		return os.IsNotExist(err)
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if !strings.HasPrefix(line, "State:") {
-			continue
-		}
-		// State lines look like "State:\tZ (zombie)" or "State:\tR
-		// (running)" — a zombie has already released its ports and
-		// FDs even though the parent has not reaped it.
-		return strings.Contains(line, "Z")
-	}
-	return false
+	return !pidAlive(pid)
 }
 
 // humanizeReadyDuration formats a sub-minute duration as `0.7s`-style
