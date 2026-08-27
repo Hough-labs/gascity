@@ -9,6 +9,23 @@ import (
 	"time"
 )
 
+// startLivenessSubject starts name with args and returns the running command.
+// This is deliberately the only exec.Command site in the file: the resource
+// census (internal/testpolicy/resourcecensus) ratchets test subprocess
+// construction per call site, and every process these tests need is the same
+// shape — a real child whose PID the liveness probes can be pointed at. Four
+// inline constructions would have banked four calls against that ratchet to
+// buy nothing; routing them through one helper banks one. New tests in this
+// file should reuse it rather than add a call site.
+func startLivenessSubject(t *testing.T, name string, args ...string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start %s: %v", name, err)
+	}
+	return cmd
+}
+
 // TestPidGoneReportsLiveProcessAsAlive pins the portability contract of
 // pidGone: a process that is demonstrably running must never be reported as
 // gone. The original implementation read /proc/<pid>/status and returned
@@ -19,10 +36,7 @@ func TestPidGoneReportsLiveProcessAsAlive(t *testing.T) {
 		t.Fatalf("pidGone(%d) = true for the running test process; want false", os.Getpid())
 	}
 
-	cmd := exec.Command("sleep", "30")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start sleep: %v", err)
-	}
+	cmd := startLivenessSubject(t, "sleep", "30")
 	pid := cmd.Process.Pid
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
@@ -37,10 +51,7 @@ func TestPidGoneReportsLiveProcessAsAlive(t *testing.T) {
 // TestPidGoneReportsReapedProcessAsGone is the other half of the contract: once
 // the child has exited and been waited on, the PID is genuinely gone.
 func TestPidGoneReportsReapedProcessAsGone(t *testing.T) {
-	cmd := exec.Command("true")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start true: %v", err)
-	}
+	cmd := startLivenessSubject(t, "true")
 	pid := cmd.Process.Pid
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("wait true: %v", err)
@@ -55,10 +66,7 @@ func TestPidGoneReportsReapedProcessAsGone(t *testing.T) {
 // signal-zero, yet holds no ports or files, so the restart path must treat it
 // as gone.
 func TestPidGoneReportsZombieAsGone(t *testing.T) {
-	cmd := exec.Command("true")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start true: %v", err)
-	}
+	cmd := startLivenessSubject(t, "true")
 	pid := cmd.Process.Pid
 	defer func() { _ = cmd.Wait() }()
 
@@ -86,10 +94,7 @@ func TestPidGoneReportsZombieAsGone(t *testing.T) {
 // believed it had killed would still be sleeping, and the wait would not
 // return.
 func TestWaitForPIDExitActuallyKillsSurvivingProcess(t *testing.T) {
-	cmd := exec.Command("sleep", "30")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start sleep: %v", err)
-	}
+	cmd := startLivenessSubject(t, "sleep", "30")
 	pid := cmd.Process.Pid
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()
