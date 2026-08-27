@@ -8,6 +8,23 @@ GOARCH := $(shell go env GOARCH)
 BIN_DIR := $(shell go env GOPATH)/bin
 GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
 
+# golangci-lint caches analyzer issues under a deliberately worktree-independent
+# key: internal/cache.computePkgHash rewrites each file's absolute name to
+# "<module path><path relative to the module dir>" before hashing it together
+# with the file content, so two checkouts of this repo holding identical
+# content for a package resolve to the same entry. The issues stored there
+# carry the *absolute* paths of whichever checkout populated the entry, and
+# //nolint suppression is applied after the cache load by reading the file
+# named in the cached position. Once that checkout drifts, the replayed issues
+# are attributed to a foreign path whose nolint directives no longer line up,
+# and the gate reports findings that do not exist in the tree being linted
+# (gascity-p1l). Scope the cache to this worktree so nothing is replayed
+# across sibling worktrees; CI pins the same repo-relative path explicitly so
+# it can restore and save the directory with actions/cache. ".cache/" is
+# already gitignored.
+GOLANGCI_LINT_CACHE ?= $(CURDIR)/.cache/golangci-lint
+export GOLANGCI_LINT_CACHE
+
 BINARY     := gc
 BUILD_DIR  := bin
 INSTALL_DIR := $(BIN_DIR)
