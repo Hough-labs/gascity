@@ -21,6 +21,10 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Release Gate Criteria Conventions](release-gate-criteria-conventions.md)
   when signing off the "Tests pass" criterion on a `release-gates/*.md`
   deploy gate — it must cite the CI jobs `ci-required` actually gates on
+- [Darwin `/proc` Fallback Audit](darwin-proc-fallback-audit.md) when touching
+  any procfs read — it records, per call site, whether the portable fallback is
+  actually reached on macOS and whether its parser matches what `ps`/`lsof`
+  print there, and names the sites that are still inert
 - [Load-Coupled Test Cluster Adjudication](load-coupled-test-adjudication.md)
   when a test is reported as failing "only under concurrency" — it records which
   lane each gate actually runs on Darwin and which of those reports survived
