@@ -167,6 +167,84 @@ func TestParseDoltPSLine_PreservesSpacedConfigPath(t *testing.T) {
 	}
 }
 
+// TestParseDoltPSLine_ColumnPaddedLstart pins the whitespace contract the
+// darwin fallback depends on. `ps -ax -o pid=,rss=,lstart=,command=` emits
+// fixed-width columns, so the separators are runs of spaces rather than single
+// spaces: rss is right-aligned under the widest value, lstart is padded out to
+// its column, and BSD formats the day of month with strftime %e, which
+// space-pads a single-digit day into two characters. Every existing fixture in
+// this file happens to use a two-digit day and single-space separators, so
+// nothing covered the padded shapes the fallback actually parses.
+//
+// The first line below is captured verbatim from `ps -ax -o
+// pid=,rss=,lstart=,command=` on darwin/arm64.
+func TestParseDoltPSLine_ColumnPaddedLstart(t *testing.T) {
+	cases := []struct {
+		name         string
+		line         string
+		wantPID      int
+		wantRSSKB    int64
+		wantIdentity string
+		wantConfig   string
+	}{
+		{
+			name:         "captured darwin line",
+			line:         "19479 916576 Wed Aug 26 14:55:23 2026     dolt sql-server --config /Users/hunter/gc/.gc/runtime/packs/dolt/dolt-config.yaml",
+			wantPID:      19479,
+			wantRSSKB:    916576,
+			wantIdentity: "Wed Aug 26 14:55:23 2026",
+			wantConfig:   "/Users/hunter/gc/.gc/runtime/packs/dolt/dolt-config.yaml",
+		},
+		{
+			name:         "single digit day padded by strftime %e",
+			line:         " 2867 1028672 Sun May  7 09:31:24 2026     /opt/homebrew/bin/dolt sql-server --config /tmp/TestX/config.yaml",
+			wantPID:      2867,
+			wantRSSKB:    1028672,
+			wantIdentity: "Sun May 7 09:31:24 2026",
+			wantConfig:   "/tmp/TestX/config.yaml",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseDoltPSLine(tc.line, nil)
+			if !ok {
+				t.Fatalf("parseDoltPSLine(%q) did not recognize dolt sql-server", tc.line)
+			}
+			if got.PID != tc.wantPID {
+				t.Errorf("PID = %d, want %d", got.PID, tc.wantPID)
+			}
+			if got.RSSBytes != tc.wantRSSKB*1024 {
+				t.Errorf("RSSBytes = %d, want %d", got.RSSBytes, tc.wantRSSKB*1024)
+			}
+			// StartIdentity is the five lstart fields rejoined with single
+			// spaces, so the padded and unpadded forms normalize to the same
+			// token. Every comparison against it comes from another
+			// parseDoltPSLine result, so the normalization is consistent.
+			if got.StartIdentity != tc.wantIdentity {
+				t.Errorf("StartIdentity = %q, want %q", got.StartIdentity, tc.wantIdentity)
+			}
+			if cfg := extractConfigPath(got.Argv); cfg != tc.wantConfig {
+				t.Errorf("config = %q, want %q", cfg, tc.wantConfig)
+			}
+		})
+	}
+}
+
+// TestArgvFromPSLine_ColumnPaddedNonDolt covers the same padded shape on the
+// active-test-root arm, which reuses the leading-field consumer but keeps the
+// whole command line as argv rather than reducing it to the dolt form.
+func TestArgvFromPSLine_ColumnPaddedNonDolt(t *testing.T) {
+	line := " 6077   1296 Sun May  7 22:10:03 2026     tail -f /tmp/TestZq7Probe/001/dolt-config.yaml"
+	argv, ok := argvFromPSLine(line)
+	if !ok {
+		t.Fatal("argvFromPSLine did not parse a padded non-dolt line")
+	}
+	want := []string{"tail", "-f", "/tmp/TestZq7Probe/001/dolt-config.yaml"}
+	if !reflect.DeepEqual(argv, want) {
+		t.Fatalf("argvFromPSLine = %v, want %v", argv, want)
+	}
+}
+
 func TestParseDoltPSLine_IgnoresNonDolt(t *testing.T) {
 	line := "12345 1024 Sun May 17 09:31:24 2026 mysqld --config /tmp/TestX/config.yaml"
 	if got, ok := parseDoltPSLine(line, nil); ok {
