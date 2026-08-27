@@ -12,6 +12,14 @@ formatters:
     - gofumpt
     - goimports
 
+  exclusions:
+    # Same npm-artifact exclusion as the linters block below. `formatters:` is a
+    # second, independent walker: gofumpt/goimports descend into node_modules
+    # even when the linters block already excludes it, so `make fmt-check`
+    # (golangci-lint fmt --diff ./...) needs its own copy of this rule.
+    paths:
+      - '(^|/)node_modules/'
+
 linters:
   # Keep govet explicit in configured lint. The changed-scope target bounds
   # both this copy and the Go tool's vet to the same affected graph, preserving
@@ -32,6 +40,20 @@ linters:
       locale: US
 
   exclusions:
+    # Installed npm packages are gitignored build artifacts, not repo source,
+    # but they can hold vendored .go files (flatted/golang/pkg/flatted) that sit
+    # inside this module — `go list ./...` picks them up because they carry no
+    # nested go.mod. golangci-lint v2 dropped v1's implicit default skip-dirs,
+    # so without this the gate is red for every branch on any machine that has
+    # run `npm install`, and it reports findings nobody can fix (gascity-itqq).
+    #
+    # Matched as a whole path segment so a legitimate repo path that merely
+    # contains the substring still lints. Deliberately not pinned to the
+    # dashboard's node_modules: the repo has four npm roots (contrib/
+    # openclaw-bridge, internal/api/dashboardspa/web and its frontend/ and
+    # shared/ workspaces), and each would otherwise reproduce this bug.
+    paths:
+      - '(^|/)node_modules/'
     rules:
       # runtime shadows stdlib but is isolated to internal/.
       - path: internal/runtime/
