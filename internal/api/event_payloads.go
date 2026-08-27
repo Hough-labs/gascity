@@ -564,6 +564,44 @@ func BeadDeadAssigneeReopenedPayloadJSON(beadID, deadAssignee, routedTo string) 
 	return b
 }
 
+// BeadStrandedPayload is the typed payload for bead.stranded events. Emitted
+// when the stranded-work patrol finds an open, unassigned, unrouted work bead
+// whose recorded branch holds commits its merge target does not — a shape no
+// discovery probe in the city matches, so the bead reads like "never started"
+// while holding finished, committed work.
+//
+// The patrol reports and never repairs, so this payload is the whole handoff to
+// whoever decides what happens next. CommitsAhead says how much work is at
+// stake and OnOrigin says whether it survives this machine: gascity-3vr's
+// branch was published and gascity-cgh's was not, and only the second was one
+// disk failure from total loss.
+type BeadStrandedPayload struct {
+	BeadID       string `json:"bead_id" doc:"ID of the stranded work bead (also the envelope Subject)."`
+	StoreRef     string `json:"store_ref" doc:"Canonical reference of the store holding the bead ('city:<name>' or 'rig:<name>')."`
+	Branch       string `json:"branch" doc:"Work branch recorded on the bead, holding the commits nothing can currently reach."`
+	Target       string `json:"target" doc:"Branch the commit count was measured against — the bead's own merge target, or the repository default when it records none."`
+	CommitsAhead int    `json:"commits_ahead" doc:"Commits on Branch that Target does not have. Always positive; a fully merged branch strands nothing and is not reported."`
+	OnOrigin     bool   `json:"on_origin" doc:"True when the branch has been published to the remote. False means the commits exist only on this machine."`
+}
+
+// IsEventPayload marks BeadStrandedPayload as an events.Payload variant.
+func (BeadStrandedPayload) IsEventPayload() {}
+
+// BeadStrandedPayloadJSON builds the JSON wire form for attachment to an
+// events.Event.Payload field. Every field is load-bearing for the recovery
+// decision, so none is omitted when empty.
+func BeadStrandedPayloadJSON(beadID, storeRef, branch, target string, commitsAhead int, onOrigin bool) json.RawMessage {
+	b, _ := json.Marshal(BeadStrandedPayload{
+		BeadID:       beadID,
+		StoreRef:     storeRef,
+		Branch:       branch,
+		Target:       target,
+		CommitsAhead: commitsAhead,
+		OnOrigin:     onOrigin,
+	})
+	return b
+}
+
 // SessionUnknownStatePayload carries the machine-readable context for a
 // session.unknown_state event: a session bead whose metadata state the
 // reconciler does not recognize and therefore skips (forward-compatible
@@ -615,6 +653,7 @@ func init() {
 	events.RegisterPayload(events.BeadClosed, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeleted, BeadEventPayload{})
 	events.RegisterPayload(events.BeadDeadAssigneeReopened, BeadDeadAssigneeReopenedPayload{})
+	events.RegisterPayload(events.BeadStranded, BeadStrandedPayload{})
 
 	// session.* / convoy.* / controller.* / city.* / order.* /
 	// provider.* — these events carry no structured payload today;

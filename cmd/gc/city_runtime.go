@@ -97,6 +97,10 @@ type CityRuntime struct {
 	poolDeathHandlers map[string]poolDeathInfo
 	suspendedNames    map[string]bool
 
+	// strandedWork de-duplicates the stranded-work patrol's findings so an
+	// unchanged strand is announced once rather than every tick.
+	strandedWork *strandedWorkThrottle
+
 	standaloneCityStore beads.Store // non-nil when API disabled; for chat auto-suspend
 	standaloneRigStores map[string]beads.Store
 
@@ -311,6 +315,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		poolDeathHandlers:       p.PoolDeathHandlers,
 		forceStopShutdown:       p.ForceStopShutdown,
 		suspendedNames:          suspendedNames,
+		strandedWork:            newStrandedWorkThrottle(),
 		asyncStartLimiter:       newAsyncStartLimiter(maxParallelStartsPerTick(p.Cfg)),
 		convergenceReqCh:        p.ConvergenceReqCh,
 		reloadReqCh: func() chan reloadRequest {
@@ -536,6 +541,17 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		cr.recoverUnroutedWorkRoutes()
 	}, "startup-route-recovery")
 	logPhaseElapsed("startup-route-recovery", startupRouteRecoveryStart)
+	if ctx.Err() != nil {
+		return
+	}
+
+	// Then report any work bead left holding committed work that no discovery
+	// probe can reach. It runs after route recovery so a bead whose route was
+	// just restored is not reported as unrouted, and it only reports: what to do
+	// with an unpublished branch is an operator decision (gascity-g7nf).
+	startupStrandedWorkStart := time.Now()
+	cr.safeTick(cr.patrolStrandedWork, "startup-stranded-work-patrol")
+	logPhaseElapsed("startup-stranded-work-patrol", startupStrandedWorkStart)
 	if ctx.Err() != nil {
 		return
 	}
@@ -1109,6 +1125,18 @@ func (cr *CityRuntime) tick(
 	phaseStart = time.Now()
 	cr.recoverUnroutedWorkRoutes()
 	recordPhase(TraceSiteControllerTickPhase, "recover_unrouted_work_routes", phaseStart, nil)
+	if ctx.Err() != nil {
+		return
+	}
+
+	// Report work beads holding committed work no discovery probe can reach:
+	// open, unassigned, unrouted, with a branch carrying unmerged commits. Runs
+	// after route recovery so a just-restored route is not read as unrouted.
+	// Detection only — the recovery decision belongs to an operator or a pack
+	// (gascity-g7nf).
+	phaseStart = time.Now()
+	cr.patrolStrandedWork()
+	recordPhase(TraceSiteControllerTickPhase, "patrol_stranded_work", phaseStart, nil)
 	if ctx.Err() != nil {
 		return
 	}

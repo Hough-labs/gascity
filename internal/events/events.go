@@ -41,17 +41,27 @@ const (
 	// otherwise-silent repair into an observable signal (mirrors the
 	// bead.claim_rejected shape).
 	BeadDeadAssigneeReopened = "bead.dead_assignee_reopened"
-	MailSent                 = "mail.sent"
-	MailRead                 = "mail.read"
-	MailArchived             = "mail.archived"
-	MailMarkedRead           = "mail.marked_read"
-	MailMarkedUnread         = "mail.marked_unread"
-	MailReplied              = "mail.replied"
-	MailDeleted              = "mail.deleted"
-	SessionDraining          = "session.draining"
-	SessionUndrained         = "session.undrained"
-	SessionQuarantined       = "session.quarantined"
-	SessionIdleKilled        = "session.idle_killed"
+	// BeadStranded fires when a patrol finds an open, unassigned, unrouted work
+	// bead whose recorded branch holds commits its merge target does not. That
+	// combination is discoverable by no probe in the city — the assigned-work
+	// lookup keys on session identity, the pool demand probe requires a route,
+	// and the merge-queue find-work query requires an assignee — so the bead
+	// reads like "never started" while holding finished, committed work. The
+	// patrol only reports: whether to publish the branch, hand it to the merge
+	// queue, or discard it is an operator/pack decision, and the typed payload
+	// carries the commit count and origin status that decision needs.
+	BeadStranded       = "bead.stranded"
+	MailSent           = "mail.sent"
+	MailRead           = "mail.read"
+	MailArchived       = "mail.archived"
+	MailMarkedRead     = "mail.marked_read"
+	MailMarkedUnread   = "mail.marked_unread"
+	MailReplied        = "mail.replied"
+	MailDeleted        = "mail.deleted"
+	SessionDraining    = "session.draining"
+	SessionUndrained   = "session.undrained"
+	SessionQuarantined = "session.quarantined"
+	SessionIdleKilled  = "session.idle_killed"
 	// SessionMaxAgeKilled fires when the controller preemptively restarts a
 	// long-running session because its wall-clock age exceeded the agent's
 	// max_session_age threshold. Motivating case: provider SDKs that cache
@@ -258,6 +268,7 @@ var KnownEventTypes = []string{
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected,
 	BeadDeadAssigneeReopened,
+	BeadStranded,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,

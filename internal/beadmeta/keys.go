@@ -273,6 +273,27 @@ const (
 	MergeStrategyMetadataKey = "merge_strategy"
 )
 
+// Work-handoff metadata keys: a third non-"gc."-prefixed family, recording
+// where a work bead's commits live as it moves from implementation to merge.
+// A pack's worker formula stamps them and its merge formula reads them back,
+// so — like the directory and dispatch keys above — their on-store strings are
+// load-bearing and are declared here to give the vocabulary one home. They are
+// intentionally NOT in KnownMetadataKeys, whose drift guard only covers the
+// gc. namespace.
+const (
+	// BranchMetadataKey records the git branch holding the bead's commits.
+	// It is the durable handle from an unfinished work bead back to the work
+	// already on disk, which is why a bead carrying one but reachable by no
+	// discovery probe is a work-loss signal rather than a stalled task.
+	BranchMetadataKey = "branch"
+
+	// TargetMetadataKey records the branch BranchMetadataKey is destined to
+	// merge into. It is written at submit time, so work stranded before submit
+	// carries a branch with no target; readers fall back to the repository's
+	// default branch.
+	TargetMetadataKey = "target"
+)
+
 // OptionMetadataPrefix is the dynamic non-"gc."-prefixed key prefix under
 // which provider option choices are stored as opt_<OptionsSchema key> (e.g.
 // opt_model, opt_effort) on session and work beads. The suffix is open-world
