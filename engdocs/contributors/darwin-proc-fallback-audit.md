@@ -109,6 +109,18 @@ a second procfs-only copy that drifts from it. Regression coverage is in
 liveness with `wait(2)` rather than with `pidGone`, so it does not assert the
 function against itself.
 
+The swap does move Linux behavior in one narrow window, and it moves it in the
+safe direction. Both implementations probe signal-zero first and then read
+procfs, so both have a race between the two syscalls; they disagree only about
+what a failed read means there. The old code answered `os.IsNotExist(err)` —
+"reaped, therefore gone." `pidutil.Alive` answers `!psReportsZombie(pid)`, and
+`ps -p <reaped-pid>` exits non-zero, so the probe reports the PID *alive* for
+that one call. The next poll 50ms later gets `ESRCH` from signal-zero and
+reports it gone, so `waitForPIDExit` loses at most one poll interval. Erring
+toward "still running" is the direction that costs a delay rather than a
+second supervisor on a live control socket, which is the whole failure this
+change exists to prevent.
+
 ## Per-call-site verdicts
 
 ### `cmd/gc/dolt_cleanup_discovery.go` — the reaper's discovery walk
@@ -226,8 +238,9 @@ executable path on macOS. Display only — not filed.
 ## What this audit does not cover
 
 - **Linux behavior.** Every verdict above is about the Darwin arm. The
-  `pidGone` change is the only one that alters a Linux path, and it is covered
-  by the reaped-PID and zombie tests plus `pidutil`'s own suite.
+  `pidGone` change is the only one that alters a Linux path — its one
+  behavioral delta there is the failed-read race described above — and it is
+  covered by the reaped-PID and zombie tests plus `pidutil`'s own suite.
 - **The `lsof`-absent host.** Each fallback has a third state for it and the
   states were read, but no probe ran with `lsof` removed from `PATH`.
 - **Windows or any non-unix host.** Out of scope for both this bead and the
