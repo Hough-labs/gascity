@@ -107,3 +107,21 @@ print-golangci-lint-cache:
 	}
 	return strings.TrimPrefix(line, prefix)
 }
+
+// TestGolangciLintCacheDirIsGitignored guards the other half of the
+// gascity-p1l fix. Scoping the cache to $(CURDIR) puts it *inside* the
+// worktree, so it only stays invisible while the path is ignored: a cold
+// `make lint` on this repo writes ~50MB there, and if it were tracked every
+// lint run would leave the worktree dirty and trip the clean-tree checks the
+// commit and handoff gates run. Assert it rather than relying on a one-time
+// manual check -- this rig has a live history of runtime artifacts landing in
+// un-ignored paths.
+func TestGolangciLintCacheDirIsGitignored(t *testing.T) {
+	repo := repoRoot(t)
+	cmd := testCommand("git", "check-ignore", "-q", filepath.Join(repo, wantGolangciLintCacheRelDir))
+	cmd.Dir = repo
+	// git check-ignore exits 0 when the path is ignored, 1 when it is not.
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("%s is not gitignored (git check-ignore: %v); every `make lint` would leave the worktree dirty", wantGolangciLintCacheRelDir, err)
+	}
+}
