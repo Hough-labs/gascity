@@ -521,8 +521,14 @@ func (t *Tmux) probeServerPresence() (newSessionMode, error) {
 // unlink a socket a live server still holds.
 func (t *Tmux) newSessionGuarded(args ...string) error {
 	if t.cfg.SocketName == "" {
-		// Default server: -L is not in play, so the named-socket clobber
-		// cannot happen and tmux's own start-server path applies unchanged.
+		// Default server: every guard below is defined in terms of the -L
+		// socket path — the preflight, the holder observation and both locks
+		// all key on it — so none of them can be evaluated here. This is a
+		// scope exclusion, not an immunity claim: tmux would unlink and
+		// rebind its default socket on the same refused connect. gc always
+		// configures a socket name (cmd/gc/providers.go), so this branch is
+		// defensive, and it stays exactly as unguarded as it was rather than
+		// being widened by a guard that cannot see its socket.
 		_, err := t.run(args...)
 		return err
 	}
