@@ -115,7 +115,9 @@ func TestShardLegsKeepTheGOMAXPROCSDefaultParallelism(t *testing.T) {
 // TestGateParallelismDividesTheCPUBudget covers scripts/test-gate-parallelism.
 // The value is the per-binary share of the host's cores once -p binaries run
 // at once, floored so that a small CI runner keeps its current behavior
-// instead of being serialized down to one test at a time.
+// instead of being serialized down to one test at a time. The floor never
+// exceeds the CPU budget, so the value never rises above the GOMAXPROCS
+// default it replaces.
 func TestGateParallelismDividesTheCPUBudget(t *testing.T) {
 	script := filepath.Join(repoRoot(t), "scripts", "test-gate-parallelism")
 
@@ -130,7 +132,11 @@ func TestGateParallelismDividesTheCPUBudget(t *testing.T) {
 		{name: "64 cores across 4 binaries", cpus: "64", outerP: "4", want: "16"},
 		{name: "8 cores floors at 4", cpus: "8", outerP: "4", want: "4"},
 		{name: "4 core runner is a no-op", cpus: "4", outerP: "4", want: "4"},
-		{name: "1 core runner is a no-op", cpus: "1", outerP: "4", want: "4"},
+		// Below the floor the floor itself clamps to the budget, so the
+		// result is the core count -- exactly the GOMAXPROCS default these
+		// runners already get. A flat floor of 4 would raise it instead.
+		{name: "2 core runner keeps its GOMAXPROCS default", cpus: "2", outerP: "4", want: "2"},
+		{name: "1 core runner is a no-op", cpus: "1", outerP: "4", want: "1"},
 		{name: "single binary keeps the whole budget", cpus: "16", outerP: "1", want: "16"},
 		{name: "explicit override wins", cpus: "16", outerP: "4", override: "2", want: "2"},
 	}

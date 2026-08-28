@@ -56,10 +56,17 @@ gc_inner_parallelism() {
 # 16-core host. Dividing the budget makes the two dimensions multiply out to
 # roughly the core count instead.
 #
-# The result is floored at 4 so a small CI runner -- where OUTER_P already
-# meets or exceeds the core count -- keeps the behaviour it has today rather
-# than being serialized to one test at a time. GC_TEST_GATE_PARALLEL
-# overrides the computation outright (must be a positive integer).
+# The result is floored so a small CI runner -- where OUTER_P already meets or
+# exceeds the core count -- keeps the behaviour it has today rather than being
+# serialized to one test at a time. The floor is 4 OR the CPU budget,
+# whichever is smaller: GOMAXPROCS, the default this replaces, never exceeds
+# the core count, so a flat floor of 4 would RAISE -parallel on a 1-3 core box
+# (2 -> 4 on a two-core runner) and add the very oversubscription this
+# function exists to remove. Clamping the floor to the budget keeps the
+# no-op claim exact -- for any host at or below the floor the result is the
+# core count, which is what GOMAXPROCS already gave it.
+# GC_TEST_GATE_PARALLEL overrides the computation outright (must be a
+# positive integer).
 #
 # This deliberately does not touch GOMAXPROCS. Lowering that would also thin
 # the runtime's scheduler, which changes goroutine interleaving and weakens
@@ -80,9 +87,14 @@ gc_gate_parallelism() {
   [[ "$outer_p" =~ ^[0-9]+$ && "$outer_p" -gt 0 ]] ||
     { echo "gc_gate_parallelism: outer -p must be a positive integer" >&2; return 1; }
 
+  local effective_floor="$floor"
+  if (( cpu_budget < effective_floor )); then
+    effective_floor="$cpu_budget"
+  fi
+
   local parallel=$(( cpu_budget / outer_p ))
-  if (( parallel < floor )); then
-    parallel="$floor"
+  if (( parallel < effective_floor )); then
+    parallel="$effective_floor"
   fi
   printf '%s\n' "$parallel"
 }

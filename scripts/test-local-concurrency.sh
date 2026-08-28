@@ -210,6 +210,14 @@ assert_eq "gate_p.scales_with_a_bigger_host" "$GOT" "16"
 GOT="$(gc_gate_parallelism 4 4 2>/dev/null)"
 assert_eq "gate_p.small_runner_is_a_no_op" "$GOT" "4"
 
+# Below the floor, the floor clamps to the CPU budget: the result is the core
+# count, which is the GOMAXPROCS default these runners already get. A flat
+# floor of 4 would raise -parallel on them instead of leaving it alone.
+GOT="$(gc_gate_parallelism 2 4 2>/dev/null)"
+assert_eq "gate_p.two_core_runner_keeps_its_default" "$GOT" "2"
+GOT="$(gc_gate_parallelism 1 4 2>/dev/null)"
+assert_eq "gate_p.one_core_runner_keeps_its_default" "$GOT" "1"
+
 GOT="$(GC_TEST_GATE_PARALLEL=2 gc_gate_parallelism 16 4 2>/dev/null)"
 assert_eq "gate_p.explicit_override_wins" "$GOT" "2"
 

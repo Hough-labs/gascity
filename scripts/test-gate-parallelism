@@ -16,6 +16,9 @@
 #   concurrent test binaries, -parallel sizes the tests inside each one.
 #   Bounding only the first leaves the product unbounded.
 #
+#   The value is floored at 4, or at the host's core count when that is
+#   smaller, so it never rises above the GOMAXPROCS default it replaces.
+#
 # USAGE
 #   scripts/test-gate-parallelism <outer -p>
 #

@@ -969,10 +969,14 @@ GATE_TEST_PARALLEL ?= $(shell ./scripts/test-gate-parallelism $(GATE_TEST_P))
 `scripts/test-gate-parallelism` divides the host's core count
 (`scripts/lib/host-cpus.sh`, shared with `test-local-job-count`) by `-p`, so
 the two multiply back out to roughly one test per core. The result is floored
-at 4, so a runner whose core count is already at or below `-p` — most CI
-boxes — keeps exactly the behaviour it has today. Override the computation
-with `GC_TEST_GATE_PARALLEL`, or the whole knob with
-`make test-mac GATE_TEST_PARALLEL=8`.
+at 4 — or at the core count, when that is smaller — so a runner whose core
+count is already at or below `-p`, which is most CI boxes, keeps exactly the
+behaviour it has today. Clamping the floor to the core count is what makes
+that exact: `GOMAXPROCS`, the default being replaced, never exceeds the core
+count, so a flat floor of 4 would *raise* `-parallel` on a 1-3 core runner
+(2 → 4 on a two-core box) and add the oversubscription this bound exists to
+remove. Override the computation with `GC_TEST_GATE_PARALLEL`, or the whole
+knob with `make test-mac GATE_TEST_PARALLEL=8`.
 
 This deliberately does not lower `GOMAXPROCS`. That would also thin the
 runtime's scheduler, changing goroutine interleaving and weakening the race
