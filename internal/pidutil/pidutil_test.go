@@ -9,20 +9,47 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// startProcess spawns name with args, registers cleanup that kills and reaps
+// the child, and returns the started command.
+//
+// It is deliberately the only exec site in this file. The repository's
+// resource census ratchets on how many subprocess call sites untagged tests
+// contain, so every spawn here routes through this one helper instead of
+// constructing its own exec.Cmd; test/test-resources.toml records that
+// convention and the precedent it follows. New tests in this file should reuse
+// it rather than add a call site.
+//
+// A test that needs an already-exited process waits for the child explicitly;
+// the cleanup's redundant kill and wait then no-op.
+//
+// The child leads its own process group and cleanup signals the group, so a
+// fixture that itself spawns something — a shell running a script — leaves no
+// grandchild running after the test that started it.
+func startProcess(t *testing.T, name string, args ...string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting %s %q: %v", name, args, err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Wait()
+	})
+	return cmd
+}
 
 func TestAliveTreatsZombieAsDead(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("zombie detection uses /proc on linux")
 	}
 
-	cmd := exec.Command("sh", "-c", "exit 0")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer func() { _ = cmd.Wait() }()
+	cmd := startProcess(t, "sh", "-c", "exit 0")
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -52,9 +79,6 @@ func TestPSReportsZombieReturnsWhenPSHangs(t *testing.T) {
 }
 
 func TestStartTimeStableForLivePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("start-time reads /proc/<pid>/stat on linux")
-	}
 	first, err := StartTime(os.Getpid())
 	if err != nil {
 		t.Fatalf("StartTime(%d): %v", os.Getpid(), err)
@@ -82,9 +106,6 @@ func TestStartTimeRejectsInvalidPID(t *testing.T) {
 // one (the recycled-PID case) reports dead even though the PID is live, and an
 // empty start time falls back to plain liveness.
 func TestAliveWithStartTimeDisambiguatesRecycledPID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("start-time identity uses /proc on linux")
-	}
 	self := os.Getpid()
 	st, err := StartTime(self)
 	if err != nil {
@@ -99,28 +120,24 @@ func TestAliveWithStartTimeDisambiguatesRecycledPID(t *testing.T) {
 	if AliveWithStartTime(self, st+"0") {
 		t.Fatalf("AliveWithStartTime(%d, mismatched) = true, want dead (recycled)", self)
 	}
-	// Empty start time disables the identity check (darwin / uncaptured).
+	// Empty start time disables the identity check (start time uncaptured).
 	if !AliveWithStartTime(self, "") {
 		t.Fatalf("AliveWithStartTime(%d, empty) = false, want fallback to Alive", self)
 	}
 }
 
 func TestAliveWithStartTimeDeadPID(t *testing.T) {
-	cmd := exec.Command("true")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("spawning test process: %v", err)
+	cmd := startProcess(t, "true")
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("waiting for test process: %v", err)
 	}
-	pid := cmd.ProcessState.Pid()
+	pid := cmd.Process.Pid
 	if AliveWithStartTime(pid, "12345") {
 		t.Fatalf("AliveWithStartTime(%d, ...) = true for exited process", pid)
 	}
 }
 
 func TestAliveWithCmdlineRejectsUnrelatedLivePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("cmdline detection uses /proc on linux")
-	}
-
 	if AliveWithCmdline(os.Getpid(), func(_ []string) bool {
 		return false
 	}) {
@@ -129,10 +146,6 @@ func TestAliveWithCmdlineRejectsUnrelatedLivePID(t *testing.T) {
 }
 
 func TestAliveWithCmdlineAcceptsMatchingLivePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("cmdline detection uses /proc on linux")
-	}
-
 	if !AliveWithCmdline(os.Getpid(), func(argv []string) bool {
 		return len(argv) > 0 && strings.Contains(filepath.Base(argv[0]), "pidutil")
 	}) {
@@ -141,10 +154,6 @@ func TestAliveWithCmdlineAcceptsMatchingLivePID(t *testing.T) {
 }
 
 func TestCmdlineReturnsOwnArgv(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("cmdline detection uses /proc on linux")
-	}
-
 	argv, err := Cmdline(os.Getpid())
 	if err != nil {
 		t.Fatalf("Cmdline(%d): %v", os.Getpid(), err)
@@ -195,14 +204,7 @@ func TestArgvContainsSequence(t *testing.T) {
 // enumerate a real live direct child portably (no /proc dependency), on
 // linux and darwin alike.
 func TestChildPIDsFindsLiveChild(t *testing.T) {
-	cmd := exec.Command("sleep", "5")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start sleep: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
+	cmd := startProcess(t, "sleep", "5")
 
 	deadline := time.Now().Add(2 * time.Second)
 	var pids []int
@@ -313,5 +315,73 @@ func TestArgvHasFlagValue(t *testing.T) {
 				t.Fatalf("ArgvHasFlagValue(%v, %q, %q) = %v, want %v", argv, tc.flag, tc.value, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestAliveWithCmdlineConsultsMatcherForLiveProcess is the regression test for
+// gascity-ggq. AliveWithCmdline used to short-circuit to true on every
+// non-linux host without ever calling its matcher, so on darwin any live
+// process holding a recycled PID answered "yes, that's mine" to the nudge
+// poller's singleton check — gc then skipped spawning a poller and nudges to
+// that session stopped being delivered with no error surfaced. The matcher
+// must be consulted, and its answer must be the answer, on every supported
+// platform.
+func TestAliveWithCmdlineConsultsMatcherForLiveProcess(t *testing.T) {
+	pid := startProcess(t, "sleep", "5").Process.Pid
+
+	var seen []string
+	if !AliveWithCmdline(pid, func(argv []string) bool {
+		seen = argv
+		return ArgvContainsSequence(argv, "sleep", "5")
+	}) {
+		t.Fatalf("AliveWithCmdline(%d, matching) = false, want true; matcher saw argv %q", pid, seen)
+	}
+	if !ArgvContainsSequence(seen, "sleep", "5") {
+		t.Fatalf("matcher saw argv %q, want the spawned process's own argv", seen)
+	}
+
+	// The rejecting direction on the same live PID: a live process alone must
+	// never satisfy the guard. This is the assertion that failed on darwin.
+	if AliveWithCmdline(pid, func([]string) bool { return false }) {
+		t.Fatalf("AliveWithCmdline(%d, rejecting) = true for a live PID, want false — the matcher's answer must decide", pid)
+	}
+}
+
+// TestCmdlinePreservesArgumentsContainingWhitespace pins the argument-boundary
+// contract the identity guard depends on: argv must come from a source that
+// preserves the real vector, not from splitting a rendered command string on
+// whitespace. A city path or session name containing a space is what separates
+// the two — a whitespace split renders it as two arguments, and the nudge
+// poller's matcher compares --city against a whole token, so the guard would
+// stop recognizing its own poller.
+func TestCmdlinePreservesArgumentsContainingWhitespace(t *testing.T) {
+	// Two commands, not one: a shell handed a single simple command
+	// exec-replaces itself with it, which would swap out the argv under test.
+	const script = "sleep 5; :"
+	cmd := startProcess(t, "sh", "-c", script)
+
+	argv, err := Cmdline(cmd.Process.Pid)
+	if err != nil {
+		t.Fatalf("Cmdline(%d): %v", cmd.Process.Pid, err)
+	}
+	if len(argv) != 3 || argv[1] != "-c" || argv[2] != script {
+		t.Fatalf("Cmdline(%d) = %q, want a 3-element argv with %q intact as a single argument", cmd.Process.Pid, argv, script)
+	}
+}
+
+// TestCmdlineRejectsInvalidPID covers the fail-closed direction: a PID that
+// cannot name a process yields an error, never an empty argv that a permissive
+// matcher could accept.
+func TestCmdlineRejectsInvalidPID(t *testing.T) {
+	if argv, err := Cmdline(0); err == nil {
+		t.Fatalf("Cmdline(0) = %q, nil error; want an error", argv)
+	}
+}
+
+// TestAliveWithCmdlineRejectsNilMatcher documents that a caller with no
+// identity predicate gets the conservative answer rather than plain liveness.
+func TestAliveWithCmdlineRejectsNilMatcher(t *testing.T) {
+	if AliveWithCmdline(os.Getpid(), nil) {
+		t.Fatalf("AliveWithCmdline(%d, nil) = true, want false", os.Getpid())
 	}
 }
