@@ -326,7 +326,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
 	// Host-level fork-rate watch: surfaces the per-command data-plane fork storm
 	// (gc -> bd.real -> dolt) that operators routinely misread as CPU saturation.
-	// Advisory + read-only (/proc/stat); no config needed.
+	// Advisory and never gates; no config needed. Reads /proc/stat where it
+	// exists, and on Darwin spawns one trivial probe process per sample to read
+	// the sequential-PID proxy instead (doctor_fork_rate_darwin.go).
 	register(newForkRateCheck())
 	if cfgErr == nil && doctorWorkspaceHasPostgresScope(cityPath, cfg) {
 		register(doctorchecks.NewPostgresAuthCheck(cityPath, cfg))

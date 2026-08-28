@@ -242,7 +242,43 @@ executable path on macOS. Display only — not filed.
 | Bead | Site | Why not fixed here |
 |---|---|---|
 | gascity-si96 (P2) | `internal/workspacesvc/orphan_reap.go` | outside the audited six; the honest-signal fix and the full `ps -Eww` port are different sizes and want a decision |
-| gascity-38vz (P2) | `cmd/gc/doctor_fork_rate.go` | split item 2 of the originating bead — needs a feasibility decision first, since macOS has no cumulative fork counter and a wrong proxy is worse than the honest skip |
+| ~~gascity-38vz (P2)~~ | `cmd/gc/doctor_fork_rate.go` | **Resolved** by gascity-5830 — see "D4 resolved" below |
+
+## D4 resolved: the Darwin fork-rate instrument
+
+The feasibility question this table left open — does a faithful proxy for the
+cumulative fork counter exist on macOS at all, given that a wrong proxy is worse
+than the honest skip — was answered yes, and the instrument was built.
+
+**The proxy.** macOS allocates PIDs sequentially, so a freshly allocated PID is
+a monotone counter of process creations and the delta between two of them counts
+the creations in the window. Measured on `hammer` (Darwin 25.6.0 arm64) over 1s
+windows through the same `exec.Command` probe the check uses: 129-333
+creations/s over eight consecutive windows at load ~119, comfortably above the
+check's existing 100/s warn threshold. The figure tracks load rather than
+sitting flat, which is the whole point — it is a *rate*, the thing the
+originating bead said was unobtainable on macOS.
+
+**Why it must spend a fork.** Two cheaper routes were tested and both fail:
+
+- `kern.lastpid`, the BSD sysctl that reports the last allocated PID directly,
+  does not exist on Darwin (`sysctl kern.lastpid` -> `unknown oid`).
+- The highest *live* PID — the obvious fork-free substitute, readable from the
+  process table — is dead on a host whose PID space has already wrapped. Measured
+  here it sat pinned at a constant 99440 (a long-lived process from before the
+  wrap) while the allocator itself was down at ~44000 and moving, so its delta
+  read a constant zero. It would have reported "no fork activity" on a host doing
+  ~130 creations/s.
+
+**What honesty required.** The proxy is a LOWER BOUND, not the kernel's count, so
+the implementation reports it as one: `forkCounterKind`/`forkCounterTraits` in
+`doctor_fork_rate.go` carry per-counter reporting rules, so the Darwin arm prints
+"at least N forks/s ... via PID-delta proxy" and the Linux arm keeps the exact,
+unhedged `/proc/stat` figure. The probe's own process creation is discounted
+before reporting, and PID wraparound reuses the existing backwards-delta branch
+and skips rather than reporting a negative rate. `/proc/stat` stays preferred
+wherever it is readable, so Linux is unchanged and no fork is spent where a plain
+read suffices.
 
 ## What this audit does not cover
 
