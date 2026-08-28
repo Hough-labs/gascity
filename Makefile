@@ -1,4 +1,14 @@
 GOLANGCI_LINT_VERSION := 2.12.0
+# Must stay equal to the gofumpt golangci-lint vendors, so the standalone
+# binary and `make fmt-check` cannot disagree about what is formatted
+# (gascity-1ra). Read it from the linter's own go.mod when promoting the pin:
+#   grep mvdan.cc/gofumpt \
+#     "$(go env GOMODCACHE)/cache/download/github.com/golangci/golangci-lint/v2/@v/v$(GOLANGCI_LINT_VERSION).mod"
+# v2.12.0 and v2.12.2 both vendor v0.9.2, so the pin is stable across the patch
+# range. Unpinned, Homebrew's 0.10.0 flagged 227 files here that the gate calls
+# clean -- and its rewrites move trailing //nolint directives onto a different
+# line than the call they suppress, so they are semantic, not cosmetic.
+GOFUMPT_VERSION := 0.9.2
 OAPI_CODEGEN_VERSION := 2.6.0
 BUILDX_VERSION := 0.21.2
 
@@ -7,7 +17,12 @@ GOOS   := $(shell go env GOOS)
 GOARCH := $(shell go env GOARCH)
 
 BIN_DIR := $(shell go env GOPATH)/bin
+# Pinned tools are always named by absolute path. Installing into BIN_DIR does
+# NOT change what a bare tool name resolves to: /opt/homebrew/bin precedes
+# $(go env GOPATH)/bin on a typical developer PATH, so a recipe running a bare
+# `gofumpt` or `golangci-lint` silently gets whatever Homebrew last installed.
 GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
+GOFUMPT := $(BIN_DIR)/gofumpt
 
 # Shared installer for version-pinned Go tools. It reinstalls whenever the
 # binary on disk does not report the pinned version, so a stale binary in the
@@ -797,8 +812,8 @@ test-cover-cmdgc-shard:
 cover: test-cover
 	go tool cover -func=coverage.txt
 
-## install-tools: install pinned golangci-lint + oapi-codegen
-install-tools: install-golangci-lint install-oapi-codegen
+## install-tools: install pinned golangci-lint + gofumpt + oapi-codegen
+install-tools: install-golangci-lint install-gofumpt install-oapi-codegen
 
 ## install-golangci-lint: install the pinned golangci-lint, replacing any other version
 # Every lint and fmt gate takes this as a prerequisite, so the already-pinned
@@ -807,6 +822,17 @@ install-tools: install-golangci-lint install-oapi-codegen
 .PHONY: install-golangci-lint
 install-golangci-lint:
 	@"$(INSTALL_PINNED_GO_TOOL)" "$(BIN_DIR)" golangci-lint "$(GOLANGCI_LINT_VERSION)" github.com/golangci/golangci-lint/v2/cmd/golangci-lint version
+
+## install-gofumpt: install the pinned gofumpt, replacing any other version
+# Nothing in this Makefile runs gofumpt -- formatting goes through
+# `golangci-lint fmt`, which uses its own vendored copy. The pin exists because
+# gofumpt is ALSO run directly, by contributors and by editor-save hooks, and an
+# unpinned one disagrees with the gate: 0.10.0 rewrites hundreds of files that
+# `make fmt-check` reports as clean, so those rewrites ride along inside
+# unrelated diffs and the gate never objects (gascity-1ra).
+.PHONY: install-gofumpt
+install-gofumpt:
+	@"$(INSTALL_PINNED_GO_TOOL)" "$(BIN_DIR)" gofumpt "$(GOFUMPT_VERSION)" mvdan.cc/gofumpt --version
 
 ## install-oapi-codegen: install pinned oapi-codegen so the spec→client drift
 ## test (TestGeneratedClientInSync) can regenerate client_gen.go without skipping.
