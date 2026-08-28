@@ -20,6 +20,37 @@ func gateSweepRecipe(t *testing.T, makefile, target string) string {
 	return ""
 }
 
+// runGateParallelism runs scripts/test-gate-parallelism with a pinned CPU
+// budget and an optional GC_TEST_GATE_PARALLEL override, returning its trimmed
+// combined output. An empty outerP omits the argument entirely so the usage
+// path can be exercised.
+//
+// This is deliberately the only exec site in this file: both the arithmetic
+// table and the fail-closed table route through it, so the repository resource
+// census counts one subprocess call site for the whole file rather than one
+// per table (test/test-resources.toml).
+func runGateParallelism(t *testing.T, cpus, outerP, override string) (string, error) {
+	t.Helper()
+
+	root := repoRoot(t)
+	var args []string
+	if outerP != "" {
+		args = append(args, outerP)
+	}
+	cmd := exec.Command(filepath.Join(root, "scripts", "test-gate-parallelism"), args...)
+	cmd.Dir = root
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"GC_TEST_LOCAL_CPUS=" + cpus,
+	}
+	if override != "" {
+		cmd.Env = append(cmd.Env, "GC_TEST_GATE_PARALLEL="+override)
+	}
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
 // TestGateLanesCapTestBinaryParallelism pins the fix for gascity-ngab. A
 // `go test` binary defaults -parallel to GOMAXPROCS, so each of the -p
 // concurrent binaries independently fans its t.Parallel() tests out across
@@ -119,8 +150,6 @@ func TestShardLegsKeepTheGOMAXPROCSDefaultParallelism(t *testing.T) {
 // exceeds the CPU budget, so the value never rises above the GOMAXPROCS
 // default it replaces.
 func TestGateParallelismDividesTheCPUBudget(t *testing.T) {
-	script := filepath.Join(repoRoot(t), "scripts", "test-gate-parallelism")
-
 	tests := []struct {
 		name     string
 		cpus     string
@@ -143,21 +172,11 @@ func TestGateParallelismDividesTheCPUBudget(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command(script, tc.outerP)
-			cmd.Dir = repoRoot(t)
-			cmd.Env = []string{
-				"PATH=" + os.Getenv("PATH"),
-				"HOME=" + t.TempDir(),
-				"GC_TEST_LOCAL_CPUS=" + tc.cpus,
-			}
-			if tc.override != "" {
-				cmd.Env = append(cmd.Env, "GC_TEST_GATE_PARALLEL="+tc.override)
-			}
-			out, err := cmd.CombinedOutput()
+			got, err := runGateParallelism(t, tc.cpus, tc.outerP, tc.override)
 			if err != nil {
-				t.Fatalf("test-gate-parallelism %s: %v\n%s", tc.outerP, err, out)
+				t.Fatalf("test-gate-parallelism %s: %v\n%s", tc.outerP, err, got)
 			}
-			if got := strings.TrimSpace(string(out)); got != tc.want {
+			if got != tc.want {
 				t.Errorf("test-gate-parallelism %s with %s cpus = %q, want %q", tc.outerP, tc.cpus, got, tc.want)
 			}
 		})
@@ -167,8 +186,6 @@ func TestGateParallelismDividesTheCPUBudget(t *testing.T) {
 // TestGateParallelismRejectsBadInput keeps the script fail-closed: a garbled
 // value must not silently become an unbounded -parallel.
 func TestGateParallelismRejectsBadInput(t *testing.T) {
-	script := filepath.Join(repoRoot(t), "scripts", "test-gate-parallelism")
-
 	tests := []struct {
 		name     string
 		outerP   string
@@ -183,22 +200,8 @@ func TestGateParallelismRejectsBadInput(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var args []string
-			if tc.outerP != "" {
-				args = append(args, tc.outerP)
-			}
-			cmd := exec.Command(script, args...)
-			cmd.Dir = repoRoot(t)
-			cmd.Env = []string{
-				"PATH=" + os.Getenv("PATH"),
-				"HOME=" + t.TempDir(),
-				"GC_TEST_LOCAL_CPUS=16",
-			}
-			if tc.override != "" {
-				cmd.Env = append(cmd.Env, "GC_TEST_GATE_PARALLEL="+tc.override)
-			}
-			if out, err := cmd.CombinedOutput(); err == nil {
-				t.Errorf("test-gate-parallelism accepted bad input, printed %q", strings.TrimSpace(string(out)))
+			if out, err := runGateParallelism(t, "16", tc.outerP, tc.override); err == nil {
+				t.Errorf("test-gate-parallelism accepted bad input, printed %q", out)
 			}
 		})
 	}
