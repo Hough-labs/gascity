@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -296,6 +297,24 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Rig-scoped [rigs.formula_vars] reach `gc sling` but never reached the
+	// molecule/wisp path, so formulas poured by `gc bd mol wisp` resolved
+	// unscoped against formula defaults. gc already knows the rig here, so
+	// supply the vars on both the pour and the read side. See
+	// cmd/gc/bd_formula_vars.go for the precedence contract.
+	rigVars := rigFormulaVarsForBdTarget(cfg, target)
+	bdArgs = injectRigFormulaVars(bdArgs, rigVars)
+
+	// `formula show` is how a root-only wisp's agent reads its steps: the pour
+	// skips step materialization, so this output is the only rendered text it
+	// ever sees. Render the rig's configured vars into it rather than emitting
+	// raw {{placeholder}} tokens. Only rig formula_vars are substituted —
+	// bd_formula_vars.go records why formula defaults deliberately are not.
+	var formulaShowVars map[string]string
+	if _, ok := bdFormulaShowName(bdArgs); ok {
+		formulaShowVars = rigVars
+	}
+
 	reapStaleBdExportJSONL(target.ScopeRoot)
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
@@ -308,7 +327,16 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cmd := exec.Command(bdPath, bdArgs...)
 	cmd.Dir = target.ScopeRoot
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = stdout
+	// Buffering is confined to `formula show`, whose output is one formula
+	// recipe: bounded, and never a stream a caller consumes incrementally.
+	// Every other bd subcommand keeps writing straight through.
+	substituting := len(formulaShowVars) > 0
+	formulaShowBuf := &bytes.Buffer{}
+	if substituting {
+		cmd.Stdout = formulaShowBuf
+	} else {
+		cmd.Stdout = stdout
+	}
 	// Tee stderr through a bounded head buffer alongside the operator's
 	// pipe so we can scan it post-exec for bd's silent-fallback-to-on-disk
 	// marker. Only stderr is teed: bd writes its auto-import banner there,
@@ -325,6 +353,12 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	traceStart := time.Now()
 	runErr := cmd.Run()
+	if substituting {
+		jsonMode := bdArgsRequestJSON(bdArgs)
+		// Best-effort: a write failure here has nowhere left to report to,
+		// and bd's own exit code below is the operator-visible result.
+		_, _ = stdout.Write(substituteFormulaShowOutput(formulaShowBuf.Bytes(), formulaShowVars, jsonMode))
+	}
 	traceExit := 0
 	if runErr != nil {
 		var exitErr *exec.ExitError

@@ -247,3 +247,35 @@ func TestScanUnknownFlagsBareBdWithoutGcPrefix(t *testing.T) {
 		t.Fatalf("ScanUnknownFlags() = %v, want exactly 1 finding", findings)
 	}
 }
+
+func TestGlobalValueFlags(t *testing.T) {
+	got := GlobalValueFlags()
+	for _, want := range []string{"--actor", "--db", "-C", "--directory", "--dolt-auto-commit"} {
+		if !got[want] {
+			t.Errorf("GlobalValueFlags()[%q] = false, want true", want)
+		}
+	}
+	if got["--var"] {
+		t.Error(`GlobalValueFlags()["--var"] = true, want false (subcommand-scoped)`)
+	}
+	got["--injected"] = true
+	if GlobalValueFlags()["--injected"] {
+		t.Error("GlobalValueFlags() returned an aliased map; mutation leaked into the package state")
+	}
+}
+
+func TestGlobalBoolFlags(t *testing.T) {
+	got := GlobalBoolFlags()
+	for _, want := range []string{"--json", "--quiet", "-q", "--global"} {
+		if !got[want] {
+			t.Errorf("GlobalBoolFlags()[%q] = false, want true", want)
+		}
+	}
+	if got["--root-only"] {
+		t.Error(`GlobalBoolFlags()["--root-only"] = true, want false (subcommand-scoped)`)
+	}
+	got["--injected"] = true
+	if GlobalBoolFlags()["--injected"] {
+		t.Error("GlobalBoolFlags() returned an aliased map; mutation leaked into the package state")
+	}
+}

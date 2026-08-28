@@ -209,6 +209,21 @@ func BoolFlags(sub string) map[string]bool {
 	return mergeFlagSets(globalBoolFlags, subFlags)
 }
 
+// GlobalValueFlags returns the value-consuming flag names accepted by every bd
+// subcommand. Callers that must scan the arguments of a subcommand outside the
+// per-subcommand manifest (for example `bd formula show`, deliberately out of
+// scope for Known/ValueFlags) need the global set on its own to tell a flag's
+// value apart from a positional argument. The returned map is a fresh copy.
+func GlobalValueFlags() map[string]bool {
+	return mergeFlagSets(globalValueFlags)
+}
+
+// GlobalBoolFlags returns the boolean flag names accepted by every bd
+// subcommand. Companion to GlobalValueFlags; the returned map is a fresh copy.
+func GlobalBoolFlags() map[string]bool {
+	return mergeFlagSets(globalBoolFlags)
+}
+
 func mergeFlagSets(sets ...map[string]bool) map[string]bool {
 	merged := make(map[string]bool)
 	for _, set := range sets {
