@@ -42,6 +42,7 @@ func TestPinnedOutcomeAndFailureClassValues(t *testing.T) {
 		OutcomeMissingRoot:    "missing_root",
 		FailureClassTransient: "transient",
 		FailureClassHard:      "hard",
+		FailureClassNone:      "none",
 	}
 	for got, want := range pinned {
 		if got != want {
@@ -92,6 +93,33 @@ func TestPinnedVocabularyValues(t *testing.T) {
 	for got, want := range pinned {
 		if got != want {
 			t.Errorf("pinned value drift: got %q, want %q", got, want)
+		}
+	}
+}
+
+// TestIsNoFailureSignal pins the empty-or-"none" equivalence that readers of
+// gc.failure_class and gc.failure_reason depend on. Shipped formula contracts
+// document a three-value failure-class vocabulary (none|transient|hard), so a
+// clean pass legitimately arrives carrying failure_class="none"; a reader that
+// only compares against "" reads that as a failure signal and retries a healthy
+// attempt (gascity-7atz).
+func TestIsNoFailureSignal(t *testing.T) {
+	tests := []struct {
+		value string
+		want  bool
+	}{
+		{value: "", want: true},
+		{value: "   ", want: true},
+		{value: FailureClassNone, want: true},
+		{value: "  none  ", want: true},
+		{value: FailureClassTransient, want: false},
+		{value: FailureClassHard, want: false},
+		{value: "None", want: false},
+		{value: "rate_limited", want: false},
+	}
+	for _, tt := range tests {
+		if got := IsNoFailureSignal(tt.value); got != tt.want {
+			t.Errorf("IsNoFailureSignal(%q) = %v, want %v", tt.value, got, tt.want)
 		}
 	}
 }

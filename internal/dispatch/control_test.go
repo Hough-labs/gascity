@@ -87,6 +87,67 @@ func TestProcessRetryControlPass(t *testing.T) {
 	}
 }
 
+// TestProcessRetryControlPassWithExplicitNoneFailureClass is the control-path
+// twin of the retry-eval regression for gascity-7atz: an attempt that passed
+// cleanly while mirroring the contract's failure_class=none must close the
+// control as pass, not consume a retry attempt.
+func TestProcessRetryControlPassWithExplicitNoneFailureClass(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := mustCreate(t, store, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id":   root.ID,
+			"gc.step_ref":       "mol-test.review.attempt.1",
+			"gc.attempt":        "1",
+			"gc.outcome":        "pass",
+			"gc.failure_class":  "none",
+			"gc.failure_reason": "none",
+			"gc.output_json":    `{"ok":true}`,
+		},
+	})
+	mustClose(t, store, attempt1.ID)
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	if !result.Processed || result.Action != "pass" {
+		t.Fatalf("result = %+v, want processed pass", result)
+	}
+
+	if result.Created != 0 {
+		t.Fatalf("result.Created = %d, want 0 (a clean pass must not spawn another attempt)", result.Created)
+	}
+
+	after := mustGet(t, store, control.ID)
+	if after.Status != "closed" || after.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("control = status %q outcome %q, want closed/pass", after.Status, after.Metadata["gc.outcome"])
+	}
+	if after.Metadata["gc.output_json"] != `{"ok":true}` {
+		t.Fatalf("control output_json = %q, want propagated", after.Metadata["gc.output_json"])
+	}
+}
+
 // ---------------------------------------------------------------------------
 // processAttemptControl shared-loop tests (fake evaluator)
 // ---------------------------------------------------------------------------

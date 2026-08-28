@@ -1,5 +1,7 @@
 package beadmeta
 
+import "strings"
+
 // Value vocabulary for engine-minted structural metadata keys. These are DATA
 // declarations only: which kinds a dispatcher accepts, which kinds trigger the
 // graph contract, and what an outcome means remain decisions owned by the
@@ -78,7 +80,33 @@ const (
 const (
 	FailureClassTransient = "transient"
 	FailureClassHard      = "hard"
+
+	// FailureClassNone is the explicit "no failure" member of the vocabulary.
+	// Shipped formula contracts document the class to agents as none|transient|
+	// hard, so an agent closing a clean attempt correctly writes
+	// gc.failure_class=none rather than omitting the key. It is therefore
+	// EQUIVALENT to an absent value, never a failure signal: read it through
+	// IsNoFailureSignal, never by comparing against "" alone.
+	FailureClassNone = "none"
 )
+
+// IsNoFailureSignal reports whether a failure-signal value carries no failure.
+// It spans the failure-class keys above and their free-text sibling
+// FailureReasonMetadataKey ("gc.failure_reason"), because agents mirror the
+// same none|transient|hard vocabulary onto both. The empty string and an
+// explicit "none" (with surrounding space tolerated) both mean "no failure".
+//
+// This is a membership predicate over the vocabulary, not a decision: what a
+// reader DOES about a present or absent failure stays with dispatch. Use it at
+// any site that treats a NON-EMPTY value as proof that a failure occurred —
+// comparing against "" alone reads a contract-conformant "none" as a failure.
+// Sites that instead test for one specific class (== FailureClassTransient,
+// == FailureClassHard) already treat "none" exactly like an absent value and
+// need no normalization.
+func IsNoFailureSignal(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return trimmed == "" || trimmed == FailureClassNone
+}
 
 // FormulaContractGraphV2 is the value of FormulaContractMetadataKey
 // ("gc.formula_contract") marking a workflow compiled under the graph.v2

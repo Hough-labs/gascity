@@ -89,6 +89,85 @@ func TestProcessRetryEvalPassClosesLogical(t *testing.T) {
 	}
 }
 
+// TestProcessRetryEvalPassWithExplicitNoneFailureClassClosesLogical is the
+// end-to-end regression for gascity-7atz: an attempt that passed cleanly but
+// mirrored the contract's failure_class=none must close the logical bead as
+// pass. Before the fix it classified as pass_with_failure_metadata and retried,
+// so a healthy molecule burned every attempt and ended in hard_fail.
+func TestProcessRetryEvalPassWithExplicitNoneFailureClassClosesLogical(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	root := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	logical := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "demo.review",
+			"gc.max_attempts": "3",
+			"gc.on_exhausted": "hard_fail",
+		},
+	})
+	run1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "review attempt 1",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-run",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "demo.review.run.1",
+			"gc.logical_bead_id": logical.ID,
+			"gc.attempt":         "1",
+			"gc.max_attempts":    "3",
+			"gc.on_exhausted":    "hard_fail",
+			"gc.outcome":         "pass",
+			"gc.failure_class":   "none",
+			"gc.failure_reason":  "none",
+			"gc.output_json":     `{"ok":true}`,
+		},
+	})
+	eval1 := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review eval 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-eval",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "demo.review.eval.1",
+			"gc.logical_bead_id": logical.ID,
+			"gc.attempt":         "1",
+			"gc.max_attempts":    "3",
+			"gc.on_exhausted":    "hard_fail",
+		},
+	})
+	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
+	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
+
+	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(retry-eval pass with failure_class=none): %v", err)
+	}
+	if !result.Processed || result.Action != "pass" {
+		t.Fatalf("result = %+v, want processed pass", result)
+	}
+
+	logicalAfter := mustGetBead(t, store, logical.ID)
+	if logicalAfter.Status != "closed" || logicalAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("logical = status %q outcome %q, want closed/pass", logicalAfter.Status, logicalAfter.Metadata["gc.outcome"])
+	}
+	if logicalAfter.Metadata["gc.final_disposition"] != "pass" {
+		t.Fatalf("logical gc.final_disposition = %q, want pass", logicalAfter.Metadata["gc.final_disposition"])
+	}
+}
+
 func TestProcessRetryEvalRetriesPassMissingRequiredOutputJSON(t *testing.T) {
 	t.Parallel()
 
@@ -214,6 +293,110 @@ func TestClassifyRetryAttemptCanceledIsTerminalNonRetry(t *testing.T) {
 	want := retryEvalResult{Outcome: "canceled"}
 	if got != want {
 		t.Fatalf("classifyRetryAttempt(canceled) = %+v, want %+v", got, want)
+	}
+}
+
+// TestClassifyRetryAttemptExplicitNoneFailureSignalsAreNotFailures pins that the
+// explicit "none" value of the failure-class vocabulary is read as "no failure",
+// exactly like an absent value. Shipped formula contracts document the
+// three-value vocabulary none|transient|hard, so agents correctly mirror
+// failure_class=none (and, seeing the same vocabulary, sometimes failure_reason)
+// onto a clean pass. Before the fix the pass arm tested only for non-emptiness,
+// so "none" != "" classified every clean pass as pass_with_failure_metadata and
+// retried it to exhaustion -> hard_fail; on the fail arm "none" fell to the
+// default and became unknown_failure_class (gascity-7atz).
+func TestClassifyRetryAttemptExplicitNoneFailureSignalsAreNotFailures(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		meta map[string]string
+		want retryEvalResult
+	}{
+		{
+			name: "pass with failure_class none",
+			meta: map[string]string{
+				"gc.outcome":       "pass",
+				"gc.failure_class": "none",
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "pass with failure_reason none",
+			meta: map[string]string{
+				"gc.outcome":        "pass",
+				"gc.failure_reason": "none",
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "pass with both signals none",
+			meta: map[string]string{
+				"gc.outcome":        "pass",
+				"gc.failure_class":  "none",
+				"gc.failure_reason": "none",
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "pass with padded none",
+			meta: map[string]string{
+				"gc.outcome":       "pass",
+				"gc.failure_class": "  none  ",
+			},
+			want: retryEvalResult{Outcome: "pass"},
+		},
+		{
+			name: "fail with failure_class none is hard, not unknown",
+			meta: map[string]string{
+				"gc.outcome":        "fail",
+				"gc.failure_class":  "none",
+				"gc.failure_reason": "compile_error",
+			},
+			want: retryEvalResult{Outcome: "hard", Reason: "compile_error"},
+		},
+		{
+			name: "fail with failure_class none and no reason is hard unspecified",
+			meta: map[string]string{
+				"gc.outcome":       "fail",
+				"gc.failure_class": "none",
+			},
+			want: retryEvalResult{Outcome: "hard", Reason: "unspecified"},
+		},
+		{
+			name: "pass with a real failure class still retries",
+			meta: map[string]string{
+				"gc.outcome":       "pass",
+				"gc.failure_class": "transient",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "pass_with_failure_metadata"},
+		},
+		{
+			name: "pass with a real failure reason still retries",
+			meta: map[string]string{
+				"gc.outcome":        "pass",
+				"gc.failure_reason": "rate_limited",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "pass_with_failure_metadata"},
+		},
+		{
+			name: "fail with an unknown class is still unknown_failure_class",
+			meta: map[string]string{
+				"gc.outcome":       "fail",
+				"gc.failure_class": "mystery",
+			},
+			want: retryEvalResult{Outcome: "transient", Reason: "unknown_failure_class"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := classifyRetryAttempt(beads.Bead{Metadata: tt.meta}); got != tt.want {
+				t.Fatalf("classifyRetryAttempt() = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }
 

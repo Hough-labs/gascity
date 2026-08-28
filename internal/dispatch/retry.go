@@ -272,7 +272,13 @@ func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
 	outcome := strings.TrimSpace(subject.Metadata[beadmeta.OutcomeMetadataKey])
 	switch outcome {
 	case beadmeta.OutcomePass:
-		if strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey]) != "" || strings.TrimSpace(subject.Metadata[beadmeta.FailureReasonMetadataKey]) != "" {
+		// A pass is self-contradictory only when it carries a REAL failure
+		// signal. "none" is a contract-conformant way to say "no failure" (the
+		// vocabulary agents are shown is none|transient|hard), so it must read
+		// exactly like an absent value — a bare != "" test here retried every
+		// clean pass to exhaustion.
+		if !beadmeta.IsNoFailureSignal(subject.Metadata[beadmeta.FailureClassMetadataKey]) ||
+			!beadmeta.IsNoFailureSignal(subject.Metadata[beadmeta.FailureReasonMetadataKey]) {
 			return retryEvalResult{Outcome: "transient", Reason: "pass_with_failure_metadata"}
 		}
 		if strings.TrimSpace(subject.Metadata[beadmeta.OutputJSONRequiredMetadataKey]) == "true" {
@@ -286,7 +292,15 @@ func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
 		}
 		return retryEvalResult{Outcome: "pass"}
 	case beadmeta.OutcomeFail:
-		switch strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey]) {
+		// Normalize before the switch so an explicit "none" lands on the same
+		// arm as an absent class: on a failing attempt it says only "the agent
+		// declined to classify", which is terminal-hard, not an unknown
+		// vocabulary value.
+		failureClass := strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey])
+		if beadmeta.IsNoFailureSignal(failureClass) {
+			failureClass = ""
+		}
+		switch failureClass {
 		case beadmeta.FailureClassTransient:
 			return retryEvalResult{Outcome: "transient", Reason: retryFailureReason(subject)}
 		case beadmeta.FailureClassHard, "":
