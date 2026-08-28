@@ -948,7 +948,12 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 		}
 	}
 	if err := config.ValidateAgents(newCfg.Agents); err != nil {
-		return failWithWarnings(fmt.Errorf("validating agents: %w", err))
+		// The supervisor's fresh-init path runs this same validation with no
+		// old config to fall back on, so what reads as a survivable reload
+		// warning here is gc-fatal on the next restart — hours or days later,
+		// naming an agent in a rig the operator never touched. Say so at the
+		// only moment the operator is still looking (gascity-wjq7).
+		return failWithWarnings(fmt.Errorf("validating agents: %w — this config is FATAL to a fresh supervisor init; the city keeps running on the old config, but the next restart will fail until it is fixed", err))
 	}
 	if err := config.ValidateServices(newCfg.Services); err != nil {
 		return failWithWarnings(fmt.Errorf("validating services: %w", err))

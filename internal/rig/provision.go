@@ -154,7 +154,8 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 // add will write and the bookkeeping the later steps consume. reAdd and
 // reAddNeedsConfigWrite classify the add; existingRig is the pre-existing entry
 // on a re-add (nil otherwise); the *RigImports fields and commitRigImports carry
-// the resolved bundled imports and the deferred packs.lock commit.
+// the resolved bundled imports and the deferred packs.lock commit;
+// importWarnings carries what the import-collision guard found.
 type rigMutationPlan struct {
 	nextCfg               *config.City
 	prefix                string
@@ -164,6 +165,10 @@ type rigMutationPlan struct {
 	explicitRigImports    []config.BoundImport
 	defaultRigImports     []config.BoundImport
 	commitRigImports      func() error
+	// importWarnings holds the rig-import collision guard's findings — default
+	// imports it dropped, rigs whose packs it could not expand — for step 12 to
+	// emit. A refusal is an error instead, so this is never a silent failure.
+	importWarnings []string
 }
 
 // planRigMutation runs steps 5-9: it resolves the explicit bundled imports,
@@ -213,6 +218,22 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 		}
 	}
 
+	// Step 9.5: stop a shared pack source from publishing one agent identity
+	// under two rigs. That config only warns on `gc reload` but is gc-fatal to
+	// the next fresh supervisor init, so catching it here — before anything is
+	// written — is what keeps the failure attached to the edit that caused it
+	// (gascity-wjq7). Fresh adds only: a re-add writes no new imports, so any
+	// collision it could report is pre-existing and not this add's to refuse.
+	var importWarnings []string
+	if !reAdd {
+		guard, gErr := guardRigImportCollisions(deps.FS, cityPath, nextCfg, name, len(explicitRigImports) > 0, defaultRigImports)
+		if gErr != nil {
+			return rigMutationPlan{}, gErr
+		}
+		defaultRigImports = guard.keptDefaults
+		importWarnings = guard.warnings
+	}
+
 	return rigMutationPlan{
 		nextCfg:               nextCfg,
 		prefix:                prefix,
@@ -222,6 +243,7 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 		explicitRigImports:    explicitRigImports,
 		defaultRigImports:     defaultRigImports,
 		commitRigImports:      commitRigImports,
+		importWarnings:        importWarnings,
 	}, nil
 }
 
@@ -517,6 +539,9 @@ func emitRigBannerAndWarnings(deps Deps, req ProvisionRequest, plan rigMutationP
 		emit(ProvisionStep{Name: "default-branch", Detail: fmt.Sprintf("  Default branch: %s", resolvedDefaultBranch)})
 	}
 	if !plan.reAdd {
+		for _, w := range plan.importWarnings {
+			emit(ProvisionStep{Name: "import-collision", Warn: true, Detail: w})
+		}
 		switch {
 		case len(plan.explicitRigImports) > 0:
 			emit(ProvisionStep{Name: "imports", Detail: fmt.Sprintf("  Import: %s", formatBoundImports(plan.explicitRigImports))})
