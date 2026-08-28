@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# test-gate-parallelism — print the -parallel value for a gate test binary.
+#
+# WHY THIS EXISTS
+#   `make test` and `make test-mac` run the unit sweep with -p=4, so up to
+#   four test binaries are live at once. Each of those defaults -parallel to
+#   GOMAXPROCS, so each independently fans its t.Parallel() tests out across
+#   every core: peak concurrency is -p x GOMAXPROCS, four times the core
+#   count on a 16-core host, before the push gate's second slot and the rest
+#   of the machine are counted. The load-coupled failures tracked under
+#   gascity-ngab are wall-clock assertions inverting under exactly that
+#   oversubscription -- they pass in isolation on the same tree.
+#
+#   This is the third resource-control axis for the gate lanes: -p sizes
+#   concurrent test binaries, -parallel sizes the tests inside each one.
+#   Bounding only the first leaves the product unbounded.
+#
+# USAGE
+#   scripts/test-gate-parallelism <outer -p>
+#
+# ENVIRONMENT
+#   GC_TEST_GATE_PARALLEL   override the computed value outright
+#   GC_TEST_LOCAL_CPUS      override CPU detection (shared with
+#                           scripts/test-local-job-count)
+#
+# EXIT STATUS
+#   1  invalid argument or invalid override
+#   2  usage error
+#
+# Covered by TestGateParallelismDividesTheCPUBudget in scripts/.
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/host-cpus.sh
+source "$script_dir/lib/host-cpus.sh"
+# shellcheck source=lib/inner-parallelism.sh
+source "$script_dir/lib/inner-parallelism.sh"
+
+if [[ "$#" -ne 1 ]]; then
+  echo "usage: scripts/test-gate-parallelism <outer -p>" >&2
+  exit 2
+fi
+
+gc_gate_parallelism "$(gc_host_cpus)" "$1"

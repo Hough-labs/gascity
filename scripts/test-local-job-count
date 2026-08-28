@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/host-cpus.sh
+source "$script_dir/lib/host-cpus.sh"
+
 # A fast-suite shard can build a roughly 2.8 GiB test binary. Budget 4 GiB per
 # concurrent shard for compiler/linker headroom, cap automatic fan-out at 16,
 # and preserve the former three-job safety default when memory is unknowable.
@@ -19,18 +23,11 @@ fail() {
   exit 1
 }
 
+# CPU detection lives in scripts/lib/host-cpus.sh so the gate lanes
+# (scripts/test-gate-parallelism) size themselves against the same number and
+# honour the same GC_TEST_LOCAL_CPUS override.
 detect_cpus() {
-  if [[ -n "${GC_TEST_LOCAL_CPUS:-}" ]]; then
-    [[ "$GC_TEST_LOCAL_CPUS" =~ ^[0-9]+$ && "$GC_TEST_LOCAL_CPUS" -gt 0 ]] ||
-      fail "GC_TEST_LOCAL_CPUS must be a positive integer"
-    printf '%s\n' "$GC_TEST_LOCAL_CPUS"
-    return
-  fi
-
-  nproc 2>/dev/null ||
-    getconf _NPROCESSORS_ONLN 2>/dev/null ||
-    sysctl -n hw.ncpu 2>/dev/null ||
-    printf '8\n'
+  gc_host_cpus 2>/dev/null || fail "GC_TEST_LOCAL_CPUS must be a positive integer"
 }
 
 cgroup_remaining_kib() {

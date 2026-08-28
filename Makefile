@@ -469,11 +469,43 @@ UNIT_PKGS_SWEEP = $(shell go list ./... | grep -v -E '/(cmd/gc|examples/gastown|
 # Matches CMD_GC_COVER_TOTAL so the two sharded cmd/gc paths stay comparable.
 CMD_GC_UNIT_TOTAL ?= 6
 
+## GATE_TEST_P / GATE_TEST_PARALLEL: the two concurrency dimensions of a gate
+## sweep. -p bounds how many test binaries `go test` keeps live; -parallel
+## bounds how many t.Parallel() tests run at once INSIDE each of them, and it
+## defaults to GOMAXPROCS. Setting only -p therefore leaves the product
+## unbounded: four binaries x sixteen cores is 64 concurrent tests on this
+## 16-core host, before the gate's second push-gate slot and the rest of the
+## machine are counted. The load-coupled failures under gascity-ngab are
+## wall-clock assertions inverting under that oversubscription — they pass in
+## isolation on the same tree — so the gate sizes both dimensions and the two
+## multiply out to roughly the core count. scripts/test-gate-parallelism
+## floors the value so a small CI runner is unaffected.
+##
+## These bound the SWEEP invocations only, and deliberately so. The rule being
+## enforced is `-p x -parallel ~= cores`, and the shard loops in `test` /
+## `test-mac` already satisfy it: each `./scripts/test-go-test-shard` call gets
+## exactly one package, and the loops are plain sequential `for` loops that
+## background nothing and stop on the first failure (`|| exit 1`). At most one
+## test binary is therefore ever live — effectively -p=1, whose correct
+## -parallel is the full core count, which is the GOMAXPROCS default they
+## already get. Passing $(GATE_TEST_PARALLEL) there would not tighten a loose
+## bound, it would apply the sweep's four-way divisor to a lane running one
+## binary and UNDER-subscribe it 4x. The knob is close to inert on those
+## packages regardless: $(SHARDED_EXAMPLE_PKGS) carry 0 (examples/gastown) and
+## 1 (examples/bd/dolt) t.Parallel() call sites, and cmd/gc 148 across 8285
+## top-level tests, versus 1010 sites in the sweep.
+## TestShardLegsKeepTheGOMAXPROCSDefaultParallelism pins this so the asymmetry
+## reads as a decision rather than an omission.
+GATE_TEST_P ?= 4
+GATE_TEST_PARALLEL ?= $(shell ./scripts/test-gate-parallelism $(GATE_TEST_P))
+
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
 ## `make test-cmd-gc-process` locally and the CI `cmd/gc process suite` job.
-## Bound package parallelism so subprocess-heavy packages do not starve each
-## other into false 5s probe/condition timeouts. Use -count=1 so pre-commit
+## Bound BOTH parallelism dimensions ($(GATE_TEST_P) test binaries live at
+## once, $(GATE_TEST_PARALLEL) t.Parallel() tests inside each — see above) so
+## subprocess-heavy packages do not starve each other into false 5s
+## probe/condition timeouts. Use -count=1 so pre-commit
 ## reports actual test results instead of hanging after PASS while Go computes
 ## cache input hashes over local working files.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
@@ -537,7 +569,7 @@ CMD_GC_UNIT_TOTAL ?= 6
 ## the lane agents actually run, keeps the fail-in-under-a-second property
 ## whole by putting its sweep AND its shard loop inside that one `$(SHELL) -c`.
 test: test-fsys-darwin-compile
-	./scripts/gate-slot-run test $(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m $(UNIT_PKGS_SWEEP)
+	./scripts/gate-slot-run test $(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=$(GATE_TEST_P) -parallel=$(GATE_TEST_PARALLEL) -count=1 -timeout 15m $(UNIT_PKGS_SWEEP)
 	@./scripts/gate-slot-run test-package-shards $(SHELL) -c 'for s in $$(seq 1 $(CMD_GC_UNIT_TOTAL)); do \
 		$(TEST_ENV) GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=15m \
 		./scripts/test-go-test-shard ./cmd/gc "$$s" $(CMD_GC_UNIT_TOTAL) || exit 1; \
@@ -560,7 +592,7 @@ test: test-fsys-darwin-compile
 ## sweep still fails the gate before any shard runs.
 test-mac: test-fsys-darwin-compile
 	./scripts/gate-slot-run test-mac $(SHELL) -c '$(TEST_ENV) GC_FAST_UNIT=1 \
-		scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(UNIT_PKGS_SWEEP) && \
+		scripts/go-test-observable test-mac -- -p=$(GATE_TEST_P) -parallel=$(GATE_TEST_PARALLEL) -count=1 -timeout 15m $(UNIT_PKGS_SWEEP) && \
 		for p in $(SHARDED_EXAMPLE_PKGS); do \
 			for s in $$(seq 1 $(EXAMPLES_UNIT_TOTAL)); do \
 				$(TEST_ENV) GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=15m \

@@ -10,9 +10,22 @@ Measured 2026-08-26 on `origin/edge-integration` @ 2103ea04f (clean worktree).
 
 | Lane | What it runs | Who runs it |
 |---|---|---|
-| `make test-mac` | `-p=4 -count=1 -timeout 15m $(UNIT_PKGS_SWEEP)` — **excludes cmd/gc and `$(SHARDED_EXAMPLE_PKGS)`** — plus those examples packages as 4 *sequential* shards each | the Darwin pre-push hook; the rig's configured `test_command` |
+| `make test-mac` | `-p=$(GATE_TEST_P) -parallel=$(GATE_TEST_PARALLEL) -count=1 -timeout 15m $(UNIT_PKGS_SWEEP)` — **excludes cmd/gc and `$(SHARDED_EXAMPLE_PKGS)`** — plus those examples packages as 4 *sequential* shards each | the Darwin pre-push hook; the rig's configured `test_command` |
 | `make test` | the same sweep and example shards, **plus** cmd/gc as 6 *sequential* shards | AGENTS.md fallback |
 | `make test-fast-parallel` | shards cmd/gc and the examples packages locally at `LOCAL_TEST_JOBS` | the non-Darwin pre-push branch |
+
+The `-parallel` bound is newer than the measurements below: until gascity-ngab
+(2026-08-28) both gate lanes ran bare `-p=4`, leaving `-parallel` at its
+`GOMAXPROCS` default, so a sweep's peak concurrency was `4 x 16 = 64` tests on
+this 16-core host. Every run recorded in this document was taken in that shape.
+See TESTING.md, "Within-binary test parallelism on the gate lanes".
+
+The bound covers the **sweep** invocation of each lane, not the shard loops that
+gascity-cgh and gascity-vdhw added beside it. That is the same rule, not an
+exemption: a shard loop hands one package to one `go test` and runs the calls
+sequentially, so it is already effectively `-p=1`, whose matching `-parallel` is
+the full core count — the `GOMAXPROCS` default it gets today. Applying the
+sweep's four-way divisor there would under-subscribe a single-binary lane 4x.
 
 Two facts do most of the adjudication work:
 

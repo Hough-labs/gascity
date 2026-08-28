@@ -177,6 +177,61 @@ else
     record_fail "wiring.full_case_calls_selftest" "could not locate the full) case block in $LOCAL_PARALLEL"
 fi
 
+# ============================================================
+# Part C — gate parallelism (scripts/lib/host-cpus.sh +
+# gc_gate_parallelism, sourced in-process; gascity-ngab)
+# ============================================================
+
+HOST_CPUS_LIB="$TEST_DIR/lib/host-cpus.sh"
+assert_true "gate_p.host_cpus_lib_exists" test -r "$HOST_CPUS_LIB"
+if [[ -r "$HOST_CPUS_LIB" ]]; then
+    # shellcheck source=lib/host-cpus.sh disable=SC1091
+    . "$HOST_CPUS_LIB"
+fi
+
+GOT="$(GC_TEST_LOCAL_CPUS=16 gc_host_cpus 2>/dev/null)"
+assert_eq "gate_p.host_cpus_override_wins" "$GOT" "16"
+
+MALFORMED_CPUS_OUT="$(GC_TEST_LOCAL_CPUS=abc gc_host_cpus 2>&1)"
+MALFORMED_CPUS_RC=$?
+assert_true "gate_p.host_cpus_malformed_nonzero_exit" test "$MALFORMED_CPUS_RC" -ne 0
+assert_contains "gate_p.host_cpus_malformed_names_var" "$MALFORMED_CPUS_OUT" "GC_TEST_LOCAL_CPUS"
+
+# 16 cores, the gate's -p=4: four concurrent binaries x four parallel tests
+# each multiplies back out to the core count instead of 4x it.
+GOT="$(gc_gate_parallelism 16 4 2>/dev/null)"
+assert_eq "gate_p.divides_the_core_budget" "$GOT" "4"
+
+GOT="$(gc_gate_parallelism 64 4 2>/dev/null)"
+assert_eq "gate_p.scales_with_a_bigger_host" "$GOT" "16"
+
+# A runner whose core count is already at or below -p keeps today's behaviour
+# rather than being serialized to one test at a time.
+GOT="$(gc_gate_parallelism 4 4 2>/dev/null)"
+assert_eq "gate_p.small_runner_is_a_no_op" "$GOT" "4"
+
+GOT="$(GC_TEST_GATE_PARALLEL=2 gc_gate_parallelism 16 4 2>/dev/null)"
+assert_eq "gate_p.explicit_override_wins" "$GOT" "2"
+
+MALFORMED_GATE_OUT="$(GC_TEST_GATE_PARALLEL=abc gc_gate_parallelism 16 4 2>&1)"
+MALFORMED_GATE_RC=$?
+assert_true "gate_p.malformed_override_nonzero_exit" test "$MALFORMED_GATE_RC" -ne 0
+assert_contains "gate_p.malformed_override_names_var" "$MALFORMED_GATE_OUT" "GC_TEST_GATE_PARALLEL"
+
+BAD_OUTER_OUT="$(gc_gate_parallelism 16 0 2>&1)"
+BAD_OUTER_RC=$?
+assert_true "gate_p.zero_outer_p_nonzero_exit" test "$BAD_OUTER_RC" -ne 0
+assert_contains "gate_p.zero_outer_p_explains" "$BAD_OUTER_OUT" "positive integer"
+
+# Static wiring: both gate lanes must carry -parallel, and the Makefile must
+# take it from the script rather than hardcoding a number.
+MAKEFILE="$(dirname "$TEST_DIR")/Makefile"
+assert_true "gate_p.makefile_defines_knob"   grep -q 'GATE_TEST_PARALLEL ?='            "$MAKEFILE"
+assert_true "gate_p.makefile_uses_script"    grep -q 'scripts/test-gate-parallelism'    "$MAKEFILE"
+# shellcheck disable=SC2016  # the $(...) here is Makefile syntax to match literally
+assert_true "gate_p.gate_lanes_pass_parallel" \
+    test "$(grep -c 'go-test-observable.*-parallel=$(GATE_TEST_PARALLEL)' "$MAKEFILE")" -eq 2
+
 echo
 echo "local-concurrency tests: $pass passed, $fail failed"
 [[ "$fail" -eq 0 ]]

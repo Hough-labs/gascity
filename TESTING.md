@@ -938,6 +938,71 @@ runs the four version-sensitive `bd` CLI contracts under the dedicated
 minimum-supported, current, and main-HEAD `bd` versions without repeating the
 unrelated Tier A flows.
 
+#### Within-binary test parallelism on the gate lanes
+
+A gate sweep has two concurrency dimensions, and until gascity-ngab only one
+of them was bounded. `go test -p=N` caps how many test *binaries* are live at
+once; `-parallel` caps how many `t.Parallel()` tests run at once *inside* each
+binary, and it defaults to `GOMAXPROCS`. Setting only `-p` therefore leaves
+their product unbounded: `make test` and `make test-mac` ran `-p=4` against
+162 test binaries carrying 1010 `t.Parallel()` call sites, so peak concurrency
+was 4 x 16 = 64 tests on a 16-core host — before the push gate's second slot
+doubled it and the rest of the machine was counted at all.
+
+That is the oversubscription behind the load-coupled failures merged into
+gascity-ngab: wall-clock assertions that assert which of two timers wins, or
+wait on a fixed budget, invert when the box is starved, then pass in isolation
+on the same tree. Measured on this Darwin host at load average 101, the
+Gatekeeper first-exec tax that gascity-wz1 tracks accounts for roughly 44s of
+an 11-19 minute sweep (162 fresh test binaries x a measured 270ms median
+first-exec penalty over a warm re-exec) — real, but 4-7% of the wall clock,
+which is why the sweep's own concurrency is the lever and not the host's
+scanner.
+
+Both gate lanes now size both dimensions:
+
+```make
+GATE_TEST_P ?= 4
+GATE_TEST_PARALLEL ?= $(shell ./scripts/test-gate-parallelism $(GATE_TEST_P))
+```
+
+`scripts/test-gate-parallelism` divides the host's core count
+(`scripts/lib/host-cpus.sh`, shared with `test-local-job-count`) by `-p`, so
+the two multiply back out to roughly one test per core. The result is floored
+at 4, so a runner whose core count is already at or below `-p` — most CI
+boxes — keeps exactly the behaviour it has today. Override the computation
+with `GC_TEST_GATE_PARALLEL`, or the whole knob with
+`make test-mac GATE_TEST_PARALLEL=8`.
+
+This deliberately does not lower `GOMAXPROCS`. That would also thin the
+runtime's scheduler, changing goroutine interleaving and weakening the race
+detector; `-parallel` bounds only how many top-level tests run at once and
+leaves execution semantics alone. It is also not a retry, a quarantine, or a
+widened deadline — no assertion changes, and a test that fails under the
+capped lane still fails the gate.
+
+The bound covers each lane's **sweep**. The shard loops beside it — `cmd/gc`
+(gascity-cgh) and `$(SHARDED_EXAMPLE_PKGS)` (gascity-vdhw) — keep the
+`GOMAXPROCS` default, and that is the same rule rather than an exemption to it.
+Each `scripts/test-go-test-shard` call gets exactly one package and the loops
+are sequential, so at most one test binary is ever live: effectively `-p=1`,
+whose matching `-parallel` is the full core count. Handing those legs
+`$(GATE_TEST_PARALLEL)` would apply the sweep's four-way divisor to a
+single-binary lane and under-subscribe it 4x. The knob is nearly inert on those
+packages anyway — `examples/gastown` has 0 `t.Parallel()` call sites and
+`examples/bd/dolt` 1, and `cmd/gc` 148 across 8285 top-level tests, against
+1010 sites in the sweep.
+
+`scripts/test-local-parallel` also still leaves `-parallel` at `GOMAXPROCS`;
+its `-p` fair share is computed by `gc_inner_parallelism` and the matching
+`-parallel` bound is tracked separately, since this Darwin host never runs that
+lane.
+
+Covered by `TestGateLanesCapTestBinaryParallelism`,
+`TestShardLegsKeepTheGOMAXPROCSDefaultParallelism` and
+`TestGateParallelismDividesTheCPUBudget` in `scripts/`, plus Part C of
+`scripts/test-local-concurrency.sh`.
+
 #### Resource isolation via gascity-test.slice
 
 On hosts that provision a `gascity-test.slice` systemd user slice (resource
@@ -963,13 +1028,14 @@ unconfined even on slice-provisioned hosts.
 
 #### Cross-invocation concurrency bound via push-gate slots
 
-The three resource-control axes are orthogonal: (1) within-run job sizing
-(`LOCAL_TEST_JOBS`/`scripts/test-local-job-count`, above), (2) per-invocation
-resource isolation (`gascity-test.slice`, above), (3) cross-invocation
-concurrency bound — this section. Axes 1 and 2 both operate *within* a
-single `test-local-parallel` invocation; neither stops multiple invocations
-(a push, a direct `make`, and a CI job, say) from landing on the same host
-at once. Two measured incidents (2026-07-14, load 88.07 with 5 concurrent
+The four resource-control axes are orthogonal: (1) within-run job sizing
+(`LOCAL_TEST_JOBS`/`scripts/test-local-job-count`, above), (2) within-binary
+test parallelism on the gate lanes (`GATE_TEST_PARALLEL`, above), (3)
+per-invocation resource isolation (`gascity-test.slice`, above), (4)
+cross-invocation concurrency bound — this section. Axes 1-3 all operate
+*within* a single invocation; none of them stops multiple invocations (a
+push, a direct `make`, and a CI job, say) from landing on the same host at
+once. Two measured incidents (2026-07-14, load 88.07 with 5 concurrent
 `test-fast-parallel` runs + 2 gates + 1 `make test`; a later run at load
 53.6-82.1 with ~20 concurrent gate processes) showed exactly that: nothing
 bounded how many heavy-suite invocations could run concurrently, producing
