@@ -33,6 +33,31 @@ func firstArgsContainHasSession(args []string) bool {
 	return false
 }
 
+// assertNewSessionCall checks that a recorded invocation is a new-session, and
+// that it carries the global -N flag exactly when the caller expects it. -N is
+// what forbids tmux from unlinking a socket a live server still holds, so
+// which invocations carry it is the load-bearing assertion of gascity-n17v.
+func assertNewSessionCall(t *testing.T, args []string, wantNoStartServer bool) {
+	t.Helper()
+	verb := -1
+	gotNoStartServer := false
+	for i, a := range args {
+		if a == "-N" && verb == -1 {
+			gotNoStartServer = true
+		}
+		if a == "new-session" {
+			verb = i
+			break
+		}
+	}
+	if verb == -1 {
+		t.Fatalf("call = %v, want a new-session invocation", args)
+	}
+	if gotNoStartServer != wantNoStartServer {
+		t.Fatalf("call = %v, -N present = %v, want %v", args, gotNoStartServer, wantNoStartServer)
+	}
+}
+
 func TestNewSessionErrNoServerRefusesObservedLiveNamedSocket(t *testing.T) {
 	variants := []struct {
 		name string
@@ -106,7 +131,9 @@ func TestNewSessionErrNoServerObservedSafeAllowsCreation(t *testing.T) {
 		{name: "stable-refused"},
 	} {
 		t.Run(observation.name, func(t *testing.T) {
-			fe := probeAssertSet([]string{"", "", ""}, []error{ErrNoServer, nil, nil})
+			// Two probes: the preflight, then the re-check once the
+			// cross-process creation lock is held.
+			fe := probeAssertSet([]string{"", "", "", ""}, []error{ErrNoServer, ErrNoServer, nil, nil})
 			observerCalls := 0
 			tm := &Tmux{
 				cfg:  Config{SocketName: "gc-test"},
@@ -120,12 +147,15 @@ func TestNewSessionErrNoServerObservedSafeAllowsCreation(t *testing.T) {
 			if err := tm.NewSession("gc-fresh", ""); err != nil {
 				t.Fatalf("NewSession: %v", err)
 			}
-			if observerCalls != 1 {
-				t.Fatalf("observer calls = %d, want 1", observerCalls)
+			if observerCalls != 2 {
+				t.Fatalf("observer calls = %d, want 2 (preflight + re-check under the creation lock)", observerCalls)
 			}
-			if len(fe.calls) < 2 || fe.calls[1][3] != "new-session" {
-				t.Fatalf("calls = %#v, want probe followed by new-session", fe.calls)
+			if len(fe.calls) < 3 {
+				t.Fatalf("calls = %#v, want two probes followed by new-session", fe.calls)
 			}
+			// A cold start is the one invocation allowed to create the
+			// server, so it must NOT carry -N.
+			assertNewSessionCall(t, fe.calls[2], false)
 		})
 	}
 }
@@ -295,8 +325,8 @@ func TestProbeServerAliveHealthyProtocolDoesNotObserveSocket(t *testing.T) {
 				},
 			}
 
-			if err := tm.probeServerAlive(); err != nil {
-				t.Fatalf("probeServerAlive: %v", err)
+			if _, err := tm.probeServerPresence(); err != nil {
+				t.Fatalf("probeServerPresence: %v", err)
 			}
 			if observerCalls != 0 {
 				t.Fatalf("observer calls = %d, want 0", observerCalls)
@@ -316,9 +346,9 @@ func TestProbeServerAliveUnknownProtocolDoesNotObserveSocket(t *testing.T) {
 		},
 	}
 
-	err := tm.probeServerAlive()
+	_, err := tm.probeServerPresence()
 	if !errors.Is(err, ErrServerDegraded) {
-		t.Fatalf("probeServerAlive error = %v, want ErrServerDegraded", err)
+		t.Fatalf("probeServerPresence error = %v, want ErrServerDegraded", err)
 	}
 	if observerCalls != 0 {
 		t.Fatalf("observer calls = %d, want 0", observerCalls)
@@ -341,8 +371,8 @@ func TestProbeServerAliveAcceptsEmptyLiveServer(t *testing.T) {
 		},
 	}
 
-	if err := tm.probeServerAlive(); err != nil {
-		t.Fatalf("probeServerAlive: %v", err)
+	if _, err := tm.probeServerPresence(); err != nil {
+		t.Fatalf("probeServerPresence: %v", err)
 	}
 	if observerCalls != 0 {
 		t.Fatalf("observer calls = %d, want 0", observerCalls)
@@ -404,16 +434,16 @@ func TestNewSessionProbesBeforeCreatingWhenSocketSet(t *testing.T) {
 			t.Errorf("probe arg %d = %q, want %q", i, probe[i], want[i])
 		}
 	}
-	create := fe.calls[1]
-	if create[3] != "new-session" {
-		t.Fatalf("second call should be new-session, got %v", create)
-	}
+	// The server answered the preflight, so the create must be guarded: it
+	// can saturate between the probe and the create, and only -N keeps that
+	// from becoming an unlink+bind.
+	assertNewSessionCall(t, fe.calls[1], true)
 }
 
 func TestNewSessionProceedsWhenProbeReportsNoServer(t *testing.T) {
 	fe := probeAssertSet(
-		[]string{"", "", ""},
-		[]error{ErrNoServer, nil, nil},
+		[]string{"", "", "", ""},
+		[]error{ErrNoServer, ErrNoServer, nil, nil},
 	)
 	tm := &Tmux{
 		cfg:  Config{SocketName: "gc-test"},
@@ -426,12 +456,10 @@ func TestNewSessionProceedsWhenProbeReportsNoServer(t *testing.T) {
 	if err := tm.NewSession("gc-fresh", ""); err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	if len(fe.calls) < 2 {
-		t.Fatalf("expected new-session to follow probe, got %d calls: %v", len(fe.calls), fe.calls)
+	if len(fe.calls) < 3 {
+		t.Fatalf("expected new-session to follow both probes, got %d calls: %v", len(fe.calls), fe.calls)
 	}
-	if fe.calls[1][3] != "new-session" {
-		t.Fatalf("expected new-session after no-server probe, got %v", fe.calls[1])
-	}
+	assertNewSessionCall(t, fe.calls[2], false)
 }
 
 func TestNewSessionBailsWhenProbeReportsDegradedServer(t *testing.T) {
@@ -501,8 +529,8 @@ func TestProbeServerAliveAcceptsHealthyServer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fe := &fakeExecutor{err: tc.err}
 			tm := &Tmux{cfg: Config{SocketName: "gc-test"}, exec: fe}
-			if err := tm.probeServerAlive(); err != nil {
-				t.Fatalf("probeServerAlive(%s) = %v, want nil", tc.name, err)
+			if _, err := tm.probeServerPresence(); err != nil {
+				t.Fatalf("probeServerPresence(%s) = %v, want nil", tc.name, err)
 			}
 		})
 	}
@@ -540,7 +568,7 @@ func TestProbeServerAliveBailsFastOnHang(t *testing.T) {
 	tm := &Tmux{cfg: Config{SocketName: "gc-test"}, exec: se}
 
 	start := time.Now()
-	err := tm.probeServerAlive()
+	_, err := tm.probeServerPresence()
 	elapsed := time.Since(start)
 
 	if !errors.Is(err, ErrServerDegraded) {

@@ -154,6 +154,17 @@ var (
 	ErrServerDegraded = errors.New("tmux server degraded: refusing new-session to avoid socket clobber")
 )
 
+// ErrServerSaturated indicates the tmux server bound to SocketName is alive
+// but its accept backlog is full, so connect(2) is refused. It is transient
+// and retryable: the server drains the backlog and starts answering again.
+//
+// It wraps ErrServerDegraded so the callers that already refuse to proceed on
+// a degraded server are unchanged, and it deliberately does NOT wrap
+// ErrNoServer. Reporting saturation as absence is what makes gc's
+// absence-absorbing call sites conclude the fleet is empty and rebuild every
+// seat, which is the respawn wave in gascity-n17v.
+var ErrServerSaturated = fmt.Errorf("%w: accept backlog saturated", ErrServerDegraded)
+
 // ErrNoCurrentTarget is tmux's reply when the server IS alive but holds no
 // sessions (exit-empty off — gc's configured default). It wraps ErrNoServer so
 // existing idempotent-teardown callers are unchanged; only the new-session
@@ -180,7 +191,71 @@ var tmuxSubprocessTimeout = 30 * time.Second
 // healthy-but-slow server still responds. Test-overridable.
 var newSessionProbeTimeout = 2 * time.Second
 
-// probeSessionName is the bogus target used by probeServerAlive's has-session
+// socketCreateLocks serializes session creation per tmux socket.
+//
+// gc's own fan-out is a first-class contributor to the accept-backlog
+// saturation that lets tmux clobber the socket: a reconciler rebuilding a
+// dozen seats at once issues a dozen simultaneous connect() calls on one
+// socket, and every clobber triggers another rebuild. Creation against a
+// given socket is therefore single-file.
+//
+// Channel-based like sessionNudgeLocks so acquisition can be time-bounded: one
+// create that wedges must not lock every other seat out permanently.
+var socketCreateLocks sync.Map // map[string]chan struct{}
+
+// socketCreateLockTimeout bounds the wait for both the in-process and the
+// cross-process session-creation lock. A healthy create finishes well inside a
+// second; the budget covers a queue of them plus one create that runs to
+// tmuxSubprocessTimeout, and past that a waiter is better off reporting a
+// retryable saturation than stalling its caller. Test-overridable.
+var socketCreateLockTimeout = 60 * time.Second
+
+// socketCreateLockRetryBase is the base delay between cross-process lock
+// attempts; the actual sleep adds up to the same again as jitter so competing
+// gc processes do not resynchronize into a connect() wave.
+var socketCreateLockRetryBase = 25 * time.Millisecond
+
+// newSessionMode selects how tmux may be invoked to create a session.
+type newSessionMode int
+
+const (
+	// newSessionModeGuarded requires the global -N flag, which forbids tmux
+	// from starting a server. Any invocation that might reach a live socket
+	// MUST use it: without -N, a refused connect() sends tmux down its
+	// unlink+bind path, which orphans every session on the original server.
+	newSessionModeGuarded newSessionMode = iota
+	// newSessionModeColdStart is the single mode in which tmux is allowed to
+	// create the server, reached only when the socket is provably not held.
+	newSessionModeColdStart
+)
+
+// getSocketCreateSem returns the creation semaphore for a tmux socket.
+func getSocketCreateSem(socketName string) chan struct{} {
+	sem := make(chan struct{}, 1)
+	actual, _ := socketCreateLocks.LoadOrStore(socketName, sem)
+	return actual.(chan struct{})
+}
+
+// acquireSocketCreateLock takes the in-process creation lock for a socket,
+// returning false if it could not be taken within timeout.
+func acquireSocketCreateLock(socketName string, timeout time.Duration) bool {
+	select {
+	case getSocketCreateSem(socketName) <- struct{}{}:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+// releaseSocketCreateLock releases the in-process creation lock for a socket.
+func releaseSocketCreateLock(socketName string) {
+	select {
+	case <-getSocketCreateSem(socketName):
+	default:
+	}
+}
+
+// probeSessionName is the bogus target used by probeServerPresence's has-session
 // call. A healthy server replies "session not found"; a dead server replies
 // "no server running" / "error connecting to"; a degraded server hangs or
 // returns something else. The name is deliberately unrouteable.
@@ -308,14 +383,28 @@ func (t *Tmux) approvalDedup() *approvalDedup {
 // or fork-blocked host cannot hang the call indefinitely. When the parent
 // already has an earlier deadline, that earlier deadline wins.
 func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
+	return t.runCtxWithGlobals(ctx, nil, args)
+}
+
+// runCtxWithGlobals executes a tmux command with extra global options placed
+// where tmux expects them — before the command verb, alongside -u and -L.
+func (t *Tmux) runCtxWithGlobals(ctx context.Context, globals []string, args []string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, tmuxSubprocessTimeout)
 	defer cancel()
-	allArgs := []string{"-u"}
+	allArgs := append([]string{"-u"}, globals...)
 	if t.cfg.SocketName != "" {
 		allArgs = append(allArgs, "-L", t.cfg.SocketName)
 	}
 	allArgs = append(allArgs, args...)
 	return t.exec.executeCtx(ctx, allArgs)
+}
+
+// runNoStartServer executes a tmux command with the global -N flag, which
+// forbids tmux from starting a server. On new-session this is the difference
+// between a refused connect() failing loudly and tmux silently unlinking the
+// socket to bind a second server on it.
+func (t *Tmux) runNoStartServer(args ...string) (string, error) {
+	return t.runCtxWithGlobals(context.Background(), []string{"-N"}, args)
 }
 
 // run executes a tmux command and returns stdout. All commands include -u
@@ -356,27 +445,32 @@ func wrapError(err error, stderr string, args []string) error {
 	return fmt.Errorf("tmux %s: %w", args[0], err)
 }
 
-// probeServerAlive verifies the tmux server bound to SocketName is responsive
-// before invoking new-session. This prevents the socket-clobber failure
-// described in ga-h9z: when tmux is asked to create a session against a
-// socket whose server is alive-but-slow, tmux's internal liveness probe can
-// time out and tmux falls through to unlink+bind, spawning a parallel server
-// on the same path and orphaning every session on the original.
+// probeServerPresence verifies the tmux server bound to SocketName is
+// responsive before invoking new-session, and reports how new-session may be
+// invoked. This prevents the socket-clobber failure described in ga-h9z and
+// gascity-n17v: asked to create a session against a socket whose server does
+// not answer the connect, tmux falls through to unlink+bind, spawning a
+// parallel server on the same path and orphaning every session on the
+// original.
 //
 // Returns:
-//   - nil when SocketName is empty (default-server case is out of scope) or
-//     when the server replies (alive — including the expected "session not
-//     found" for the bogus probe target).
-//   - nil when tmux reports "no current target" (ErrNoCurrentTarget): the
-//     server answered and is alive with zero sessions, so new-session attaches
-//     rather than unlinking and rebinding.
-//   - nil when ErrNoServer is corroborated by a safely absent or stale socket.
-//   - ErrServerDegraded when the probe times out or returns any other error,
-//     indicating the server is in a state where new-session would risk
-//     clobbering. Callers MUST surface this and refuse to proceed.
-func (t *Tmux) probeServerAlive() error {
+//   - (newSessionModeColdStart, nil) when SocketName is empty: the
+//     default-server case is out of scope for the named-socket clobber.
+//   - (newSessionModeGuarded, nil) when the server replies (alive — including
+//     the expected "session not found" for the bogus probe target, and
+//     "no current target" for a server holding zero sessions). new-session
+//     must carry -N, because the server can saturate between this probe and
+//     the create.
+//   - (newSessionModeColdStart, nil) when ErrNoServer is corroborated by an
+//     observation proving nothing holds the socket. This is the only state in
+//     which tmux may create the server.
+//   - ErrServerSaturated when the socket is held by a live process that is
+//     refusing connections, and ErrServerDegraded when the probe times out or
+//     returns any other error. Callers MUST surface these and refuse to
+//     proceed.
+func (t *Tmux) probeServerPresence() (newSessionMode, error) {
 	if t.cfg.SocketName == "" {
-		return nil
+		return newSessionModeColdStart, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), newSessionProbeTimeout)
 	defer cancel()
@@ -384,16 +478,16 @@ func (t *Tmux) probeServerAlive() error {
 	if err == nil {
 		// Server is alive and (improbably) actually has a session with the
 		// probe name. Still safe — server responded.
-		return nil
+		return newSessionModeGuarded, nil
 	}
 	if errors.Is(err, ErrSessionNotFound) {
 		// Healthy server, just doesn't have the probe session. Safe.
-		return nil
+		return newSessionModeGuarded, nil
 	}
 	if errors.Is(err, ErrNoCurrentTarget) {
 		// The server answered: it is alive with zero sessions, so new-session
 		// attaches rather than unlinking and rebinding. Never a stale socket.
-		return nil
+		return newSessionModeGuarded, nil
 	}
 	if errors.Is(err, ErrNoServer) {
 		observer := t.serverSocketObserver
@@ -403,16 +497,108 @@ func (t *Tmux) probeServerAlive() error {
 		path := namedSocketPath(t.cfg.SocketName)
 		observationErr := observer(ctx, path)
 		if observationErr == nil {
-			return nil
+			return newSessionModeColdStart, nil
 		}
 		// Do not wrap ErrNoServer here: callers such as EnsureSessionFresh
 		// must not retry a guarded no-server result as an ordinary absence.
-		return fmt.Errorf("%w: protocol=no-server path=%s observation=%w", ErrServerDegraded, path, observationErr)
+		sentinel := ErrServerDegraded
+		if errors.Is(observationErr, errSocketHolderLive) {
+			// tmux said "no server" only because the connect was refused, and
+			// a live process still holds the socket: the backlog is full.
+			sentinel = ErrServerSaturated
+		}
+		return newSessionModeGuarded, fmt.Errorf("%w: protocol=no-server path=%s observation=%w", sentinel, path, observationErr)
 	}
 	// Timeout, fork failure, or any other unrecognized error: server is in
 	// an indeterminate state. Refuse to proceed rather than let tmux silently
 	// fork into a parallel server.
-	return fmt.Errorf("%w (socket=%s): %w", ErrServerDegraded, t.cfg.SocketName, err)
+	return newSessionModeGuarded, fmt.Errorf("%w (socket=%s): %w", ErrServerDegraded, t.cfg.SocketName, err)
+}
+
+// newSessionGuarded is the single choke point every session creation passes
+// through. It serializes creation against the socket and picks the invocation
+// mode from what the preflight proved, so tmux is never in a position to
+// unlink a socket a live server still holds.
+func (t *Tmux) newSessionGuarded(args ...string) error {
+	if t.cfg.SocketName == "" {
+		// Default server: -L is not in play, so the named-socket clobber
+		// cannot happen and tmux's own start-server path applies unchanged.
+		_, err := t.run(args...)
+		return err
+	}
+	if !acquireSocketCreateLock(t.cfg.SocketName, socketCreateLockTimeout) {
+		// ErrServerDegraded, not ErrServerSaturated: creation is congested,
+		// but nothing here observed the server's accept backlog and the error
+		// must not claim it did. Both are retryable and neither is absence,
+		// which is what the caller actually branches on.
+		return fmt.Errorf("%w (socket=%s): timed out after %s waiting for the in-process session-creation lock",
+			ErrServerDegraded, t.cfg.SocketName, socketCreateLockTimeout)
+	}
+	defer releaseSocketCreateLock(t.cfg.SocketName)
+
+	mode, err := t.probeServerPresence()
+	if err != nil {
+		return err
+	}
+	if mode == newSessionModeColdStart {
+		handled, err := t.coldStartSession(args)
+		if handled {
+			return err
+		}
+		// A server appeared between the preflight and the creation lock. Fall
+		// through and join it under -N rather than racing it.
+	}
+	if _, err := t.runNoStartServer(args...); err != nil {
+		return t.classifyGuardedCreateFailure(err)
+	}
+	return nil
+}
+
+// coldStartSession runs the one new-session invocation allowed to create the
+// server, under the cross-process creation lock. It re-runs the preflight once
+// the lock is held: another gc process may have started the server between our
+// own probe and this lock, and creating over it is the clobber.
+//
+// handled is false only when that re-check found a server, meaning the caller
+// should fall through to the guarded invocation.
+func (t *Tmux) coldStartSession(args []string) (handled bool, err error) {
+	unlock, err := lockSocketCreateFile(t.cfg.SocketName)
+	if err != nil {
+		return true, fmt.Errorf("%w (socket=%s): %w", ErrServerDegraded, t.cfg.SocketName, err)
+	}
+	defer unlock()
+
+	mode, err := t.probeServerPresence()
+	if err != nil {
+		return true, err
+	}
+	if mode != newSessionModeColdStart {
+		return false, nil
+	}
+	_, err = t.run(args...)
+	return true, err
+}
+
+// classifyGuardedCreateFailure maps a failed -N new-session onto the right
+// error. -N never starts a server, so "no server running" from it means the
+// connect() was refused — and the preflight has already established that the
+// socket is not provably dead, so a refusal means a full accept backlog.
+// Passing ErrNoServer on from here would tell gc's absence-absorbing call
+// sites that the fleet is empty and trigger a full rebuild, which is strictly
+// worse than the clobber it replaced.
+func (t *Tmux) classifyGuardedCreateFailure(err error) error {
+	if !errors.Is(err, ErrNoServer) {
+		return err
+	}
+	// The cause is inlined as a plain string, never as a second %w operand:
+	// wrapping it would make ErrServerSaturated satisfy errors.Is(err,
+	// ErrNoServer) and hand the fleet straight back to the rebuild this
+	// classification exists to prevent. err.Error() rather than %v so an
+	// errorlint autofix has no error operand to promote to %w — it made
+	// exactly that edit once, and TestGuardedCreateReportsSaturationNotAbsence
+	// is what caught it.
+	return fmt.Errorf("%w (socket=%s path=%s): tmux -N new-session was refused: %s",
+		ErrServerSaturated, t.cfg.SocketName, namedSocketPath(t.cfg.SocketName), err.Error())
 }
 
 // NewSession creates a new detached tmux session.
@@ -420,15 +606,11 @@ func (t *Tmux) NewSession(name, workDir string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
-	if err := t.probeServerAlive(); err != nil {
-		return err
-	}
 	args := []string{"new-session", "-d", "-s", name}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
-	_, err := t.run(args...)
-	if err != nil {
+	if err := t.newSessionGuarded(args...); err != nil {
 		return err
 	}
 	_ = t.ConfigureServer()
@@ -448,17 +630,13 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
-	if err := t.probeServerAlive(); err != nil {
-		return err
-	}
 	args := []string{"new-session", "-d", "-s", name}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
 	// Add the command as the last argument - tmux runs it as the pane's initial process
 	args = append(args, t.wrapPaneCommand(command))
-	_, err := t.run(args...)
-	if err != nil {
+	if err := t.newSessionGuarded(args...); err != nil {
 		return err
 	}
 	_ = t.ConfigureServer()
@@ -479,9 +657,6 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 // Requires tmux >= 3.2.
 func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error {
 	if err := validateSessionName(name); err != nil {
-		return err
-	}
-	if err := t.probeServerAlive(); err != nil {
 		return err
 	}
 	args := []string{"new-session", "-d", "-s", name}
@@ -517,8 +692,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	}
 	// Add the command as the last argument
 	args = append(args, t.wrapPaneCommand(command))
-	_, err := t.run(args...)
-	if err != nil {
+	if err := t.newSessionGuarded(args...); err != nil {
 		return err
 	}
 	_ = t.ConfigureServer()
@@ -2069,7 +2243,8 @@ func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout tim
 	// stays empty and the external-imports modal is left unaccepted.
 	paneDir, _ := t.GetPaneWorkDir(sess)
 	trustRoot := runtime.WorkspaceImportTrustRoot(ctx, paneDir)
-	return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout,
+	return runtime.AcceptStartupDialogsWithTimeout(
+		ctx, timeout,
 		func(lines int) (string, error) { return t.CapturePane(sess, lines) },
 		func(keys ...string) error {
 			for _, k := range keys {
@@ -2119,7 +2294,8 @@ func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
 	if err != nil {
 		return
 	}
-	_, _ = dismissModelSwitchModal(content,
+	_, _ = dismissModelSwitchModal(
+		content,
 		func(keys ...string) error {
 			for _, k := range keys {
 				if _, err := t.run("send-keys", "-t", target, k); err != nil {
