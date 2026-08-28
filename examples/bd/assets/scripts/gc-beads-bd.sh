@@ -222,15 +222,31 @@ run_lsof() {
     run_with_timeout "$LSOF_TIMEOUT_SECONDS" lsof "$@"
 }
 
-lsof_reports_open() {
-    local status
-    run_lsof "$@" >/dev/null 2>&1
-    status=$?
-    case "$status" in
+# lsof_status_class maps a run_lsof exit status onto the three states callers
+# can act on:
+#
+#   0 — lsof ran and found matching open files
+#   1 — lsof ran and found none
+#   2 — the probe never completed, so nothing was learned: lsof is not
+#       installed (run_lsof returns 127) or run_with_timeout SIGTERMed it at
+#       LSOF_TIMEOUT_SECONDS (143)
+#
+# States 1 and 2 both leave lsof's output empty, so this status is the only
+# thing that separates "confirmed nothing" from "learned nothing". Every caller
+# classifies through here so the mapping is defined exactly once.
+lsof_status_class() {
+    case "$1" in
         0) return 0 ;;
         1) return 1 ;;
         *) return 2 ;;
     esac
+}
+
+lsof_reports_open() {
+    local status
+    run_lsof "$@" >/dev/null 2>&1
+    status=$?
+    lsof_status_class "$status"
 }
 
 canonical_dir() {
@@ -960,10 +976,50 @@ run_preflight_cleanup() {
     clean_stale_sockets
 }
 
-# find_port_holder returns the PID of the process listening on DOLT_PORT.
-
+# find_port_holder prints the PID of the process listening on DOLT_PORT and
+# reports, through lsof_status_class, which of the three probe states it
+# reached: 0 a holder was found, 1 the port is confirmed unheld, 2 the probe
+# never completed.
+#
+# The status matters as much as the output. This used to end in
+# `run_lsof ... | head -1`, whose exit status is head's — always 0 — so
+# run_lsof's status was discarded and "lsof confirmed nothing is listening"
+# became indistinguishable from "lsof was killed at LSOF_TIMEOUT_SECONDS" and
+# from "lsof is not installed". All three print nothing, and callers read that
+# emptiness as a free port: op_start launched a second dolt against a live one,
+# op_probe reported a confirmed negative, op_stop reported a clean no-op stop
+# (gascity-jn1e). Capture the output first, then classify the status.
+#
+# run_lsof is invoked under `|| status=$?` because the script runs with
+# `set -e`: an assignment whose command substitution fails would otherwise
+# abort the shell before the status could be classified.
 find_port_holder() {
-    run_lsof -nP -t -iTCP:"$DOLT_PORT" -sTCP:LISTEN 2>/dev/null | head -1
+    local output status
+    status=0
+    output=$(run_lsof -nP -t -iTCP:"$DOLT_PORT" -sTCP:LISTEN 2>/dev/null) || status=$?
+    if [ -n "$output" ]; then
+        printf '%s\n' "$output" | head -1
+    fi
+    lsof_status_class "$status"
+}
+
+# port_holder_probe_unresolved returns 0 when an incomplete shell-side
+# port-holder probe must be treated as "the port is held".
+#
+# It is the lsof-path twin of port_probe_unanswered_blocks_start, which does
+# the same job for the gc helper's port_holder_probed flag, and it resolves the
+# unknown the same way: an independent TCP connect. If something answers, the
+# port is held by a process we simply could not name. If nothing answers, both
+# mechanisms agree the port is free.
+#
+# A probe that DID complete is trusted either way — status 1 means lsof looked
+# and found nothing, and second-guessing that with a TCP tiebreak would block
+# on a port held by something outside this host's view.
+#
+# $1 is a find_port_holder exit status.
+port_holder_probe_unresolved() {
+    [ "${1:-0}" -ge 2 ] || return 1
+    tcp_check_port "$DOLT_PORT"
 }
 
 # verify_our_server checks if a PID belongs to our server (matching data-dir).
@@ -1694,7 +1750,7 @@ wait_for_concurrent_start_ready() {
         if [ "$GC_EXISTING_USED" != "true" ] && [ "$GC_PROBE_USED" != "true" ]; then
             existing_port=$(load_state_field port)
             if [ -n "$existing_port" ]; then
-                existing_pid=$(find_dolt_pid)
+                existing_pid=$(find_dolt_pid) || true
                 if [ -n "$existing_pid" ] && verify_our_server "$existing_pid"; then
                     DOLT_PORT="$existing_port"
                     if tcp_check_port "$existing_port" && do_query_probe; then
@@ -1820,9 +1876,26 @@ EOF
 
 # find_dolt_pid finds the dolt sql-server process.
 # Priority: PID file → lsof port holder → ps grep fallback.
+#
+# Like find_port_holder, it reports which of three states it reached, so an
+# empty result is never read as proof of absence (gascity-jn1e):
+#
+#   0 — a PID was found; it is on stdout
+#   1 — every mechanism ran and none found a server
+#   2 — the lsof probe did not complete, so the ps fallback below — which
+#       only matches the two argv shapes we write — is the sole evidence,
+#       and its miss is not a confirmed absence
+#
+# Every call site is written `pid=$(find_dolt_pid) || true`: the script runs
+# with `set -e`, so an unguarded assignment would abort the shell on states 1
+# and 2. No caller consumes the status today — each one that could act on an
+# unresolved probe re-derives it from find_port_holder, whose result it needs
+# anyway — but the status stays honest so a future caller cannot silently
+# inherit the "empty means absent" bug this replaced.
 find_dolt_pid() {
     if [ -z "$DATA_DIR" ]; then
-        return
+        # Nothing was probed, so nothing is known.
+        return 2
     fi
 
     # 1. PID file (most reliable if we wrote it).
@@ -1831,18 +1904,19 @@ find_dolt_pid() {
         file_pid=$(cat "$PID_FILE" 2>/dev/null)
         if [ -n "$file_pid" ] && kill -0 "$file_pid" 2>/dev/null; then
             echo "$file_pid"
-            return
+            return 0
         fi
         # Stale PID file — clean up.
         rm -f "$PID_FILE"
     fi
 
     # 2. lsof port holder.
-    local holder
-    holder=$(find_port_holder)
+    local holder holder_probe_status
+    holder_probe_status=0
+    holder=$(find_port_holder) || holder_probe_status=$?
     if [ -n "$holder" ]; then
         echo "$holder"
-        return
+        return 0
     fi
 
     # 3. ps grep fallback (least reliable) — try --config first, then --data-dir.
@@ -1851,10 +1925,22 @@ find_dolt_pid() {
         config_pid=$(ps ax -o pid,args 2>/dev/null | grep "dolt sql-server" | grep -- "--config.*$CONFIG_FILE" | grep -v grep | awk '{print $1}' | head -1)
         if [ -n "$config_pid" ]; then
             echo "$config_pid"
-            return
+            return 0
         fi
     fi
-    ps ax -o pid,args 2>/dev/null | grep "dolt sql-server" | grep -- "--data-dir.*$(basename "$DATA_DIR")" | grep -v grep | awk '{print $1}' | head -1
+    local data_dir_pid
+    data_dir_pid=$(ps ax -o pid,args 2>/dev/null | grep "dolt sql-server" | grep -- "--data-dir.*$(basename "$DATA_DIR")" | grep -v grep | awk '{print $1}' | head -1)
+    if [ -n "$data_dir_pid" ]; then
+        echo "$data_dir_pid"
+        return 0
+    fi
+
+    # Nothing found. Distinguish "every mechanism looked and found nothing"
+    # from "the lsof probe never ran to completion".
+    if [ "$holder_probe_status" -ge 2 ]; then
+        return 2
+    fi
+    return 1
 }
 
 # allocate_port determines the dolt server port.
@@ -2248,7 +2334,7 @@ op_start() {
         fi
     else
         if ! load_managed_process_inspection_from_gc; then
-            existing_pid=$(find_dolt_pid)
+            existing_pid=$(find_dolt_pid) || true
         else
             existing_pid="$GC_MANAGED_PID"
             holder="$GC_PORT_HOLDER_PID"
@@ -2311,8 +2397,9 @@ op_start() {
             die "refusing to start dolt: port $DOLT_PORT is answering but its holder could not be identified (the port-holder probe did not complete); starting here would race a live server (check $LOG_FILE)"
         fi
     else
+        local holder_probe_status=0
         if [ -z "$holder" ]; then
-            holder=$(find_port_holder)
+            holder=$(find_port_holder) || holder_probe_status=$?
         fi
         if [ -n "$holder" ]; then
             local holder_owned=false
@@ -2340,6 +2427,12 @@ op_start() {
                     sleep 1
                 fi
             fi
+        elif port_holder_probe_unresolved "$holder_probe_status"; then
+            # The lsof probe named no holder but never completed, and the port
+            # is answering anyway. Falling through here would launch a second
+            # dolt against a live server — the same hazard gascity-bh0 closed
+            # on the helper path, via the same TCP tiebreak (gascity-jn1e).
+            die "refusing to start dolt: port $DOLT_PORT is answering but its holder could not be identified (the lsof port-holder probe did not complete); starting here would race a live server (check $LOG_FILE)"
         fi
     fi
 
@@ -2477,7 +2570,7 @@ op_start() {
 op_ensure_ready() {
     if ! is_remote; then
         local pid state_port
-        pid=$(find_dolt_pid)
+        pid=$(find_dolt_pid) || true
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && verify_our_server "$pid"; then
             state_port=$(load_state_field port)
             if [ -z "$state_port" ]; then
@@ -3047,7 +3140,15 @@ op_probe() {
             indeterminate=true
         fi
     fi
-    holder=$(find_port_holder)
+    local holder_probe_status
+    holder_probe_status=0
+    holder=$(find_port_holder) || holder_probe_status=$?
+    # The shell-side lsof probe is the second way this can end up indeterminate.
+    # bh0 only ever set the flag from the helper's *_probed fields, so on the
+    # no-helper path an lsof timeout still exited 2 (gascity-jn1e).
+    if [ "$holder_probe_status" -ge 2 ]; then
+        indeterminate=true
+    fi
     if [ -z "$holder" ]; then
         # No probe named a holder. If one of them never completed and the port
         # is nevertheless answering, something is listening that we could not
@@ -3165,14 +3266,15 @@ op_stop_impl() {
         return 1
     fi
 
-    local pid owned holder
+    local pid owned holder holder_probe_status
     owned="false"
+    holder_probe_status=0
     if ! load_managed_process_inspection_from_gc; then
-        pid=$(find_dolt_pid)
+        pid=$(find_dolt_pid) || true
         if [ -n "$pid" ] && verify_our_server "$pid"; then
             owned="true"
         else
-            holder=$(find_port_holder)
+            holder=$(find_port_holder) || holder_probe_status=$?
             if [ -n "$holder" ] && verify_our_server "$holder"; then
                 pid="$holder"
                 owned="true"
@@ -3192,6 +3294,14 @@ op_stop_impl() {
         fi
     fi
     if [ -z "$pid" ] || [ "$owned" != "true" ]; then
+        # An empty pid is only "nothing to stop" when the probe that produced
+        # it actually completed. An lsof timeout also yields an empty pid, and
+        # reporting a clean no-op stop on that would claim the data dir is
+        # released while a live server still holds the port (gascity-jn1e).
+        if port_holder_probe_unresolved "$holder_probe_status"; then
+            echo "cannot confirm the managed dolt server is stopped: port $DOLT_PORT is answering but the lsof port-holder probe did not complete, so its holder could not be identified" >&2
+            return 1
+        fi
         # No controllable process, but a crashed server's flushing descendant
         # can still hold the store lock. The stop contract says success means
         # the data dir is released — fail closed instead of green-lighting a
