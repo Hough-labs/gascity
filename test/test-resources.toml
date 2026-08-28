@@ -114,13 +114,13 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 430
-baseline_files = 160
+baseline_calls = 432
+baseline_files = 162
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
 invariant = "tracked test source totals remain visible as audit evidence"
-resource_owner = "ga-80po0c.2 owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go)"
+resource_owner = "ga-80po0c.2 owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go); +1/+1 on 2026-08-27 owned by gascity-n17v (serializingExecutor.executeCtx in internal/runtime/tmux/new_session_guard_test.go, the file's single sleep: it is the occupancy window TestNewSessionSerializesCreationPerSocket measures, not a delay waiting for a condition. The test fans 12 concurrent NewSession calls at one socket and asserts in-flight creates never exceed 1; with a zero-width critical section an unserialized implementation serializes by accident and the test passes on the bug it exists to catch); +1/+1 on 2026-08-27 owned by gascity-n17v (waitForSession in internal/runtime/tmux/socket_clobber_integration_test.go, integration-tagged so it lands in scope=all only: the poll interval of a deadline-bounded retry loop that returns as soon as the session appears and t.Fatalf's at 10s, the shape already banked for gascity-4zf)"
 migration_target = "P0.4a"
 expires = "2026-10-01"
 
@@ -155,13 +155,13 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 285
-baseline_files = 114
+baseline_calls = 286
+baseline_files = 115
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-80po0c.2"
 invariant = "untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each owning test replaces elapsed wall time with its lifecycle signal; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go)"
+resource_owner = "each owning test replaces elapsed wall time with its lifecycle signal; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go); +1/+1 on 2026-08-27 owned by gascity-n17v (serializingExecutor.executeCtx in internal/runtime/tmux/new_session_guard_test.go, the file's single sleep: it is the occupancy window TestNewSessionSerializesCreationPerSocket measures, not a delay waiting for a condition. The test fans 12 concurrent NewSession calls at one socket and asserts in-flight creates never exceed 1; with a zero-width critical section an unserialized implementation serializes by accident and the test passes on the bug it exists to catch)"
 migration_target = "W1-W5"
 expires = "2026-10-01"
 
@@ -233,13 +233,13 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 96
-baseline_files = 37
+baseline_calls = 98
+baseline_files = 38
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-80po0c.2.2.2"
 invariant = "untagged stream-listener call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each owning test closes its stream listener and removes duplicate listener-backed coverage; +1/+1 on 2026-08-26 owned by gascity-bh0 (listeningPort in cmd/gc/gc_beads_bd_port_probe_test.go, the one listener site the port-probe tests share to prove a held port)"
+resource_owner = "each owning test closes its stream listener and removes duplicate listener-backed coverage; +1/+1 on 2026-08-26 owned by gascity-bh0 (listeningPort in cmd/gc/gc_beads_bd_port_probe_test.go, the one listener site the port-probe tests share to prove a held port); +2/+1 on 2026-08-27 owned by gascity-n17v (shortPathSocketFixture and TestNamedSocketHolderReportsLiveListener in internal/runtime/tmux/socket_holder_test.go, the file's only listeners: the code under test tells a live socket holder from a stale socket file, and the refused-with-stable-inode branch is reached only when os.SameFile matches, which recognizes just FileInfo the os package produced — a synthetic fixture cannot reach it. Both listeners are closed by the test that opens them)"
 migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
@@ -437,13 +437,13 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 285
-baseline_files = 114
+baseline_calls = 286
+baseline_files = 115
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-80po0c.2.1"
 invariant = "untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners replace elapsed wall time with lifecycle signals; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go)"
+resource_owner = "non-Medium lexical owners replace elapsed wall time with lifecycle signals; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go); +1/+1 on 2026-08-27 owned by gascity-n17v (serializingExecutor.executeCtx in internal/runtime/tmux/new_session_guard_test.go, the file's single sleep: it is the occupancy window TestNewSessionSerializesCreationPerSocket measures, not a delay waiting for a condition. The test fans 12 concurrent NewSession calls at one socket and asserts in-flight creates never exceed 1; with a zero-width critical section an unserialized implementation serializes by accident and the test passes on the bug it exists to catch)"
 migration_target = "W1-W5"
 expires = "2026-10-01"
 
@@ -515,13 +515,13 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 94
-baseline_files = 36
+baseline_calls = 96
+baseline_files = 37
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-80po0c.2.2.2"
 invariant = "untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener; +1/+1 on 2026-08-26 owned by gascity-bh0 (listeningPort in cmd/gc/gc_beads_bd_port_probe_test.go, the one listener site the port-probe tests share to prove a held port)"
+resource_owner = "non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener; +1/+1 on 2026-08-26 owned by gascity-bh0 (listeningPort in cmd/gc/gc_beads_bd_port_probe_test.go, the one listener site the port-probe tests share to prove a held port); +2/+1 on 2026-08-27 owned by gascity-n17v (shortPathSocketFixture and TestNamedSocketHolderReportsLiveListener in internal/runtime/tmux/socket_holder_test.go, the file's only listeners: the code under test tells a live socket holder from a stale socket file, and the refused-with-stable-inode branch is reached only when os.SameFile matches, which recognizes just FileInfo the os package produced — a synthetic fixture cannot reach it. Both listeners are closed by the test that opens them)"
 migration_target = "P0.4c-listener"
 expires = "2026-10-01"
 
