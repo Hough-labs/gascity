@@ -1,9 +1,14 @@
 package nudgepoller
 
 import (
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 func TestCommandArgsMatchCmdlineMatcher(t *testing.T) {
@@ -163,5 +168,63 @@ func TestCmdlineMatcherRequiresNudgePollCommand(t *testing.T) {
 	argv := []string{"gc", "nudge", "--city", "/tmp/gc-city", "poll", "--session", "sess-worker", "agent"}
 	if CmdlineMatcher("/tmp/gc-city", "sess-worker", "agent")(argv) {
 		t.Fatalf("CmdlineMatcher matched non-contiguous nudge poll argv: %v", argv)
+	}
+}
+
+// TestAliveWithCmdlineRecognizesRealPollerProcess exercises the singleton
+// check the way production does — the real matcher against a real process
+// table entry — rather than against a synthetic argv slice.
+//
+// That gap is why gascity-ggq stayed invisible: the matcher was always
+// correct, and the tests above prove it, but off linux the guard returned true
+// without ever calling it. A live process holding a recycled PID therefore
+// answered "the poller is already running", gc skipped spawning one, and
+// nudges to that session stopped being delivered with nothing logged.
+//
+// The city path here deliberately contains a space. Argv must reach the
+// matcher with its argument boundaries intact; a source that renders argv as
+// one space-joined string cannot represent this case, and the guard would stop
+// recognizing its own poller.
+func TestAliveWithCmdlineRecognizesRealPollerProcess(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "gc city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", cityPath, err)
+	}
+	const sessionName = "sess-worker"
+	const agentName = "agent"
+
+	// Two commands, not one: a shell handed a single simple command
+	// exec-replaces itself with it, which would swap out the argv under test.
+	// The poller argv tail rides along as the shell's own arguments.
+	args := append([]string{"-c", "sleep 5; :"}, CommandArgs(cityPath, sessionName, agentName)...)
+
+	// This is the package's only exec site, and the repository's resource
+	// census records it as such (test/test-resources.toml): tests added here
+	// should reuse it rather than spawn a second process. The child leads its
+	// own process group so cleanup reaps the shell and the sleep it forks.
+	cmd := exec.Command("sh", args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sh: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Wait()
+	})
+	pid := cmd.Process.Pid
+
+	if !pidutil.AliveWithCmdline(pid, CmdlineMatcher(cityPath, sessionName, agentName)) {
+		argv, err := pidutil.Cmdline(pid)
+		t.Fatalf("AliveWithCmdline(%d, matcher for %q) = false, want true; process argv = %q (err %v)", pid, cityPath, argv, err)
+	}
+
+	// The recycled-PID case: the same live PID, checked by a poller that does
+	// not own it, must not be mistaken for that poller's own process.
+	otherCity := filepath.Join(t.TempDir(), "other city")
+	if err := os.MkdirAll(otherCity, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", otherCity, err)
+	}
+	if pidutil.AliveWithCmdline(pid, CmdlineMatcher(otherCity, sessionName, agentName)) {
+		t.Fatalf("AliveWithCmdline(%d, matcher for %q) = true, want false — an unrelated live PID must not satisfy the singleton check", pid, otherCity)
 	}
 }
