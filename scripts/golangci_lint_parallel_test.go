@@ -10,15 +10,14 @@ import (
 )
 
 // golangciRunConfig is the subset of .golangci.yml these tests assert on.
-// The field tags mirror golangci-lint's own mapstructure keys
-// (pkg/config/run.go:29-30 in v2.12.0, the version Makefile:1 pins) and the
+// The field tag mirrors golangci-lint's own mapstructure key
+// (pkg/config/run.go:29 in v2.12.0, the version Makefile:1 pins) and the
 // "run" object of jsonschema/golangci.v2.5.jsonschema.json, whose
 // additionalProperties is false -- so a misspelled key is a hard config error
 // rather than a silently ignored one.
 type golangciRunConfig struct {
 	Run struct {
 		AllowParallelRunners bool `yaml:"allow-parallel-runners"`
-		AllowSerialRunners   bool `yaml:"allow-serial-runners"`
 	} `yaml:"run"`
 }
 
