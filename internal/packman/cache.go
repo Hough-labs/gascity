@@ -70,7 +70,12 @@ func EnsureRepoInCache(cityRoot, source, commit string) (string, error) {
 }
 
 func ensureBundledRepoInCacheLocked(source, commit, cachePath string) (string, error) {
-	validationErr := builtinpacks.ValidateSyntheticRepo(cachePath, commit)
+	// Full comparison: this is the path that repairs a bad cache, so trusting
+	// the readiness path's stat gate here would let a tamper that preserves
+	// size, mode and mtime survive every repair (gascity-i7v). Reached only
+	// after a gated check already failed, or from install, so it is not on the
+	// per-invocation path.
+	validationErr := builtinpacks.ValidateSyntheticRepoFull(cachePath, commit)
 	if validationErr == nil {
 		if err := validateCachedPackRoot(source, cachePath); err != nil {
 			return "", err

@@ -23,33 +23,12 @@ const corePackTomlRel = "internal/bootstrap/packs/core/pack.toml"
 //
 // This test proves the content read is actually skipped, and therefore also
 // documents the gate's blind spot: a tamper that preserves size, mode AND
-// modification time is not detected here. Only `gc import check` (and the
-// write-locked repair path) re-read content unconditionally.
+// modification time is not detected here. ValidateSyntheticRepoFull is the
+// variant that still catches it, and `gc import check` plus the write-locked
+// repair path use it for exactly that reason.
 func TestValidateSyntheticRepoSkipsContentReadWhenTreeFingerprintMatches(t *testing.T) {
 	dst := materializeTestRepo(t)
-	target := filepath.Join(dst, corePackTomlRel)
-
-	info, err := os.Stat(target)
-	if err != nil {
-		t.Fatalf("Stat(%q): %v", target, err)
-	}
-	original, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatalf("ReadFile(%q): %v", target, err)
-	}
-	if len(original) == 0 {
-		t.Fatalf("materialized %s is empty; the test needs content to alter", corePackTomlRel)
-	}
-
-	// Same length, same mode, same mtime — only the bytes differ.
-	tampered := append([]byte(nil), original...)
-	tampered[0] ^= 0xff
-	if err := os.WriteFile(target, tampered, info.Mode().Perm()); err != nil {
-		t.Fatalf("WriteFile(%q): %v", target, err)
-	}
-	if err := os.Chtimes(target, info.ModTime(), info.ModTime()); err != nil {
-		t.Fatalf("Chtimes(%q): %v", target, err)
-	}
+	tamperPreservingStat(t, filepath.Join(dst, corePackTomlRel))
 
 	if err := ValidateSyntheticRepo(dst, testCommit); err != nil {
 		t.Fatalf("ValidateSyntheticRepo re-read file content for an unchanged tree fingerprint: %v", err)
@@ -215,5 +194,67 @@ func BenchmarkValidateSyntheticRepoFullComparison(b *testing.B) {
 		if err := validateSyntheticRepoContents(dst); err != nil {
 			b.Fatalf("validateSyntheticRepoContents: %v", err)
 		}
+	}
+}
+
+// ValidateSyntheticRepoFull is the gate-free variant: it never consults the
+// tree fingerprint, so it catches the one tamper the change-detection gate is
+// blind to — same size, same mode, same modification time. Integrity commands
+// and the write-locked repair path depend on that, because the gate turned
+// every other caller into a stat walk (gascity-i7v).
+func TestValidateSyntheticRepoFullRejectsStatPreservingTamper(t *testing.T) {
+	dst := materializeTestRepo(t)
+	tamperPreservingStat(t, filepath.Join(dst, corePackTomlRel))
+
+	// The gated path accepts it — that is the documented blind spot.
+	if err := ValidateSyntheticRepo(dst, testCommit); err != nil {
+		t.Fatalf("ValidateSyntheticRepo on an unchanged tree fingerprint: %v", err)
+	}
+
+	err := ValidateSyntheticRepoFull(dst, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFull accepted a stat-preserving tamper")
+	}
+	if !strings.Contains(err.Error(), "content differs") {
+		t.Fatalf("error = %v, want content differs", err)
+	}
+}
+
+// The full variant still rejects everything the marker checks reject, so a
+// caller can use it wherever it used the gated call.
+func TestValidateSyntheticRepoFullRejectsWrongCommit(t *testing.T) {
+	dst := materializeTestRepo(t)
+
+	err := ValidateSyntheticRepoFull(dst, "0000000000000000000000000000000000000000")
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFull accepted a cache pinned to another commit")
+	}
+	if !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("error = %v, want a commit mismatch", err)
+	}
+}
+
+// tamperPreservingStat rewrites one byte of path while restoring its size, mode
+// and modification time, so only a content read can tell the file changed.
+func tamperPreservingStat(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%q): %v", path, err)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", path, err)
+	}
+	if len(original) == 0 {
+		t.Fatalf("%q is empty; the test needs content to alter", path)
+	}
+	tampered := append([]byte(nil), original...)
+	tampered[0] ^= 0xff
+	if err := os.WriteFile(path, tampered, info.Mode().Perm()); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatalf("Chtimes(%q): %v", path, err)
 	}
 }

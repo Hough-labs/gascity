@@ -388,6 +388,22 @@ func ValidateSyntheticRepo(dir, commit string) error {
 	return validateSyntheticRepoContents(dir)
 }
 
+// ValidateSyntheticRepoFull verifies dir exactly as ValidateSyntheticRepo does
+// but never takes the change-detection shortcut: every cached file is re-read
+// and compared against the packs embedded in this binary.
+//
+// ValidateSyntheticRepo's stat gate is blind to a tamper that preserves an
+// entry's size, mode AND modification time, which is an acceptable trade on the
+// path every gc invocation takes. It is not acceptable where the answer is the
+// product rather than a cache hit, so the integrity command (`gc import check`)
+// and the write-locked repair path use this variant instead (gascity-i7v).
+func ValidateSyntheticRepoFull(dir, commit string) error {
+	if err := ValidateSyntheticRepoFast(dir, commit); err != nil {
+		return err
+	}
+	return validateSyntheticRepoContents(dir)
+}
+
 // validateSyntheticRepoContents compares the materialized file set and every
 // file's content and mode against the packs embedded in this binary. It is the
 // authoritative integrity check and reads every cached file.
@@ -483,10 +499,7 @@ func SyntheticTreeFingerprintCurrent(dir string) bool {
 // this exact file set was verified, so it is never written for a cache that
 // does not currently validate. Callers hold the repo-cache write lock.
 func StampSyntheticTreeFingerprint(dir, commit string) error {
-	if err := ValidateSyntheticRepoFast(dir, commit); err != nil {
-		return err
-	}
-	if err := validateSyntheticRepoContents(dir); err != nil {
+	if err := ValidateSyntheticRepoFull(dir, commit); err != nil {
 		return err
 	}
 	marker, err := readSyntheticMarker(dir)
