@@ -26,12 +26,30 @@
 #   content key, not a bypass of the gate.
 #
 # WHAT THE KEY COVERS
-#   lane + HEAD tree SHA + `go version` + the verbatim argv of the wrapped
-#   command. The tree SHA covers every tracked input, including the Makefile
-#   recipe and the scripts the lane runs; `go version` covers the toolchain,
-#   which the tree cannot see; argv covers the ambient values the recipe
-#   interpolates through TEST_ENV. Anything the key cannot see disables the
-#   cache rather than being ignored:
+#   lane + HEAD tree SHA + `go version` + the SHAPE of the wrapped command.
+#   The tree SHA covers every tracked input, including the Makefile recipe and
+#   the scripts the lane runs; `go version` covers the toolchain, which the
+#   tree cannot see; the command shape covers which lane, which runner, which
+#   flags, and which variables are being set.
+#
+#   Shape, not values: an assignment contributes its NAME to the key and not
+#   its value, so `FOO=a` and `FOO=b` key alike while `FOO=` and `BAR=` do
+#   not. That is a deliberate correction, not a shortcut. Once make expands
+#   $(TEST_ENV) the wrapped argv is `env -i PATH=... HOME=... GOFLAGS=... ...`,
+#   and git prepends its own exec-path to PATH for every hook it runs —
+#   measured on this host, `/Applications/Xcode.app/Contents/Developer/usr/
+#   libexec/git-core` is in the pre-push hook's PATH and not in the PATH of the
+#   shell that invoked `git push`. The gate run and the pre-push run of one
+#   identical tree therefore ALWAYS disagree about PATH's value, by
+#   construction, on every machine. Keying on values makes the marker
+#   unmatchable across exactly the boundary this cache exists to span: the
+#   lane still ran twice, and nothing said so. Content is what the tree SHA is
+#   for; the environment is ambience, and the TTL below is what bounds it.
+#
+#   The same rule is what the marker prints, so a marker now shows precisely
+#   what it was keyed on and two markers can be diffed to explain a miss.
+#
+#   Anything the key cannot see disables the cache rather than being ignored:
 #
 #     - A dirty worktree is NOT cacheable. `git status --porcelain` reports
 #       paths and status letters, not content, so two different edits to one
@@ -57,9 +75,9 @@
 #   verbatim would persist whatever the caller had exported into a file this
 #   script then echoes to stderr on every later cache hit. Leading `VAR=`
 #   words are written `VAR=<redacted>`; everything else (`-p=4`, `--`, the
-#   runner path) is kept literally. The values still take part in the cache
-#   key, which is a hash — redaction is what the marker shows, not what it
-#   distinguishes.
+#   runner path) is kept literally. This rendering IS the key material — see
+#   WHAT THE KEY COVERS — so the marker is a faithful record of what was
+#   keyed rather than a lossy view of it.
 #
 # WHY A TTL
 #   Test outcomes are not purely a function of the tree. This suite already
@@ -97,6 +115,13 @@
 #   GATE_GREEN_TTL_SECONDS  seconds a recorded pass stays honored (default 1800)
 #   GATE_GREEN_NO_CACHE     non-empty: ignore any marker and run the lane; a
 #                           green run still records one
+#
+# DIAGNOSTICS
+#   Every outcome names itself on stderr — a hit prints the marker it honored,
+#   a miss prints the key it looked for, and an uncacheable run prints why.
+#   The key is a hash, so a miss that printed nothing could not be explained
+#   after the fact; two runs that should have shared a marker are now compared
+#   by reading one line from each.
 #
 # EXIT STATUS
 #   2   usage error
@@ -165,27 +190,40 @@ gate_green_key() {
   [ -n "$_ggk_go" ] || return 1
   {
     printf '%s\0%s\0%s\0' "$_ggk_lane" "$_ggk_tree" "$_ggk_go"
+    # Redacted, and NUL-separated per word rather than reusing the marker's
+    # space-joined line: joining first would let one word containing a space
+    # key the same as two words, which is a collision the separator here costs
+    # nothing to rule out.
     for _ggk_arg in "$@"; do
-      printf '%s\0' "$_ggk_arg"
+      printf '%s\0' "$(gate_green_redact_word "$_ggk_arg")"
     done
   } | git hash-object --stdin 2>/dev/null
 }
 
-# Renders argv for the marker with every assignment's value elided. The names
-# are the audit value ("which lane, which runner, which flags"); the values are
-# secrets-in-waiting and are already covered by the hash key above, so they are
-# never written to disk. Only a leading, syntactically valid variable name
-# counts as an assignment, so `-p=4` and `--` pass through untouched.
+# Elides one word's assignment value. The name is the audit value ("which lane,
+# which runner, which flags, which variables"); the value is a secret-in-waiting
+# that must never be written to disk, and is deliberately not key material
+# either. Only a leading, syntactically valid variable name counts as an
+# assignment, so `-p=4` and `--` pass through untouched.
+gate_green_redact_word() {
+  local _ggw_arg="$1" _ggw_name
+  _ggw_name="${_ggw_arg%%=*}"
+  if [ "$_ggw_name" != "$_ggw_arg" ]; then
+    case "$_ggw_name" in
+      '' | [0-9]* | *[!A-Za-z0-9_]*) ;;
+      *) _ggw_arg="$_ggw_name=<redacted>" ;;
+    esac
+  fi
+  printf '%s\n' "$_ggw_arg"
+}
+
+# Renders argv for the marker, one redacted word per input word, space-joined.
+# Shares gate_green_redact_word with the key so the marker cannot drift from
+# what was actually hashed.
 gate_green_redact_argv() {
-  local _ggr_arg _ggr_name _ggr_out="" _ggr_first=1
+  local _ggr_arg _ggr_out="" _ggr_first=1
   for _ggr_arg in "$@"; do
-    _ggr_name="${_ggr_arg%%=*}"
-    if [ "$_ggr_name" != "$_ggr_arg" ]; then
-      case "$_ggr_name" in
-        '' | [0-9]* | *[!A-Za-z0-9_]*) ;;
-        *) _ggr_arg="$_ggr_name=<redacted>" ;;
-      esac
-    fi
+    _ggr_arg="$(gate_green_redact_word "$_ggr_arg")"
     if [ "$_ggr_first" -eq 1 ]; then
       _ggr_out="$_ggr_arg"
       _ggr_first=0
@@ -258,6 +296,16 @@ elif [ -f "$marker" ]; then
       exit 0
     fi
   fi
+fi
+
+# Name the key on a cacheable miss. A miss is otherwise silent and its cause is
+# invisible: the key is a hash, so "why did this not hit?" cannot be answered
+# from the outside. Diagnosing one real miss meant reconstructing the recipe's
+# expanded argv by hand and re-deriving the hash — the marker records the same
+# shape this key was built from, so printing the key makes two runs directly
+# comparable instead.
+if [ "$cacheable" -eq 1 ]; then
+  echo "gate-green: no recorded pass for ${lane} key=${key} — running it." >&2
 fi
 
 "$@"

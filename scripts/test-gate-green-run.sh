@@ -16,16 +16,20 @@
 # must NOT record a pass (ordinary failure and gate-busy alike), TTL expiry
 # and clock steps, the GATE_GREEN_NO_CACHE escape hatch, marker
 # auditability, the redaction that keeps assignment values out of the marker,
+# what the key does and does not distinguish, the diagnostic a miss prints,
 # pruning, and a static assertion that the Makefile's test-mac recipe still
 # routes through this wrapper ahead of the slot gate.
 #
-# Two cases carry the bead's actual acceptance criterion rather than a
-# component of it, and both use real git rather than a stand-in: a lane run
+# Three cases carry the bead's actual acceptance criterion rather than a
+# component of it, and all use real git rather than a stand-in: a lane run
 # from a real `git push` pre-push hook must see the marker the preceding gate
 # run recorded (git hands hooks an environment of its own, and that is what
-# the tree SHA and clean-status are read from), and a marker recorded in one
-# linked worktree must be visible from another, which is what makes a
-# fast-forward merge in the refinery's worktree free.
+# the tree SHA and clean-status are read from); the same must hold when the
+# wrapped argv carries the ambient environment the real recipe interpolates,
+# which is the case that git's exec-path injection breaks and the one the
+# fixed-argv case above cannot exhibit; and a marker recorded in one linked
+# worktree must be visible from another, which is what makes a fast-forward
+# merge in the refinery's worktree free.
 
 set -uo pipefail
 
@@ -276,6 +280,47 @@ before="$(run_count)"
 assert_eq "prepush.hook_runs_lane_without_a_marker" "$(( $(run_count) - before ))" "1"
 rm -f "$REPO/.git/hooks/pre-push"
 
+# ---------------- the ambient values the recipe interpolates ----------------
+# The case above proves the hook can reach a marker, but its wrapped argv is a
+# fixed string. The real recipe's is not: once make expands $(TEST_ENV) the
+# wrapped argv is `env -i PATH=... HOME=... GOFLAGS=... ...`, so whatever those
+# variables hold at call time becomes part of the command being keyed.
+#
+# git prepends its own exec-path to PATH for every hook it runs (measured:
+# /Applications/Xcode.app/Contents/Developer/usr/libexec/git-core appears in
+# the hook's PATH and not the parent shell's). So the gate run and the pre-push
+# run of one identical tree ALWAYS disagree about PATH's value — by
+# construction, on every machine. A key built from those values can therefore
+# never match across the one boundary this cache exists to span, which is the
+# whole feature silently doing nothing.
+#
+# This case reproduces that boundary: same lane, same tree, argv carrying the
+# ambient PATH exactly as TEST_ENV does.
+reset_markers
+cat >"$REPO/.git/hooks/pre-push" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null   # git feeds "<local ref> <sha> <remote ref> <sha>" on stdin
+exec "$GATE_GREEN_RUN" test-mac lane-cmd "PATH=\$PATH" alpha
+EOF
+chmod +x "$REPO/.git/hooks/pre-push"
+
+before="$(run_count)"
+( cd "$REPO" && "$GATE_GREEN_RUN" test-mac lane-cmd "PATH=$PATH" alpha ) >/dev/null 2>"$ERR"
+assert_eq "ambient.gate_run_ran_the_lane" "$(( $(run_count) - before ))" "1"
+
+before="$(run_count)"
+( cd "$REPO" && git push -q origin HEAD:refs/heads/ambient ) >/dev/null 2>"$ERR"
+assert_eq "ambient.push_succeeded"          "$?" "0"
+assert_eq "ambient.hook_did_not_rerun_lane" "$(( $(run_count) - before ))" "0"
+
+# ...and with no marker to lean on the same push must still run the lane, so
+# the case above cannot pass against a hook that simply never fired.
+reset_markers
+before="$(run_count)"
+( cd "$REPO" && git push -q origin HEAD:refs/heads/ambient-again ) >/dev/null 2>"$ERR"
+assert_eq "ambient.hook_runs_lane_without_a_marker" "$(( $(run_count) - before ))" "1"
+rm -f "$REPO/.git/hooks/pre-push"
+
 # ---------------- markers are shared across linked worktrees ----------------
 # The refinery merges in its own linked worktree; a fast-forward there produces
 # the identical tree another worktree already tested. That is only a saving if
@@ -319,10 +364,34 @@ before="$(run_count)"; run_gate test-mac lane-cmd "SECRET_TOKEN=$SECRET" -p=4 --
 assert_eq           "redaction.still_hits_the_marker" "$(( $(run_count) - before ))" "0"
 assert_not_contains "redaction.hit_output_omits_the_value" "$(cat "$ERR")" "$SECRET"
 
-# The value is elided from the marker but not from the key: a different value
-# is different content and must run the lane again.
+# An assignment's value is not key material, and that is deliberate. The
+# ambient case above is the reason: PATH's value provably differs between a
+# gate run and the pre-push run of the same tree, so a value-sensitive key
+# cannot hit across the boundary the cache exists to span. What the key keeps
+# is the command's SHAPE — which lane, which runner, which flags, which
+# variables are being set — and the tree SHA is what covers content.
 before="$(run_count)"; run_gate test-mac lane-cmd "SECRET_TOKEN=other-value" -p=4 --
-assert_eq "redaction.value_change_still_reruns" "$(( $(run_count) - before ))" "1"
+assert_eq "key.assignment_value_is_not_key_material" "$(( $(run_count) - before ))" "0"
+
+# The NAME still is: setting a different variable is a different command, and
+# a marker recorded for one must not be honored for the other.
+before="$(run_count)"; run_gate test-mac lane-cmd "OTHER_TOKEN=other-value" -p=4 --
+assert_eq "key.assignment_name_change_reruns" "$(( $(run_count) - before ))" "1"
+
+# So are the non-assignment words, which is what keeps two different flag sets
+# or two different runners apart.
+before="$(run_count)"; run_gate test-mac lane-cmd "SECRET_TOKEN=$SECRET" -p=8 --
+assert_eq "key.flag_change_reruns" "$(( $(run_count) - before ))" "1"
+
+# ---------------- a miss explains itself ----------------
+# The key is a hash, so a silent miss cannot be diagnosed from the outside:
+# the only way to ask "why did these two runs not share a marker?" is to read
+# the key each one looked for.
+reset_markers
+run_gate test-mac lane-cmd alpha
+assert_contains "miss.names_the_key"  "$(cat "$ERR")" "no recorded pass for test-mac key="
+run_gate test-mac lane-cmd alpha
+assert_not_contains "hit.does_not_claim_a_miss" "$(cat "$ERR")" "no recorded pass"
 
 # ---------------- Makefile wiring ----------------
 # The recipe must ask "already green?" BEFORE it asks for a slot: a cache hit
