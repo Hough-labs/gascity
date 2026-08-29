@@ -15,21 +15,24 @@
 # cache outright (dirty worktree, no git dir, CI), the exit statuses that
 # must NOT record a pass (ordinary failure and gate-busy alike), TTL expiry
 # and clock steps, the GATE_GREEN_NO_CACHE escape hatch, marker
-# auditability, the redaction that keeps assignment values out of the marker,
-# what the key does and does not distinguish, the diagnostic a miss prints,
-# pruning, and a static assertion that the Makefile's test-mac recipe still
-# routes through this wrapper ahead of the slot gate.
+# auditability, the redaction that keeps assignment values out of the marker
+# for both the flat and the chained `$(SHELL) -c` command shapes, what the key
+# does and does not distinguish in each, the diagnostic a miss prints,
+# pruning, and static assertions that the Makefile's test-mac recipe still
+# routes through this wrapper ahead of the slot gate and still wraps the whole
+# lane in one acquire.
 #
-# Three cases carry the bead's actual acceptance criterion rather than a
+# Four cases carry the bead's actual acceptance criterion rather than a
 # component of it, and all use real git rather than a stand-in: a lane run
 # from a real `git push` pre-push hook must see the marker the preceding gate
 # run recorded (git hands hooks an environment of its own, and that is what
 # the tree SHA and clean-status are read from); the same must hold when the
 # wrapped argv carries the ambient environment the real recipe interpolates,
-# which is the case that git's exec-path injection breaks and the one the
-# fixed-argv case above cannot exhibit; and a marker recorded in one linked
-# worktree must be visible from another, which is what makes a fast-forward
-# merge in the refinery's worktree free.
+# both as a flat word and embedded inside a chained one, which are the cases
+# git's exec-path injection breaks and the ones the fixed-argv case above
+# cannot exhibit; and a marker recorded in one linked worktree must be visible
+# from another, which is what makes a fast-forward merge in the refinery's
+# worktree free.
 
 set -uo pipefail
 
@@ -321,6 +324,50 @@ before="$(run_count)"
 assert_eq "ambient.hook_runs_lane_without_a_marker" "$(( $(run_count) - before ))" "1"
 rm -f "$REPO/.git/hooks/pre-push"
 
+# ...and again for the chained `$(SHELL) -c` shape test-mac actually uses, where
+# the ambient value is not a whole argv word but a fragment inside one. The real
+# recipe interpolates $(shell go env GOCACHE) and friends at make time, so their
+# host values sit mid-word; PATH stands in for them here because it is the value
+# git provably perturbs across this exact boundary, which is what makes the case
+# bite rather than merely pass.
+CHAINED_BUILDER="$WORK/chained-builder.sh"
+cat >"$CHAINED_BUILDER" <<'BUILDER'
+# Emits one argv word shaped like the recipe's `$(SHELL) -c` argument, with an
+# ambient value expanded IN THE CALLER'S CONTEXT — so the gate run and the
+# pre-push run build genuinely different bytes from identical source.
+chained_ambient_word() {
+    printf '%s' "env -i GOCACHE=$PATH GC_FAST_UNIT=1 lane-cmd -p=4 -- ./pkg/a && for p in ./ex/one; do lane-cmd \"\$p\" 4; done"
+}
+BUILDER
+
+reset_markers
+cat >"$REPO/.git/hooks/pre-push" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null   # git feeds "<local ref> <sha> <remote ref> <sha>" on stdin
+. "$CHAINED_BUILDER"
+exec "$GATE_GREEN_RUN" test-mac lane-cmd /bin/sh -c "\$(chained_ambient_word)"
+EOF
+chmod +x "$REPO/.git/hooks/pre-push"
+
+before="$(run_count)"
+# shellcheck source=/dev/null  # written by this script above, into $WORK
+( cd "$REPO" && . "$CHAINED_BUILDER" &&
+  "$GATE_GREEN_RUN" test-mac lane-cmd /bin/sh -c "$(chained_ambient_word)" ) >/dev/null 2>"$ERR"
+assert_eq "chained_ambient.gate_run_ran_the_lane" "$(( $(run_count) - before ))" "1"
+
+before="$(run_count)"
+( cd "$REPO" && git push -q origin HEAD:refs/heads/chained-ambient ) >/dev/null 2>"$ERR"
+assert_eq "chained_ambient.push_succeeded"          "$?" "0"
+assert_eq "chained_ambient.hook_did_not_rerun_lane" "$(( $(run_count) - before ))" "0"
+
+# The falsifier: with no marker the same push must still run the lane, so the
+# case above cannot be passing against a hook that simply never fired.
+reset_markers
+before="$(run_count)"
+( cd "$REPO" && git push -q origin HEAD:refs/heads/chained-ambient-again ) >/dev/null 2>"$ERR"
+assert_eq "chained_ambient.hook_runs_lane_without_a_marker" "$(( $(run_count) - before ))" "1"
+rm -f "$REPO/.git/hooks/pre-push"
+
 # ---------------- markers are shared across linked worktrees ----------------
 # The refinery merges in its own linked worktree; a fast-forward there produces
 # the identical tree another worktree already tested. That is only a saving if
@@ -383,6 +430,88 @@ assert_eq "key.assignment_name_change_reruns" "$(( $(run_count) - before ))" "1"
 before="$(run_count)"; run_gate test-mac lane-cmd "SECRET_TOKEN=$SECRET" -p=8 --
 assert_eq "key.flag_change_reruns" "$(( $(run_count) - before ))" "1"
 
+# ---------------- the chained `$(SHELL) -c` lane ----------------
+# test-mac no longer wraps a flat argv. Its sweep and its examples shard loop
+# are chained with `&&` inside ONE `$(SHELL) -c` argument so that they share a
+# single slot acquire, and that collapses every assignment the recipe
+# interpolates into the INTERIOR of a single 12KB argv word:
+#
+#   gate-slot-run test-mac /bin/sh -c 'env -i PATH="$PATH" GOCACHE=/real/path
+#                                      ... && for p in ...; do ...; done'
+#
+# A redaction that only fires when a whole word IS an assignment sees one word
+# beginning `env -i PATH=...`, takes `env -i PATH` as the candidate name,
+# rejects it (spaces are not name characters), and passes the entire word
+# through verbatim — every value with it. Measured on the real recipe: 12453
+# bytes in, 12453 bytes out, with $(shell go env GOPATH) and GOCACHE's host
+# paths intact in both the marker and the key.
+#
+# That is the same defect the flat shape had fixed twice over, reached again
+# through a shape the flat cases above cannot exhibit. It matters on two
+# counts: $(EXTRA_TEST_ENV) is a documented caller-controlled splice at exactly
+# that position, so a value written there lands in a file this script echoes to
+# stderr on every later hit; and keying on ambient values is what made the
+# cache unmatchable across the gate/push boundary in the first place.
+reset_markers
+
+# One argv word shaped like the recipe's: an `env -i` run whose assignments sit
+# mid-word, the sweep, then the shard loop. Parameterised so a case can vary
+# exactly one of name, value, or a non-assignment word.
+chained_word() {  # <assignment-name> <assignment-value> <swept-package>
+    printf '%s' "env -i PATH=\"\$PATH\" $1=$2 GC_FAST_UNIT=1 lane-cmd -p=4 -- $3 && for p in ./ex/one; do lane-cmd \"\$p\" 4; done"
+}
+
+CHAINED_SECRET="ch4ined-not-for-disk"
+run_gate test-mac lane-cmd /bin/sh -c "$(chained_word EXTRA_TEST_ENV_VALUE "$CHAINED_SECRET" ./pkg/a)"
+CHAINED_MARKER="$(cat "$MARKER_DIR"/*.marker 2>/dev/null)"
+assert_not_contains "chained.marker_omits_embedded_value" "$CHAINED_MARKER" "$CHAINED_SECRET"
+assert_contains     "chained.marker_keeps_embedded_name"  "$CHAINED_MARKER" "EXTRA_TEST_ENV_VALUE=<redacted>"
+assert_contains     "chained.marker_redacts_every_assignment" "$CHAINED_MARKER" "env -i PATH=<redacted>"
+# The shape either side of the assignments is what the key still turns on, so
+# it has to survive intact — redaction must not eat the lane's structure.
+assert_contains     "chained.marker_keeps_the_shape" "$CHAINED_MARKER" "lane-cmd -p=4 -- ./pkg/a && for p in ./ex/one;"
+
+before="$(run_count)"
+run_gate test-mac lane-cmd /bin/sh -c "$(chained_word EXTRA_TEST_ENV_VALUE "$CHAINED_SECRET" ./pkg/a)"
+assert_eq           "chained.still_hits_the_marker"           "$(( $(run_count) - before ))" "0"
+assert_not_contains "chained.hit_output_omits_embedded_value" "$(cat "$ERR")" "$CHAINED_SECRET"
+
+# An embedded assignment's VALUE is not key material, for the same reason a
+# top-level one's is not: the gate run and the pre-push run of one tree
+# disagree about ambient values by construction.
+before="$(run_count)"
+run_gate test-mac lane-cmd /bin/sh -c "$(chained_word EXTRA_TEST_ENV_VALUE some-other-value ./pkg/a)"
+assert_eq "key.embedded_assignment_value_is_not_key_material" "$(( $(run_count) - before ))" "0"
+
+# ...but the NAME is. Redaction that collapsed every assignment to one token
+# would make two different commands share a marker, which is the silent
+# over-keying failure: a recorded pass honored for a lane that never ran.
+before="$(run_count)"
+run_gate test-mac lane-cmd /bin/sh -c "$(chained_word OTHER_TEST_ENV_VALUE "$CHAINED_SECRET" ./pkg/a)"
+assert_eq "key.embedded_assignment_name_change_reruns" "$(( $(run_count) - before ))" "1"
+
+# So is every non-assignment word inside the chained script. This is the
+# collapse guard that matters most: the package list, the shard count and the
+# loop structure all live in there, and a key that stopped distinguishing them
+# would honor a marker across genuinely different lanes.
+before="$(run_count)"
+run_gate test-mac lane-cmd /bin/sh -c "$(chained_word EXTRA_TEST_ENV_VALUE "$CHAINED_SECRET" ./pkg/b)"
+assert_eq "key.embedded_non_assignment_change_reruns" "$(( $(run_count) - before ))" "1"
+
+# A value carrying a space is split across two whitespace-delimited tokens, so
+# redacting only the token that holds the `=` would write the tail of the value
+# to disk. $(EXTRA_TEST_ENV) is the reachable path: `EXTRA_TEST_ENV=\'FOO="a b"\'`
+# on the make line splices exactly this shape into the word.
+reset_markers
+QUOTED_HEAD="quoted-head-not-for-disk"
+QUOTED_TAIL="quoted-tail-not-for-disk"
+QUOTED_WORD="env -i EXTRA_TEST_ENV_VALUE=\"$QUOTED_HEAD $QUOTED_TAIL\" GC_FAST_UNIT=1 lane-cmd -- ./pkg/a"
+run_gate test-mac lane-cmd /bin/sh -c "$QUOTED_WORD"
+QUOTED_MARKER="$(cat "$MARKER_DIR"/*.marker 2>/dev/null)"
+assert_not_contains "chained.quoted_value_head_omitted"   "$QUOTED_MARKER" "$QUOTED_HEAD"
+assert_not_contains "chained.quoted_value_tail_omitted"   "$QUOTED_MARKER" "$QUOTED_TAIL"
+assert_contains     "chained.quoted_value_keeps_the_rest" "$QUOTED_MARKER" "GC_FAST_UNIT=<redacted> lane-cmd -- ./pkg/a"
+
 # ---------------- a miss explains itself ----------------
 # The key is a hash, so a silent miss cannot be diagnosed from the outside:
 # the only way to ask "why did these two runs not share a marker?" is to read
@@ -400,6 +529,23 @@ assert_not_contains "hit.does_not_claim_a_miss" "$(cat "$ERR")" "no recorded pas
 TEST_MAC_RECIPE="$(awk '/^test-mac:/{found=1; next} found && /^\t/{print; exit}' "$MAKEFILE")"
 assert_contains "wiring.test_mac_uses_gate_green_run"      "$TEST_MAC_RECIPE" "scripts/gate-green-run test-mac"
 assert_contains "wiring.test_mac_still_uses_gate_slot_run" "$TEST_MAC_RECIPE" "scripts/gate-slot-run test-mac"
+# The wrapper must cover the WHOLE lane. The sweep and the shard loop are
+# chained inside one `$(SHELL) -c`; if a later change split the loop back onto
+# its own recipe line, gate-green-run would wrap only the sweep and a recorded
+# "pass" would stand for half the lane — the silent skipped-gate failure, from
+# the other direction. Read the whole logical recipe (backslash continuations
+# included), not just its first line.
+TEST_MAC_FULL_RECIPE="$(awk '
+    /^test-mac:/ { found = 1; next }
+    found && /^\t/ { print; if ($0 !~ /\\$/) exit; next }
+    found { exit }
+' "$MAKEFILE")"
+assert_contains "wiring.test_mac_chains_the_shard_loop" "$TEST_MAC_FULL_RECIPE" "test-go-test-shard"
+assert_eq "wiring.test_mac_takes_one_slot_acquire" \
+    "$(printf '%s\n' "$TEST_MAC_FULL_RECIPE" | grep -c 'scripts/gate-slot-run')" "1"
+assert_eq "wiring.test_mac_has_one_green_wrapper" \
+    "$(printf '%s\n' "$TEST_MAC_FULL_RECIPE" | grep -c 'scripts/gate-green-run')" "1"
+
 green_prefix="${TEST_MAC_RECIPE%%scripts/gate-green-run*}"
 slot_prefix="${TEST_MAC_RECIPE%%scripts/gate-slot-run*}"
 if [[ "${#green_prefix}" -lt "${#slot_prefix}" ]]; then

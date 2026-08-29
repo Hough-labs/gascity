@@ -1176,9 +1176,31 @@ either: agents do not skip hooks, and the hook is doing correct work. So the
 it tested, and a second run of that lane on that content within a short window
 reports the recorded pass rather than repeating it.
 
-The key is lane + `HEAD^{tree}` + `go version` + the wrapped command's
-verbatim argv — tracked inputs, the toolchain the tree cannot see, and the
-ambient values the recipe interpolates through `TEST_ENV`. Anything the key
+The key is lane + `HEAD^{tree}` + `go version` + the *shape* of the wrapped
+command — tracked inputs, the toolchain the tree cannot see, and which lane,
+which runner, which flags and which variables are being set. Shape, not
+values: an assignment contributes its NAME and not its value, so `FOO=a` and
+`FOO=b` key alike while `FOO=` and `BAR=` do not. That is load-bearing rather
+than cosmetic. Git prepends its own exec-path to `PATH` for every hook it
+runs, and the recipe interpolates `$(shell go env ...)` paths at make time, so
+a value-keyed marker recorded by the merge gate can never match the pre-push
+run of the identical tree — the cache would run, record, and never once save a
+suite. Content is what the tree SHA is for; the environment is ambience, and
+the TTL below is what bounds it.
+
+The redaction that implements this reaches *inside* an argv word, not just a
+word that is wholly an assignment. `test-mac` chains its sweep and its
+examples shard loop with `&&` inside one `$(SHELL) -c` argument so the two
+share a single slot acquire, which puts the whole expanded `TEST_ENV` — and
+the caller-controlled `EXTRA_TEST_ENV` splice — in the interior of a single
+~12KB word. A word-level rule reads `env -i PATH` as that word's candidate
+name, rejects it (spaces are not name characters) and passes every byte
+through untouched, which is how both properties above are lost at once.
+Tokens are whitespace-delimited, redacted individually and rejoined with
+single spaces; a quoted value spanning two tokens is consumed to its closing
+quote so no fragment of it survives.
+
+Anything the key
 cannot see disables the cache rather than being quietly ignored: a dirty
 worktree is never cacheable in either direction (porcelain reports paths and
 status letters, not content, and untracked files are compiled like any other
@@ -1197,11 +1219,14 @@ invocation; a green run still records.
 
 A marker records enough to audit a hit — lane, tree, commit, timestamps, who
 recorded it, toolchain, command shape — but never an assignment's *value*.
-Expanded, the wrapped argv is `env -i PATH=... ANTHROPIC_API_KEY=...
-GOFLAGS=...`, and a marker is re-printed to stderr on every later cache hit, so
-leading `VAR=` words are written `VAR=<redacted>` while `-p=4`, `--` and the
-runner path stay literal. The values still feed the cache key, which is a hash:
-redaction changes what a marker shows, not what it distinguishes.
+Expanded, the wrapped command carries `PATH=...`, `ANTHROPIC_API_KEY=...`,
+`GOFLAGS=...` and whatever `EXTRA_TEST_ENV` splices in, and a marker is
+re-printed to stderr on every later cache hit, so every assignment is written
+`VAR=<redacted>` while `-p=4`, `--`, the package list, the shard count and the
+runner path stay literal. That rendering *is* the key material, so a marker is
+a faithful record of what was keyed rather than a lossy view of it, and two
+markers can be diffed to explain a miss. A miss names the key it looked for,
+because a hash cannot be interrogated after the fact.
 
 They live in the repository's common git dir (`<repo>/.git/gate-green`), so
 every linked worktree of one repo shares them. That sharing is the mechanism,
@@ -1224,12 +1249,17 @@ another lane only once that changes.
 Covered by `scripts/test-gate-green-run.sh` — the miss/record/hit cycle, every
 key input that must invalidate, every state that disables the cache, the exit
 statuses that must not record, TTL and clock-step handling, the redaction that
-keeps assignment values off disk, pruning, and a
-static assertion that the `test-mac` recipe still routes through the wrapper
-*ahead of* the slot acquire. Two of its cases carry the acceptance criterion
+keeps assignment values off disk for both the flat and the chained `$(SHELL)
+-c` command shapes, what the key does and does not distinguish inside a
+chained word, pruning, and static assertions that the `test-mac` recipe still
+routes through the wrapper *ahead of* the slot acquire and still wraps the
+whole lane in one acquire. Four of its cases carry the acceptance criterion
 whole, against real git rather than a stand-in: a lane driven from an actual
-`git push` pre-push hook sees the marker the preceding gate run recorded, and
-a marker recorded in one linked worktree is honored from another — the
+`git push` pre-push hook sees the marker the preceding gate run recorded; the
+same holds when the wrapped argv carries the ambient environment the recipe
+interpolates, both as a flat word and embedded inside a chained one — the two
+cases git's exec-path injection breaks and a fixed-argv case cannot exhibit;
+and a marker recorded in one linked worktree is honored from another — the
 property that makes a fast-forward merge in the refinery's worktree free. It
 runs as the `gate-green-selftest` job inside
 `test-local-parallel` (`fast` and `full` modes), directly rather than through a

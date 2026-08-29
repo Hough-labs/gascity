@@ -35,7 +35,7 @@
 #   Shape, not values: an assignment contributes its NAME to the key and not
 #   its value, so `FOO=a` and `FOO=b` key alike while `FOO=` and `BAR=` do
 #   not. That is a deliberate correction, not a shortcut. Once make expands
-#   $(TEST_ENV) the wrapped argv is `env -i PATH=... HOME=... GOFLAGS=... ...`,
+#   $(TEST_ENV) the wrapped command carries `PATH=... HOME=... GOFLAGS=...`,
 #   and git prepends its own exec-path to PATH for every hook it runs —
 #   measured on this host, `/Applications/Xcode.app/Contents/Developer/usr/
 #   libexec/git-core` is in the pre-push hook's PATH and not in the PATH of the
@@ -45,6 +45,23 @@
 #   unmatchable across exactly the boundary this cache exists to span: the
 #   lane still ran twice, and nothing said so. Content is what the tree SHA is
 #   for; the environment is ambience, and the TTL below is what bounds it.
+#
+#   That rule has to reach INSIDE an argv word, not just apply to a word that
+#   is wholly an assignment. `test-mac` chains its sweep and its examples shard
+#   loop with `&&` inside one `$(SHELL) -c` argument so the two share a single
+#   slot acquire, which puts the entire expanded $(TEST_ENV) — and the
+#   caller-controlled $(EXTRA_TEST_ENV) splice — in the interior of one ~12KB
+#   word. A word-level rule reads `env -i PATH` as that word's candidate name,
+#   rejects it because spaces are not name characters, and passes every byte
+#   through untouched: ambient values back into the key, and a caller's value
+#   back onto disk. Measured on the real recipe before the fix: 12453 bytes in,
+#   12453 bytes out, GOPATH's and GOCACHE's host paths intact in both.
+#
+#   Redaction can never cause a FALSE hit across different content, whatever it
+#   collapses: the tree SHA is an independent field of the same key, so two
+#   different trees cannot share a marker. What it can collapse is two runs of
+#   one tree that differ only in an assignment's value — bounded by the TTL,
+#   and the deliberate price of matching across the gate/push boundary at all.
 #
 #   The same rule is what the marker prints, so a marker now shows precisely
 #   what it was keyed on and two markers can be diffed to explain a miss.
@@ -70,14 +87,16 @@
 # WHAT THE MARKER RECORDS
 #   Enough to audit a hit — lane, tree, commit, timestamps, who recorded it,
 #   toolchain, and the shape of the command — but never an assignment's
-#   VALUE. Once make has expanded $(TEST_ENV) the wrapped argv is `env -i
-#   PATH=... ANTHROPIC_API_KEY=... GOFLAGS=... ...`, so recording argv
-#   verbatim would persist whatever the caller had exported into a file this
-#   script then echoes to stderr on every later cache hit. Leading `VAR=`
-#   words are written `VAR=<redacted>`; everything else (`-p=4`, `--`, the
-#   runner path) is kept literally. This rendering IS the key material — see
-#   WHAT THE KEY COVERS — so the marker is a faithful record of what was
-#   keyed rather than a lossy view of it.
+#   VALUE. Once make has expanded $(TEST_ENV) the wrapped command carries
+#   `PATH=... ANTHROPIC_API_KEY=... GOFLAGS=...` plus whatever
+#   $(EXTRA_TEST_ENV) splices in, so recording it verbatim would persist
+#   whatever the caller had exported into a file this script then echoes to
+#   stderr on every later cache hit. EVERY assignment is written
+#   `VAR=<redacted>`, wherever in a word it sits; everything else (`-p=4`,
+#   `--`, the package list, the shard count, the runner path) is kept
+#   literally. This rendering IS the key material — see WHAT THE KEY COVERS —
+#   so the marker is a faithful record of what was keyed rather than a lossy
+#   view of it.
 #
 # WHY A TTL
 #   Test outcomes are not purely a function of the tree. This suite already
@@ -200,21 +219,100 @@ gate_green_key() {
   } | git hash-object --stdin 2>/dev/null
 }
 
-# Elides one word's assignment value. The name is the audit value ("which lane,
-# which runner, which flags, which variables"); the value is a secret-in-waiting
-# that must never be written to disk, and is deliberately not key material
-# either. Only a leading, syntactically valid variable name counts as an
-# assignment, so `-p=4` and `--` pass through untouched.
-gate_green_redact_word() {
-  local _ggw_arg="$1" _ggw_name
-  _ggw_name="${_ggw_arg%%=*}"
-  if [ "$_ggw_name" != "$_ggw_arg" ]; then
-    case "$_ggw_name" in
+# Sets GATE_GREEN_OPEN_QUOTE to the quote character an assignment's value leaves
+# open, or empty when its quotes balance within the token. A value containing a
+# space is split across two whitespace-delimited tokens, so redacting only the
+# token holding the `=` would write the tail of that value to disk; the caller
+# uses this to swallow the rest of the quoted run instead.
+gate_green_open_quote() {
+  local _ggq_val="$1" _ggq_open="" _ggq_ch _ggq_i=0 _ggq_len=${#1}
+  while [ "$_ggq_i" -lt "$_ggq_len" ]; do
+    _ggq_ch="${_ggq_val:$_ggq_i:1}"
+    if [ -n "$_ggq_open" ]; then
+      [ "$_ggq_ch" = "$_ggq_open" ] && _ggq_open=""
+    else
+      case "$_ggq_ch" in '"' | "'") _ggq_open="$_ggq_ch" ;; esac
+    fi
+    _ggq_i=$(( _ggq_i + 1 ))
+  done
+  GATE_GREEN_OPEN_QUOTE="$_ggq_open"
+}
+
+# Elides one shell token's assignment value into GATE_GREEN_TOKEN, and reports
+# through GATE_GREEN_OPEN_QUOTE whether that value runs on past this token. The
+# name is the audit value ("which lane, which runner, which flags, which
+# variables"); the value is a secret-in-waiting that must never be written to
+# disk, and is deliberately not key material either. Only a leading,
+# syntactically valid variable name counts as an assignment, so `-p=4` and `--`
+# pass through untouched.
+#
+# It assigns rather than prints because it is called once per token and the real
+# test-mac argv is ~305 of them, hashed once and rendered once: a command
+# substitution per token costs a fork each time, measured at 2.1s per key
+# against 0.02s for the same rule assigning in-process.
+gate_green_redact_token() {
+  local _ggt_tok="$1" _ggt_name
+  GATE_GREEN_OPEN_QUOTE=""
+  _ggt_name="${_ggt_tok%%=*}"
+  if [ "$_ggt_name" != "$_ggt_tok" ]; then
+    case "$_ggt_name" in
       '' | [0-9]* | *[!A-Za-z0-9_]*) ;;
-      *) _ggw_arg="$_ggw_name=<redacted>" ;;
+      *)
+        gate_green_open_quote "${_ggt_tok#*=}"
+        _ggt_tok="$_ggt_name=<redacted>"
+        ;;
     esac
   fi
-  printf '%s\n' "$_ggw_arg"
+  GATE_GREEN_TOKEN="$_ggt_tok"
+}
+
+# Redacts every assignment INSIDE one argv word, not merely a word that is
+# itself an assignment.
+#
+# The distinction is the whole reason this function is not just the token rule
+# above. `test-mac` chains its sweep and its shard loop inside a single
+# `$(SHELL) -c` argument so the two share one slot acquire, which puts the
+# expanded $(TEST_ENV) — and the caller-controlled $(EXTRA_TEST_ENV) splice —
+# in the INTERIOR of one 12KB word. A word-level rule takes `env -i PATH` as
+# that word's candidate name, rejects it because spaces are not name
+# characters, and passes all 12KB through verbatim: values into the marker this
+# script echoes on every hit, and ambient values into the key, which is exactly
+# the unmatchable-across-the-push-boundary bug the key rule above exists to
+# prevent.
+#
+# Tokens are whitespace-delimited and rejoined with single spaces. The
+# normalisation is deliberate: it keeps the marker's `command=` on one line
+# despite the recipe's embedded tabs and continuations, and no real difference
+# survives only in whitespace — the tree SHA covers the Makefile that produced
+# it. Globbing is disabled across the split so a `*` in a package list or a
+# test filter cannot expand against the working directory.
+gate_green_redact_word() {
+  local _ggw_arg="$1" _ggw_out="" _ggw_first=1 _ggw_tok _ggw_pending="" _ggw_had_f=0
+  local _ggw_toks
+  case "$-" in *f*) _ggw_had_f=1 ;; esac
+  set -f
+  # Deliberate unquoted expansion: splitting the word into shell tokens is the
+  # point, and `set -f` above has already taken globbing out of it.
+  # shellcheck disable=SC2206
+  _ggw_toks=( $_ggw_arg )
+  [ "$_ggw_had_f" -eq 1 ] || set +f
+  for _ggw_tok in ${_ggw_toks[@]+"${_ggw_toks[@]}"}; do
+    if [ -n "$_ggw_pending" ]; then
+      # Inside an unterminated quoted value: drop the token whole rather than
+      # emit a fragment of the value it belongs to.
+      case "$_ggw_tok" in *"$_ggw_pending"*) _ggw_pending="" ;; esac
+      continue
+    fi
+    gate_green_redact_token "$_ggw_tok"
+    _ggw_pending="$GATE_GREEN_OPEN_QUOTE"
+    if [ "$_ggw_first" -eq 1 ]; then
+      _ggw_out="$GATE_GREEN_TOKEN"
+      _ggw_first=0
+    else
+      _ggw_out="$_ggw_out $GATE_GREEN_TOKEN"
+    fi
+  done
+  printf '%s\n' "$_ggw_out"
 }
 
 # Renders argv for the marker, one redacted word per input word, space-joined.

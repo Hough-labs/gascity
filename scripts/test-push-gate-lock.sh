@@ -557,8 +557,15 @@ echo "SWEEP $*" >>"$PROBE_LOG"
 [ -n "${PROBE_FAIL_SWEEP:-}" ] && exit 9
 exit 0
 PROBE_SWEEP
+# The real gate-green-run, not a stub: it is the outermost word of the recipe
+# (gascity-nuw), so the probe only reproduces the lane's real composition if
+# the wrapper it runs through is the real one. GATE_GREEN_NO_CACHE below keeps
+# it deterministic — the probe dir is a throwaway outside any repo and so is
+# uncacheable anyway, but a TMPDIR that happened to sit inside one must not let
+# a marker recorded by the first `make probe` skip the second's sweep.
+cp "$TEST_DIR/gate-green-run" "$MAC_PROBE/scripts/gate-green-run"
 chmod +x "$MAC_PROBE/scripts/gate-slot-run" "$MAC_PROBE/scripts/test-go-test-shard" \
-    "$MAC_PROBE/scripts/go-test-observable"
+    "$MAC_PROBE/scripts/go-test-observable" "$MAC_PROBE/scripts/gate-green-run"
 {
     printf 'TEST_ENV = env -i PATH="$$PATH" PROBE_LOG="$$PROBE_LOG" PROBE_FAIL_SHARD="$${PROBE_FAIL_SHARD-}" PROBE_FAIL_SWEEP="$${PROBE_FAIL_SWEEP-}"\n'
     printf 'UNIT_PKGS_SWEEP = ./pkg/a ./pkg/b\n'
@@ -574,7 +581,7 @@ chmod +x "$MAC_PROBE/scripts/gate-slot-run" "$MAC_PROBE/scripts/test-go-test-sha
 
 PROBE_LOG="$MAC_PROBE/log"
 : >"$PROBE_LOG"
-if ( cd "$MAC_PROBE" && PROBE_LOG="$PROBE_LOG" make probe ) >/dev/null 2>&1; then
+if ( cd "$MAC_PROBE" && PROBE_LOG="$PROBE_LOG" GATE_GREEN_NO_CACHE=1 make probe ) >/dev/null 2>&1; then
     record_pass "mac_gate.clean_run_succeeds"
 else
     record_fail "mac_gate.clean_run_succeeds" "make probe failed; log: $(cat "$PROBE_LOG")"
@@ -590,14 +597,14 @@ assert_contains "mac_gate.shards_keep_fast_unit_budget"  "$(cat "$PROBE_LOG")" "
 # A red sweep must fail the gate before any shard runs — that is what the `&&`
 # buys, and dropping it would report a green gate off the shards alone.
 : >"$PROBE_LOG"
-( cd "$MAC_PROBE" && PROBE_LOG="$PROBE_LOG" PROBE_FAIL_SWEEP=1 make probe ) >/dev/null 2>&1
+( cd "$MAC_PROBE" && PROBE_LOG="$PROBE_LOG" GATE_GREEN_NO_CACHE=1 PROBE_FAIL_SWEEP=1 make probe ) >/dev/null 2>&1
 assert_true "mac_gate.failing_sweep_fails_the_gate" test "$?" -ne 0
 assert_eq "mac_gate.failing_sweep_skips_the_shards" "$(grep -c '^SHARD ' "$PROBE_LOG")" "0"
 
 # `|| exit 1` inside the quoted loop is what a quoting slip drops; without it a
 # red example shard would pass the Darwin gate.
 : >"$PROBE_LOG"
-( cd "$MAC_PROBE" && PROBE_LOG="$PROBE_LOG" PROBE_FAIL_SHARD=2 make probe ) >/dev/null 2>&1
+( cd "$MAC_PROBE" && PROBE_LOG="$PROBE_LOG" GATE_GREEN_NO_CACHE=1 PROBE_FAIL_SHARD=2 make probe ) >/dev/null 2>&1
 assert_true "mac_gate.failing_shard_fails_the_gate" test "$?" -ne 0
 assert_eq "mac_gate.failing_shard_stops_the_loop" "$(grep -c '^SHARD ' "$PROBE_LOG")" "2"
 
