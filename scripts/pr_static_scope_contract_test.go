@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -850,6 +852,59 @@ type prStaticScopeFixture struct {
 	goLog              string
 	realGo             string
 	homeDir            string
+	goEnv              []string
+}
+
+var (
+	fixtureGoEnvOnce sync.Once
+	fixtureGoEnv     []string
+)
+
+// pinnedGolangCILintVersion returns GOLANGCI_LINT_VERSION as the Makefile under
+// test declares it.
+//
+// The fake golangci-lint reports this so scripts/install-pinned-go-tool's probe
+// accepts it and skips the install. Reading the pin out of the very Makefile the
+// fixture runs is what keeps the two in step: bump GOLANGCI_LINT_VERSION and the
+// fake follows, where a literal here would silently start failing the probe and
+// put the per-fixture `go install` straight back.
+func pinnedGolangCILintVersion(t *testing.T) string {
+	t.Helper()
+	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	match := regexp.MustCompile(`(?m)^GOLANGCI_LINT_VERSION := (\S+)$`).FindSubmatch(makefile)
+	if match == nil {
+		t.Fatal("Makefile has no GOLANGCI_LINT_VERSION pin; the fake golangci-lint cannot answer install-pinned-go-tool's probe without it")
+	}
+	return string(match[1])
+}
+
+// fixtureGoEnvironment returns the Go cache settings every fixture must forward
+// into its `make` invocations, resolved once per test binary.
+//
+// The fixtures scrub HOME to a t.TempDir() and pass GOENV=off, which together
+// leave `go` with no way to find the caches: it resolves GOMODCACHE under the
+// scratch HOME and re-fetches from scratch — the Go toolchain included — for
+// every fixture. Forwarding them mirrors what the sibling fixture in
+// go_test_observable_test.go already does, and it keeps module downloads out of
+// t.TempDir(), whose read-only mode bits then break RemoveAll at teardown
+// (gascity-2cwe).
+//
+// Resolved through the package's existing goEnvValue helper, and memoized, so
+// this adds no subprocess call site to the resource census and at most three
+// execs per test binary rather than three per fixture.
+func fixtureGoEnvironment(t *testing.T) []string {
+	t.Helper()
+	fixtureGoEnvOnce.Do(func() {
+		for _, key := range []string{"GOMODCACHE", "GOCACHE", "GOROOT"} {
+			if value := goEnvValue(t, key); value != "" {
+				fixtureGoEnv = append(fixtureGoEnv, key+"="+value)
+			}
+		}
+	})
+	return fixtureGoEnv
 }
 
 func newPRStaticScopeFixture(t *testing.T, files map[string]string) prStaticScopeFixture {
@@ -868,8 +923,17 @@ func newPRStaticScopeFixture(t *testing.T, files map[string]string) prStaticScop
 	lintLog := filepath.Join(toolDir, "golangci.calls")
 	goLog := filepath.Join(toolDir, "go.calls")
 	fakeLint := filepath.Join(toolDir, "golangci-lint")
+	// The `version` arm answers scripts/install-pinned-go-tool's probe and is
+	// deliberately NOT logged: it is a prerequisite's liveness check, not a lint
+	// invocation, and the assertions below read this log as the record of what
+	// the target chose to lint. See pinnedGolangCILintVersion for why the probe
+	// reaches this binary at all.
 	writeExecutable(t, fakeLint, `#!/bin/sh
 set -eu
+if [ "${1-}" = "version" ]; then
+  echo "golangci-lint has version `+pinnedGolangCILintVersion(t)+` built with go1.26.5"
+  exit 0
+fi
 : "${STATIC_SCOPE_LINT_LOG:?}"
 printf 'CALL\000' >> "$STATIC_SCOPE_LINT_LOG"
 for arg in "$@"; do
@@ -903,6 +967,7 @@ exec "$STATIC_SCOPE_REAL_GO" "$@"
 		goLog:              goLog,
 		realGo:             realGo,
 		homeDir:            t.TempDir(),
+		goEnv:              fixtureGoEnvironment(t),
 	}
 	setupMakefile := filepath.Join(t.TempDir(), "git-init.mk")
 	writeTestFile(t, setupMakefile, `.PHONY: init
@@ -938,6 +1003,20 @@ func (f prStaticScopeFixture) runMakeTargetWithOptions(target, ref, goTool strin
 		"--no-print-directory",
 		"-f", f.productionMakefile,
 		"GOLANGCI_LINT="+f.fakeLint,
+		// Both lint-affected and fmt-check-changed depend on
+		// install-golangci-lint, and the Makefile derives BIN_DIR from
+		// `go env GOPATH`, which follows HOME — a fresh t.TempDir() here. Left
+		// alone, every one of this file's ~24 fixtures therefore found an empty
+		// BIN_DIR and ran a full `go install golangci-lint@v2.12.0`: module
+		// graph download plus compile, per fixture. That is what put this one
+		// test over the whole scripts package's 15m budget (gascity-5y4h:
+		// measured 1200s against a 20m deadline, 2180s of user CPU, and the
+		// downloads left read-only module files under t.TempDir() that
+		// RemoveAll could not clean — gascity-2cwe). Pointing BIN_DIR at the
+		// fake tool dir makes the prerequisite take its documented cheap path:
+		// one exec, no network. The real linter is irrelevant to every
+		// assertion here, which all run against the fake.
+		"BIN_DIR="+filepath.Dir(f.fakeLint),
 		"CI_STATIC_GO="+goTool,
 		"LINT_CHANGED_SCOPE=tracked",
 		"LINT_CHANGED_REF="+ref,
@@ -972,6 +1051,7 @@ func (f prStaticScopeFixture) commandEnv() []string {
 		}
 		env = append(env, entry)
 	}
+	env = append(env, f.goEnv...)
 	return append(env,
 		"HOME="+f.homeDir,
 		"STATIC_SCOPE_LINT_LOG="+f.lintLog,

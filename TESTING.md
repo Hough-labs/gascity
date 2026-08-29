@@ -555,7 +555,8 @@ in it rather than as a package budget problem (gascity-cgh).
 
 `make test` now sweeps `$(UNIT_PKGS_SWEEP)` — every unit package except the
 sharded ones — and then runs `cmd/gc` as `CMD_GC_UNIT_TOTAL` (default 6) shards
-through `scripts/test-go-test-shard`, each with its own 15m budget.
+through `scripts/test-go-test-shard`, each with its own 15m budget. The other
+sharded packages follow in the same loop; see below.
 
 Sharding, not a bigger deadline, is what makes this survive load. Measured on
 one Darwin host at load average ~40-50, back to back:
@@ -584,9 +585,11 @@ wall-clock: `cmd/gc` no longer overlaps the rest of the sweep. Use
 out and are willing to accept that contention.
 
 `make test-mac` shares the same `$(UNIT_PKGS_SWEEP)` list and still leaves
-`cmd/gc` entirely to the Mac sharded CI matrix job.
+`cmd/gc` entirely to the Mac sharded CI matrix job. It does **not** do that for
+the other sharded packages — nothing else runs them on Darwin, so it carries
+their shards itself.
 
-#### The oversized `examples` packages are sharded the same way
+#### The other oversized packages are sharded the same way
 
 `examples/gastown` and `examples/bd/dolt` outgrew the sweep's deadline next
 (gascity-vdhw). They are the same shape as `cmd/gc` but for a different reason:
@@ -604,37 +607,74 @@ wall, so whether the gate passed was decided by host load rather than by
 correctness. Standalone runs at 852s and 1136s confirm the honest serial
 runtime already sits inside the noise margin of its own deadline.
 
-Both packages are therefore in `$(SHARDED_EXAMPLE_PKGS)`, excluded from
-`$(UNIT_PKGS_SWEEP)`, and run as `EXAMPLES_UNIT_TOTAL` (default 4) shards
+`scripts` joined them (gascity-5y4h), from a much lower baseline. Its cost is
+not computation: a handful of its tests drive `make` and the real `go` tool
+against fixture repos under a scratch `HOME`, so the package's wall time tracks
+host contention rather than the code under test. Archived `test-mac` run logs on
+one Darwin host show it passing six times between 132s and 636s — a 4.8x spread
+across passing runs alone — and hitting the 900s wall on four separate
+occurrences. That elasticity, not a fixed cost, is what put it over the
+deadline; three of its tests once spent 6m14s of wall clock for 8.3s of user
+CPU.
+
+What proves this is a budget problem rather than a broken test is that **a
+different set of tests was in flight on each occurrence**. A deterministic
+defect implicates the same test every run. One occurrence blocked in `os/exec`
+under `TestRuntimeTmuxIntegrationShardPreservesDynamicDiscoveryOnDarwin`;
+another had 14 tests that never left `testing.(*T).Parallel` at all, because two
+`make`-invoking tests had eaten 9m22s of the budget between them. Since the
+package has more than one way to exhaust its budget, capping any single test
+family would not converge either.
+
+All three packages are therefore in `$(SHARDED_SWEEP_PKGS)`, excluded from
+`$(UNIT_PKGS_SWEEP)`, and run as `SHARDED_UNIT_TOTAL` (default 4) shards
 through the same `scripts/test-go-test-shard` runner. Four leaves the slowest
 measured standalone run about 284s per shard — over 3x inside the deadline.
 Measured after the split, `examples/gastown` shard 1 of 4 ran in 130s at load
 average ~30.
 
-Unlike `cmd/gc`, these two are **not** covered by a separate Darwin CI job, so
+One knob covers every package in the list because the number is a headroom
+target rather than a per-package tuning: a shard's budget is the same 15m
+whatever package it carries. Split it only when some package's measured worst
+bucket actually disagrees with the rest.
+
+Do **not** read a shard number as a fixed assignment of tests. `test-go-test-shard`
+distributes round-robin by position in `go test -list` output, so adding a test
+shifts every test after it. The shard count buys headroom on the worst bucket,
+not a stable partition.
+
+Unlike `cmd/gc`, none of these three is covered by a separate Darwin CI job, so
 `make test-mac` has to run the shard loop itself. It chains the sweep and the
 shards with `&&` inside a single `$(SHELL) -c` so the whole target still takes
 exactly one push-gate slot and still fails in under a second on a busy lane.
+That matters most for `scripts`, which is where the Makefile, push-gate and
+CI-policy guards live: dropping it from the Darwin lane the way `cmd/gc` is
+dropped would stop the local gate from checking the machinery the gate is built
+from.
 
-Three places name this set and must agree: `$(SHARDED_EXAMPLE_PKGS)`, the
+Three places name this set and must agree: `$(SHARDED_SWEEP_PKGS)`, the
 `$(UNIT_PKGS_SWEEP)` grep filter, and `SHARDED_PKGS` in
 `scripts/test-local-parallel` (make cannot source a shell array, so the list is
-genuinely written twice). `TestShardedExamplePackagesAreExcludedFromTheSweep`
-and `TestShardedPackagesMatchTheLocalParallelLane` fail the build if they
-drift — in either direction, since a package listed in one place but not the
-other either runs twice under two deadlines or silently stops being tested.
+genuinely written twice). `TestShardedPackagesAreExcludedFromTheSweep` and
+`TestShardedPackagesMatchTheLocalParallelLane` fail the build if they drift —
+in either direction, since a package listed in one place but not the other
+either runs twice under two deadlines or silently stops being tested.
+`TestSweepExclusionMatchesWholeImportPathsOnly` covers the other half: the grep
+alternation is anchored on a whole path segment, so `cmd/gc-write-mint` and
+`scripts/cipolicy` keep running inside the sweep beside their sharded
+namesakes.
 
 ### Cross-category runners, timing, and resource isolation
 
 For broad local runs, prefer the repo's sharded wrappers over raw `go test`
 commands. They use the same buckets as CI, run under a scrubbed environment,
-and split single-package bottlenecks — `cmd/gc`, `examples/gastown`, and
-`examples/bd/dolt` — across multiple processes.
+and split single-package bottlenecks — `cmd/gc`, `examples/gastown`,
+`examples/bd/dolt` and `scripts` — across multiple processes.
 
 Use these as the default entry points:
 
 ```bash
-# Fast unit baseline, with cmd/gc and the oversized examples packages sharded.
+# Fast unit baseline, with cmd/gc and the other oversized packages sharded.
 make test-fast-parallel
 
 # Full process-backed cmd/gc suite, sharded.
@@ -986,16 +1026,16 @@ widened deadline — no assertion changes, and a test that fails under the
 capped lane still fails the gate.
 
 The bound covers each lane's **sweep**. The shard loops beside it — `cmd/gc`
-(gascity-cgh) and `$(SHARDED_EXAMPLE_PKGS)` (gascity-vdhw) — keep the
+(gascity-cgh) and `$(SHARDED_SWEEP_PKGS)` (gascity-vdhw, gascity-5y4h) — keep the
 `GOMAXPROCS` default, and that is the same rule rather than an exemption to it.
 Each `scripts/test-go-test-shard` call gets exactly one package and the loops
 are sequential, so at most one test binary is ever live: effectively `-p=1`,
 whose matching `-parallel` is the full core count. Handing those legs
 `$(GATE_TEST_PARALLEL)` would apply the sweep's four-way divisor to a
 single-binary lane and under-subscribe it 4x. The knob is nearly inert on those
-packages anyway — `examples/gastown` has 0 `t.Parallel()` call sites and
-`examples/bd/dolt` 1, and `cmd/gc` 148 across 8285 top-level tests, against
-1010 sites in the sweep.
+packages anyway — `examples/gastown` has 0 `t.Parallel()` call sites,
+`examples/bd/dolt` 1 and `scripts` 17 across 165 top-level tests, and `cmd/gc`
+148 across 8285 top-level tests, against 1010 sites in the sweep.
 
 `scripts/test-local-parallel` also still leaves `-parallel` at `GOMAXPROCS`;
 its `-p` fair share is computed by `gc_inner_parallelism` and the matching

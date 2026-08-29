@@ -92,7 +92,7 @@ func shardLoopRegion(t *testing.T, makefile, target string) string {
 	start := -1
 	for _, opener := range []string{
 		"for s in $$(seq 1 $(CMD_GC_UNIT_TOTAL))",
-		"for p in $(SHARDED_EXAMPLE_PKGS)",
+		"for p in $(SHARDED_SWEEP_PKGS)",
 	} {
 		if i := strings.Index(recipe, opener); i >= 0 && (start < 0 || i < start) {
 			start = i
@@ -110,7 +110,7 @@ func shardLoopRegion(t *testing.T, makefile, target string) string {
 // TestShardLegsKeepTheGOMAXPROCSDefaultParallelism records the other half of
 // the gascity-ngab decision: $(GATE_TEST_PARALLEL) bounds each lane's SWEEP and
 // deliberately does not reach the shard loops beside it (cmd/gc from
-// gascity-cgh, $(SHARDED_EXAMPLE_PKGS) from gascity-vdhw).
+// gascity-cgh, $(SHARDED_SWEEP_PKGS) from gascity-vdhw and gascity-5y4h).
 //
 // That is the same rule, not an exemption from it. The bound enforces
 // `-p x -parallel ~= cores`; a shard leg hands exactly one package to one

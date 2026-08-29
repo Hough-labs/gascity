@@ -112,35 +112,79 @@ func TestSweepPackageListIsSharedAndExcludesEveryShardedPackage(t *testing.T) {
 	}
 }
 
-// TestOversizedExamplePackagesLeaveTheSweepAndRunAsShards pins the fix for
-// gascity-vdhw. examples/gastown and examples/bd/dolt are large, effectively
-// sequential packages that spawn a subprocess per test, so their cost is
-// tests x subprocess spawn against one fixed per-binary deadline. Measured on
-// the Darwin gate they consumed 554-932s and 634-1136s of a 900s budget, which
-// makes whether the gate passes a function of host load rather than of
-// correctness. They must therefore leave the sweep and run through the same
-// per-package shard runner cmd/gc uses (gascity-cgh), and a raised -timeout is
-// explicitly not the remedy.
-func TestOversizedExamplePackagesLeaveTheSweepAndRunAsShards(t *testing.T) {
+// TestSweepExclusionMatchesWholeImportPathsOnly proves the exclusion filter is
+// anchored on a full path segment rather than a prefix. Every sharded package
+// has a sibling that must keep running inside the sweep — cmd/gc-write-mint
+// beside cmd/gc, and scripts/cipolicy beneath scripts (gascity-5y4h) — and an
+// unanchored alternation would silently stop testing them while every other
+// guard here still passed: the sharded set and the exclusion set would still
+// agree, and no shard loop would ever name the swallowed package.
+//
+// The pattern is read out of the Makefile and evaluated, not restated, so
+// editing the alternation re-runs these cases against the new filter.
+// Deliberately no subprocess: the property is string matching, and
+// test/test-resources.toml ratchets subprocess call sites down.
+func TestSweepExclusionMatchesWholeImportPathsOnly(t *testing.T) {
+	pattern := regexp.MustCompile(sweepExclusionPattern(t, readMakefile(t)))
+
+	const module = "github.com/gastownhall/gascity"
+	for _, tc := range []struct {
+		pkg  string
+		kept bool
+	}{
+		{module + "/cmd/gc", false},
+		{module + "/examples/gastown", false},
+		{module + "/examples/bd/dolt", false},
+		{module + "/scripts", false},
+		{module + "/cmd/gc-write-mint", true},
+		{module + "/scripts/cipolicy", true},
+		{module + "/examples/bd", true},
+		{module + "/internal/beads", true},
+	} {
+		if kept := !pattern.MatchString(tc.pkg); kept != tc.kept {
+			t.Errorf("UNIT_PKGS_SWEEP keeps %s = %v, want %v (pattern %s)",
+				tc.pkg, kept, tc.kept, pattern)
+		}
+	}
+}
+
+// TestOversizedPackagesLeaveTheSweepAndRunAsShards pins the fix for
+// gascity-vdhw and gascity-5y4h. examples/gastown and examples/bd/dolt are
+// large, effectively sequential packages that spawn a subprocess per test, so
+// their cost is tests x subprocess spawn against one fixed per-binary deadline;
+// measured on the Darwin gate they consumed 554-932s and 634-1136s of a 900s
+// budget. scripts reaches the same cliff from a much lower baseline: a handful
+// of its tests drive `make` and the real `go` tool against fixture repos, so
+// its wall time tracks host contention rather than the code under test — it
+// passed six times between 132s and 636s and hit the 900s wall on four
+// separate occurrences.
+//
+// In every case that makes whether the gate passes a function of host load
+// rather than of correctness, and it misattributes: the deadline panic names
+// whichever test held the binary when the budget expired, so each occurrence
+// accused a different innocent test. They must therefore leave the sweep and
+// run through the same per-package shard runner cmd/gc uses (gascity-cgh), and
+// a raised -timeout is explicitly not the remedy.
+func TestOversizedPackagesLeaveTheSweepAndRunAsShards(t *testing.T) {
 	makefile := readMakefile(t)
 
-	sharded := shardedExamplePackages(t, makefile)
-	for _, want := range []string{"./examples/gastown", "./examples/bd/dolt"} {
+	sharded := shardedSweepPackages(t, makefile)
+	for _, want := range []string{"./examples/gastown", "./examples/bd/dolt", "./scripts"} {
 		if !slices.Contains(sharded, want) {
-			t.Errorf("SHARDED_EXAMPLE_PKGS must contain %s: %v", want, sharded)
+			t.Errorf("SHARDED_SWEEP_PKGS must contain %s: %v", want, sharded)
 		}
 	}
 
-	if !regexp.MustCompile(`(?m)^EXAMPLES_UNIT_TOTAL \?= [0-9]+$`).MatchString(makefile) {
-		t.Error("Makefile has no EXAMPLES_UNIT_TOTAL default")
+	if !regexp.MustCompile(`(?m)^SHARDED_UNIT_TOTAL \?= [0-9]+$`).MatchString(makefile) {
+		t.Error("Makefile has no SHARDED_UNIT_TOTAL default")
 	}
 
 	for _, target := range []string{"test", "test-mac"} {
 		recipe := strings.Join(makeTargetRecipe(t, makefile, target), "\n")
 		for _, marker := range []string{
-			"for p in $(SHARDED_EXAMPLE_PKGS)",
-			"seq 1 $(EXAMPLES_UNIT_TOTAL)",
-			`./scripts/test-go-test-shard "$$p" "$$s" $(EXAMPLES_UNIT_TOTAL)`,
+			"for p in $(SHARDED_SWEEP_PKGS)",
+			"seq 1 $(SHARDED_UNIT_TOTAL)",
+			`./scripts/test-go-test-shard "$$p" "$$s" $(SHARDED_UNIT_TOTAL)`,
 			"GC_FAST_UNIT=1",
 			"GO_TEST_COUNT=1",
 			"GO_TEST_TIMEOUT=15m",
@@ -153,19 +197,19 @@ func TestOversizedExamplePackagesLeaveTheSweepAndRunAsShards(t *testing.T) {
 	}
 }
 
-// TestShardedExamplePackagesAreExcludedFromTheSweep is the drift guard between
-// the two places the sharded set is written: the SHARDED_EXAMPLE_PKGS list the
+// TestShardedPackagesAreExcludedFromTheSweep is the drift guard between
+// the two places the sharded set is written: the SHARDED_SWEEP_PKGS list the
 // shard loops iterate, and the go list filter that keeps those packages out of
 // the sweep. A package named in one but not the other either runs twice under
 // two deadlines or silently stops being tested at all.
-func TestShardedExamplePackagesAreExcludedFromTheSweep(t *testing.T) {
+func TestShardedPackagesAreExcludedFromTheSweep(t *testing.T) {
 	makefile := readMakefile(t)
 
 	excluded := sweepExclusions(t, makefile)
 	// cmd/gc is sharded by its own loop (gascity-cgh), not by
-	// SHARDED_EXAMPLE_PKGS, so account for it separately.
+	// SHARDED_SWEEP_PKGS, so account for it separately.
 	want := map[string]bool{"cmd/gc": true}
-	for _, pkg := range shardedExamplePackages(t, makefile) {
+	for _, pkg := range shardedSweepPackages(t, makefile) {
 		want[strings.TrimPrefix(pkg, "./")] = true
 	}
 
@@ -210,7 +254,7 @@ func TestShardedPackagesMatchTheLocalParallelLane(t *testing.T) {
 	makefile := readMakefile(t)
 
 	fromMakefile := map[string]bool{"cmd/gc": true}
-	for _, pkg := range shardedExamplePackages(t, makefile) {
+	for _, pkg := range shardedSweepPackages(t, makefile) {
 		fromMakefile[strings.TrimPrefix(pkg, "./")] = true
 	}
 
@@ -243,11 +287,11 @@ func TestShardedPackagesMatchTheLocalParallelLane(t *testing.T) {
 func TestLocalParallelFansOutEveryShardedPackage(t *testing.T) {
 	script := readRepoFile(t, filepath.Join("scripts", "test-local-parallel"))
 
-	if !strings.Contains(script, "add_example_shards() {") {
-		t.Fatal("scripts/test-local-parallel defines no add_example_shards")
+	if !strings.Contains(script, "add_sweep_pkg_shards() {") {
+		t.Fatal("scripts/test-local-parallel defines no add_sweep_pkg_shards")
 	}
-	if !strings.Contains(script, "./scripts/test-go-test-shard ${pkg} ${i} ${EXAMPLE_SHARD_TOTAL}") {
-		t.Error("add_example_shards must drive scripts/test-go-test-shard, the same runner cmd/gc uses")
+	if !strings.Contains(script, "./scripts/test-go-test-shard ${pkg} ${i} ${SHARD_TOTAL}") {
+		t.Error("add_sweep_pkg_shards must drive scripts/test-go-test-shard, the same runner cmd/gc uses")
 	}
 
 	for _, mode := range []string{"fast", "full"} {
@@ -255,7 +299,7 @@ func TestLocalParallelFansOutEveryShardedPackage(t *testing.T) {
 		if !strings.Contains(body, "add_unit_core_job") {
 			continue // this mode does not run the sweep, so it owes no shards
 		}
-		if !strings.Contains(body, "add_example_shards") {
+		if !strings.Contains(body, "add_sweep_pkg_shards") {
 			t.Errorf("%s mode runs the unit-core sweep but never fans out the sharded example packages:\n%s", mode, body)
 		}
 		if !strings.Contains(body, "add_cmd_gc_shards") {
@@ -301,6 +345,31 @@ func sweepDefinition(t *testing.T, makefile string) string {
 	return def[1]
 }
 
+// sweepExclusionPattern returns the extended regexp UNIT_PKGS_SWEEP excludes
+// on, as Go regexp source. It fails closed: this models exactly
+// `grep -v -E '<pattern>'`, so any other pipeline shape fails loudly here
+// rather than being silently mismodelled by callers.
+func sweepExclusionPattern(t *testing.T, makefile string) string {
+	t.Helper()
+	def := strings.TrimSpace(sweepDefinition(t, makefile))
+	def = strings.TrimSuffix(strings.TrimPrefix(def, "$(shell "), ")")
+
+	_, pipeline, found := strings.Cut(def, "go list ./...")
+	if !found {
+		t.Fatalf("UNIT_PKGS_SWEEP has no `go list ./...` to filter: %s", def)
+	}
+	pipeline = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(pipeline), "|"))
+
+	match := regexp.MustCompile(`^grep -v -E '([^']+)'$`).FindStringSubmatch(pipeline)
+	if match == nil {
+		t.Fatalf("UNIT_PKGS_SWEEP filter is no longer a single `grep -v -E '<pattern>'`, "+
+			"which is all this guard knows how to evaluate; teach it the new shape "+
+			"rather than dropping the coverage. Got: %q", pipeline)
+	}
+	// Make doubles `$` for the shell; undo that so the recipe's own anchor works.
+	return strings.ReplaceAll(match[1], "$$", "$")
+}
+
 // sweepExclusions returns the package suffixes UNIT_PKGS_SWEEP filters out of
 // go list ./..., parsed from the grep alternation so the guard reads the real
 // filter rather than a restatement of it.
@@ -320,12 +389,13 @@ func sweepExclusions(t *testing.T, makefile string) map[string]bool {
 	return excluded
 }
 
-// shardedExamplePackages returns the packages listed in SHARDED_EXAMPLE_PKGS.
-func shardedExamplePackages(t *testing.T, makefile string) []string {
+// shardedSweepPackages returns the packages listed in SHARDED_SWEEP_PKGS: the
+// non-cmd/gc packages the sweep hands to the per-package shard runner.
+func shardedSweepPackages(t *testing.T, makefile string) []string {
 	t.Helper()
-	def := regexp.MustCompile(`(?m)^SHARDED_EXAMPLE_PKGS = ([^\n]+)$`).FindStringSubmatch(makefile)
+	def := regexp.MustCompile(`(?m)^SHARDED_SWEEP_PKGS = ([^\n]+)$`).FindStringSubmatch(makefile)
 	if len(def) != 2 {
-		t.Fatal("Makefile has no SHARDED_EXAMPLE_PKGS definition")
+		t.Fatal("Makefile has no SHARDED_SWEEP_PKGS definition")
 	}
 	return strings.Fields(def[1])
 }

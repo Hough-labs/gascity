@@ -707,12 +707,13 @@ esac
 assert_contains "wiring.make_test_mac_shares_the_package_list" \
     "$(makefile_recipe test-mac)" '$(UNIT_PKGS_SWEEP)'
 
-# Darwin runs no separate examples job, so test-mac is the only thing that runs
-# $(SHARDED_EXAMPLE_PKGS) at all (gascity-vdhw). Dropping the loop from this
-# target would not fail anything — the packages would just silently stop being
-# tested on the lane agents actually use.
-assert_contains "wiring.make_test_mac_runs_the_example_shards" \
-    "$(makefile_recipe test-mac)" 'for p in $(SHARDED_EXAMPLE_PKGS)'
+# Darwin runs no separate job for them, so test-mac is the only thing that runs
+# $(SHARDED_SWEEP_PKGS) at all (gascity-vdhw, gascity-5y4h). Dropping the loop
+# from this target would not fail anything — the packages would just silently
+# stop being tested on the lane agents actually use, `scripts` included, which
+# is the package this very file lives in.
+assert_contains "wiring.make_test_mac_runs_the_sweep_pkg_shards" \
+    "$(makefile_recipe test-mac)" 'for p in $(SHARDED_SWEEP_PKGS)'
 assert_eq "wiring.make_test_mac_takes_exactly_one_slot" \
     "$(grep -c 'scripts/gate-slot-run' <<<"$(makefile_recipe test-mac)")" "1"
 
@@ -748,8 +749,8 @@ chmod +x "$SHARD_PROBE/scripts/gate-slot-run" "$SHARD_PROBE/scripts/test-go-test
 {
     printf 'TEST_ENV = env -i PATH="$$PATH" PROBE_LOG="$$PROBE_LOG" PROBE_FAIL_SHARD="$${PROBE_FAIL_SHARD-}"\n'
     printf 'CMD_GC_UNIT_TOTAL ?= 3\n'
-    printf 'SHARDED_EXAMPLE_PKGS = ./examples/one ./examples/two\n'
-    printf 'EXAMPLES_UNIT_TOTAL ?= 2\n'
+    printf 'SHARDED_SWEEP_PKGS = ./examples/one ./examples/two\n'
+    printf 'SHARDED_UNIT_TOTAL ?= 2\n'
     printf 'probe:\n'
     awk '
         /^test:/ { in_target = 1; next }
@@ -770,7 +771,7 @@ else
     record_fail "shard_loop.clean_run_succeeds" "make probe failed; log: $(cat "$PROBE_LOG")"
 fi
 assert_eq "shard_loop.takes_one_slot_for_the_whole_loop" "$(grep -c '^ACQUIRE ' "$PROBE_LOG")" "1"
-# 3 cmd/gc shards + EXAMPLES_UNIT_TOTAL shards for each of the two example
+# 3 cmd/gc shards + SHARDED_UNIT_TOTAL shards for each of the two sharded
 # packages. One slot still covers all of them.
 assert_eq "shard_loop.runs_every_shard"                  "$(grep -c '^SHARD '   "$PROBE_LOG")" "7"
 assert_contains "shard_loop.passes_shard_index_and_total" "$(cat "$PROBE_LOG")" "SHARD 2/3 ./cmd/gc"
@@ -787,7 +788,7 @@ assert_eq "shard_loop.failing_shard_stops_the_loop" "$(grep -c '^SHARD ' "$PROBE
 
 # ---------------- behavioural: test-mac's single-slot sweep + shard loop ----------------
 # test-mac is the Darwin lane agents run as their configured test_command, and
-# gascity-vdhw put a shard loop in it for $(SHARDED_EXAMPLE_PKGS). Keeping the
+# gascity-vdhw put a shard loop in it for $(SHARDED_SWEEP_PKGS). Keeping the
 # fail-in-under-a-second property meant chaining sweep and shards with `&&`
 # inside ONE `$(SHELL) -c` rather than adding a second recipe line, so the
 # whole target is now a single quoted string: the same class of quoting slip
@@ -814,8 +815,8 @@ chmod +x "$MAC_PROBE/scripts/gate-slot-run" "$MAC_PROBE/scripts/test-go-test-sha
 {
     printf 'TEST_ENV = env -i PATH="$$PATH" PROBE_LOG="$$PROBE_LOG" PROBE_FAIL_SHARD="$${PROBE_FAIL_SHARD-}" PROBE_FAIL_SWEEP="$${PROBE_FAIL_SWEEP-}"\n'
     printf 'UNIT_PKGS_SWEEP = ./pkg/a ./pkg/b\n'
-    printf 'SHARDED_EXAMPLE_PKGS = ./examples/one ./examples/two\n'
-    printf 'EXAMPLES_UNIT_TOTAL ?= 2\n'
+    printf 'SHARDED_SWEEP_PKGS = ./examples/one ./examples/two\n'
+    printf 'SHARDED_UNIT_TOTAL ?= 2\n'
     # gascity-ngab moved the real sweep's two concurrency bounds into
     # $(GATE_TEST_P)/$(GATE_TEST_PARALLEL). This probe copies that recipe line
     # verbatim, so a variable the throwaway Makefile does not define expands to

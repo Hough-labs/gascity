@@ -9,8 +9,8 @@ usage: scripts/test-local-parallel <fast|cmd-gc-process|integration|full>
 Environment:
   LOCAL_TEST_JOBS        max concurrent jobs (default: CPU-and-memory-aware)
   CMD_GC_PROCESS_TOTAL  cmd/gc shard count (default: 6)
-  EXAMPLES_UNIT_TOTAL    shard count for each oversized examples package
-                         (default: 4; mirrors the Makefile default)
+  SHARDED_UNIT_TOTAL     shard count for each package in SHARDED_PKGS other
+                         than cmd/gc (default: 4; mirrors the Makefile default)
   GC_TEST_INNER_P        override the per-job GOFLAGS=-p= value (default:
                          outer job budget divided across concurrent jobs)
 USAGE
@@ -96,18 +96,25 @@ add_fsys_compile_job() {
 # binary. `go test`'s -timeout is a PER-TEST-BINARY deadline, so one oversized
 # package fails the whole job on its own: cmd/gc first (gascity-cgh), then
 # examples/gastown and examples/bd/dolt (gascity-vdhw), which are effectively
-# sequential and spawn a subprocess per test. Each gets its own shard jobs
-# below instead, and unit-core filters all of them out.
+# sequential and spawn a subprocess per test, then scripts (gascity-5y4h),
+# whose cost is a handful of tests that drive `make` and the real `go` tool.
+# Each gets its own shard jobs below instead, and unit-core filters all of them
+# out.
+#
+# scripts was the sharpest case here rather than the mildest: unit-core passes
+# no -timeout at all, so before this it swept scripts against `go test`'s 10m
+# default — tighter than the 15m budget that package was already measured
+# blowing on the Makefile lanes.
 #
 # This list is duplicated from the Makefile's own filter on purpose — make
 # cannot source a shell array and this script cannot expand a make variable —
 # so TestShardedPackagesMatchTheLocalParallelLane fails the build if the two
 # drift apart.
-SHARDED_PKGS=(./cmd/gc ./examples/gastown ./examples/bd/dolt)
-EXAMPLE_SHARD_TOTAL="${EXAMPLES_UNIT_TOTAL:-4}"
+SHARDED_PKGS=(./cmd/gc ./examples/gastown ./examples/bd/dolt ./scripts)
+SHARD_TOTAL="${SHARDED_UNIT_TOTAL:-4}"
 
-if ! [[ "$EXAMPLE_SHARD_TOTAL" =~ ^[0-9]+$ && "$EXAMPLE_SHARD_TOTAL" -gt 0 ]]; then
-  echo "EXAMPLES_UNIT_TOTAL must be a positive integer" >&2
+if ! [[ "$SHARD_TOTAL" =~ ^[0-9]+$ && "$SHARD_TOTAL" -gt 0 ]]; then
+  echo "SHARDED_UNIT_TOTAL must be a positive integer" >&2
   exit 1
 fi
 
@@ -128,11 +135,12 @@ add_unit_core_job() {
     "GC_FAST_UNIT=1 go test \$(go list ./... | grep -v -E '$(unit_core_exclusion_regex)')"
 }
 
-# add_example_shards fans the non-cmd/gc sharded packages out the same way
-# add_cmd_gc_shards does for cmd/gc. Nothing else in this lane runs them once
-# unit-core filters them out, so dropping this would silently stop testing
-# them rather than fail anything.
-add_example_shards() {
+# add_sweep_pkg_shards fans the non-cmd/gc sharded packages out the same way
+# add_cmd_gc_shards does for cmd/gc (which has its own shard count, so it is
+# skipped here). Nothing else in this lane runs them once unit-core filters
+# them out, so dropping this would silently stop testing them rather than fail
+# anything.
+add_sweep_pkg_shards() {
   local label_prefix="$1"
   local gc_fast_unit="$2"
   local pkg name i command
@@ -140,10 +148,10 @@ add_example_shards() {
     [[ "$pkg" == "./cmd/gc" ]] && continue
     name="${pkg#./}"
     name="${name//\//-}"
-    for i in $(seq 1 "$EXAMPLE_SHARD_TOTAL"); do
+    for i in $(seq 1 "$SHARD_TOTAL"); do
       command="GC_FAST_UNIT=${gc_fast_unit} GO_TEST_COUNT=1 GO_TEST_TIMEOUT=15m"
-      command+=" ./scripts/test-go-test-shard ${pkg} ${i} ${EXAMPLE_SHARD_TOTAL}"
-      add_job "${label_prefix}-${name}-${i}-of-${EXAMPLE_SHARD_TOTAL}" "$command"
+      command+=" ./scripts/test-go-test-shard ${pkg} ${i} ${SHARD_TOTAL}"
+      add_job "${label_prefix}-${name}-${i}-of-${SHARD_TOTAL}" "$command"
     done
   done
 }
@@ -227,7 +235,7 @@ case "$mode" in
     add_local_concurrency_selftest_job
     add_gate_green_selftest_job
     add_cmd_gc_shards "unit-cmd-gc" "1" ""
-    add_example_shards "unit" "1"
+    add_sweep_pkg_shards "unit" "1"
     ;;
   cmd-gc-process)
     add_cmd_gc_shards "cmd-gc-process" "0" ""
@@ -243,7 +251,7 @@ case "$mode" in
     add_local_concurrency_selftest_job
     add_gate_green_selftest_job
     add_cmd_gc_shards "cmd-gc-process" "0" ""
-    add_example_shards "unit" "1"
+    add_sweep_pkg_shards "unit" "1"
     add_productmetrics_testhook_job
     add_integration_jobs
     ;;

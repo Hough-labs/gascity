@@ -10,9 +10,9 @@ Measured 2026-08-26 on `origin/edge-integration` @ 2103ea04f (clean worktree).
 
 | Lane | What it runs | Who runs it |
 |---|---|---|
-| `make test-mac` | `-p=$(GATE_TEST_P) -parallel=$(GATE_TEST_PARALLEL) -count=1 -timeout 15m $(UNIT_PKGS_SWEEP)` — **excludes cmd/gc and `$(SHARDED_EXAMPLE_PKGS)`** — plus those examples packages as 4 *sequential* shards each | the Darwin pre-push hook; the rig's configured `test_command` |
-| `make test` | the same sweep and example shards, **plus** cmd/gc as 6 *sequential* shards | AGENTS.md fallback |
-| `make test-fast-parallel` | shards cmd/gc and the examples packages locally at `LOCAL_TEST_JOBS` | the non-Darwin pre-push branch |
+| `make test-mac` | `-p=$(GATE_TEST_P) -parallel=$(GATE_TEST_PARALLEL) -count=1 -timeout 15m $(UNIT_PKGS_SWEEP)` — **excludes cmd/gc and `$(SHARDED_SWEEP_PKGS)`** — plus each package in `$(SHARDED_SWEEP_PKGS)` as 4 *sequential* shards | the Darwin pre-push hook; the rig's configured `test_command` |
+| `make test` | the same sweep and shard loop, **plus** cmd/gc as 6 *sequential* shards | AGENTS.md fallback |
+| `make test-fast-parallel` | shards cmd/gc and every `SHARDED_PKGS` entry locally at `LOCAL_TEST_JOBS` | the non-Darwin pre-push branch |
 
 The `-parallel` bound is newer than the measurements below: until gascity-ngab
 (2026-08-28) both gate lanes ran bare `-p=4`, leaving `-parallel` at its
@@ -21,7 +21,7 @@ this 16-core host. Every run recorded in this document was taken in that shape.
 See TESTING.md, "Within-binary test parallelism on the gate lanes".
 
 The bound covers the **sweep** invocation of each lane, not the shard loops that
-gascity-cgh and gascity-vdhw added beside it. That is the same rule, not an
+gascity-cgh, gascity-vdhw and gascity-5y4h added beside it. That is the same rule, not an
 exemption: a shard loop hands one package to one `go test` and runs the calls
 sequentially, so it is already effectively `-p=1`, whose matching `-parallel` is
 the full core count — the `GOMAXPROCS` default it gets today. Applying the
@@ -34,9 +34,12 @@ Two facts do most of the adjudication work:
    `uname -s`: Darwin runs `make test-mac`, everything else `make test-fast-parallel`.
    The rig additionally pins `test_command = "make test-mac"` in city.toml
    `[rigs.formula_vars]`. So on this host, **cmd/gc is not in the gate at all.**
-   (gascity-vdhw later added the `$(SHARDED_EXAMPLE_PKGS)` shard loop to
-   `test-mac`, because nothing else on Darwin runs those packages — so unlike
-   cmd/gc they *are* still in the gate, just no longer as one binary.)
+   (gascity-vdhw and gascity-5y4h later added the `$(SHARDED_SWEEP_PKGS)` shard
+   loop to `test-mac`, because nothing else on Darwin runs those packages — so
+   unlike cmd/gc they *are* still in the gate, just no longer as one binary.
+   **`scripts` is one of them**, so "the failure names a package the test-mac
+   lane does not run" is not available as a shortcut for it: check which
+   package the failure names before reusing the reasoning below.)
 
 2. **`make test`'s sweep phase became byte-identical to `make test-mac`.** Before
    gascity-cgh (961d87935) `make test` was `-p=4 ./...` *including* cmd/gc. After it,
