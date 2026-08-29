@@ -633,6 +633,23 @@ measured standalone run about 284s per shard — over 3x inside the deadline.
 Measured after the split, `examples/gastown` shard 1 of 4 ran in 130s at load
 average ~30.
 
+`scripts` measured after its split, on one Darwin host:
+
+| Shape | Elapsed | Load (1m) |
+| --- | --- | --- |
+| one binary, gate flags | 288.7s | 15.5 |
+| shard 1 of 4 | 121.3s | 20.2 |
+| shard 2 of 4 | 124.1s | 41.5 |
+| shard 3 of 4 | 97.5s | 59.1 |
+| shard 4 of 4 | 324.5s | 61.0 |
+
+The worst bucket keeps 2.8x of the 900s deadline. Note the shards were taken
+across a rising load window, so the spread between them is partly the host, not
+the partition — the number to read is the worst bucket against the deadline, not
+one shard against another. Note too that the sequential shard total (668s)
+exceeds the single binary (288.7s): sharding trades wall clock for a bounded
+per-binary deadline, exactly the trade `cmd/gc` already makes.
+
 One knob covers every package in the list because the number is a headroom
 target rather than a per-package tuning: a shard's budget is the same 15m
 whatever package it carries. Split it only when some package's measured worst

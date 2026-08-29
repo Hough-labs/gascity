@@ -454,6 +454,10 @@ test-ci-policy:
 #     repos, so its wall time tracks host contention rather than the code under
 #     test. It passed six times between 132s and 636s and hit the 900s wall on
 #     four separate occurrences — the same elasticity, with a lower baseline.
+#     Measured standalone after that: 288.7s as one binary under these gate
+#     flags at load1 15.5, and as four sequential shards 121.3s / 124.1s /
+#     97.5s / 324.5s at load1 20-61. The worst bucket keeps 2.8x of the 900s
+#     deadline, against a single binary that consumed all of it four times.
 #
 # Bounding -parallel cannot help a package with no intra-binary parallelism to
 # bound, and gascity-cgh already showed a bigger deadline does not converge, so
