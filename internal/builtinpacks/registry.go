@@ -446,10 +446,26 @@ func syntheticTreeFingerprint(dir string) (string, error) {
 	return fmt.Sprintf("sha256:%x", sum[:]), nil
 }
 
+// SyntheticTreeFingerprintRecorded reports whether dir's marker carries a tree
+// fingerprint at all. It reads the marker and does not walk the tree, so it is
+// the cheap guard a caller uses to decide whether stamping is worth the cache
+// write lock: ValidateSyntheticRepo has already walked the tree by the time the
+// caller asks, and walking it a second time to reach the same answer is pure
+// duplicate work on the path every gc invocation takes.
+//
+// A marker whose fingerprint is recorded but stale — content still valid, but
+// some entry's size, mode or mtime changed — is not re-stamped here and keeps
+// paying the full comparison until the cache is next materialized. That costs
+// time, never correctness, and nothing in normal operation produces it.
+func SyntheticTreeFingerprintRecorded(dir string) bool {
+	marker, err := readSyntheticMarker(dir)
+	return err == nil && marker.TreeFingerprint != ""
+}
+
 // SyntheticTreeFingerprintCurrent reports whether dir's marker records a tree
-// fingerprint that still matches the materialized file set. It is false for a
-// marker written before the field existed, which is the signal callers use to
-// decide a backfill stamp is worth taking the cache write lock for.
+// fingerprint that still matches the materialized file set. Unlike
+// SyntheticTreeFingerprintRecorded it walks the tree, so it belongs in
+// verification paths rather than on a hot guard.
 func SyntheticTreeFingerprintCurrent(dir string) bool {
 	marker, err := readSyntheticMarker(dir)
 	if err != nil || marker.TreeFingerprint == "" {

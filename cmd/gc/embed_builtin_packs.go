@@ -260,9 +260,12 @@ func ensureRequiredBuiltinSourcesCached(cityPath string) error {
 //
 // The caller has just validated the cache in full, which is the precondition
 // StampSyntheticTreeFingerprint re-checks under the lock. This runs at most
-// once per cache directory per binary: once the fingerprint is current the
-// guard is a stat walk and no lock is taken, which is what keeps the warm
-// readiness pass lock-free.
+// once per cache directory per binary: once a fingerprint is recorded the guard
+// is a single marker read and no lock is taken, which is what keeps the warm
+// readiness pass lock-free. The guard deliberately does not re-walk the tree —
+// ValidateSyntheticRepo just did, and every bundled source at the canonical pin
+// resolves to this same directory, so a walking guard would double the walks on
+// the hot path.
 //
 // Best-effort by construction: the fingerprint is an optimization, so a cache
 // root that cannot be locked or written (a read-only or concurrently-repaired
@@ -270,7 +273,7 @@ func ensureRequiredBuiltinSourcesCached(cityPath string) error {
 // behavior as before this fingerprint existed. It is never a reason to fail a
 // readiness pass whose actual work already succeeded.
 func backfillBundledCacheTreeFingerprint(cachePath, commit string) {
-	if builtinpacks.SyntheticTreeFingerprintCurrent(cachePath) {
+	if builtinpacks.SyntheticTreeFingerprintRecorded(cachePath) {
 		return
 	}
 	root, err := packman.RepoCacheRoot()
