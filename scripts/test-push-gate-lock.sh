@@ -571,6 +571,16 @@ chmod +x "$MAC_PROBE/scripts/gate-slot-run" "$MAC_PROBE/scripts/test-go-test-sha
     printf 'UNIT_PKGS_SWEEP = ./pkg/a ./pkg/b\n'
     printf 'SHARDED_EXAMPLE_PKGS = ./examples/one ./examples/two\n'
     printf 'EXAMPLES_UNIT_TOTAL ?= 2\n'
+    # gascity-ngab moved the real sweep's two concurrency bounds into
+    # $(GATE_TEST_P)/$(GATE_TEST_PARALLEL). This probe copies that recipe line
+    # verbatim, so a variable the throwaway Makefile does not define expands to
+    # EMPTY: the probe then exercises `-p= -parallel=`, a shape production never
+    # runs, while every assertion below still passes. Pinned literals rather
+    # than $(shell ./scripts/test-gate-parallelism ...) because the probe wants
+    # one fixed host-independent shape; mac_gate.no_flag_expands_empty is what
+    # fails if a later variable joins the recipe and not this list.
+    printf 'GATE_TEST_P ?= 4\n'
+    printf 'GATE_TEST_PARALLEL ?= 4\n'
     printf 'probe:\n'
     awk '
         /^test-mac:/ { in_target = 1; next }
@@ -590,6 +600,13 @@ assert_eq "mac_gate.takes_one_slot_for_sweep_and_shards" "$(grep -c '^ACQUIRE ' 
 assert_eq "mac_gate.runs_the_sweep_once"                 "$(grep -c '^SWEEP '   "$PROBE_LOG")" "1"
 assert_eq "mac_gate.runs_every_example_shard"            "$(grep -c '^SHARD '   "$PROBE_LOG")" "4"
 assert_contains "mac_gate.sweep_keeps_the_package_list"  "$(cat "$PROBE_LOG")" "SWEEP test-mac -- "
+assert_contains "mac_gate.sweep_carries_the_gate_bounds" "$(cat "$PROBE_LOG")" "-p=4 -parallel=4"
+# The general form of the assertion above. An undefined Makefile variable
+# expands to empty and leaves a bare `-flag=` in the argv, so match any such
+# flag rather than only today's two: the next variable added to the recipe then
+# fails here instead of silently thinning what this probe covers.
+assert_false "mac_gate.no_flag_expands_empty" \
+    grep -qE '(^|[[:space:]])-[A-Za-z-]+=([[:space:]]|$)' "$PROBE_LOG"
 assert_contains "mac_gate.shards_the_first_example_pkg"  "$(cat "$PROBE_LOG")" "SHARD 2/2 ./examples/one"
 assert_contains "mac_gate.shards_the_second_example_pkg" "$(cat "$PROBE_LOG")" "SHARD 2/2 ./examples/two"
 assert_contains "mac_gate.shards_keep_fast_unit_budget"  "$(cat "$PROBE_LOG")" "fast=1 count=1 timeout=15m"
