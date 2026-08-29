@@ -590,8 +590,16 @@ test: test-fsys-darwin-compile
 ## Sweep and shards share ONE acquire: they are chained with `&&` inside a
 ## single `$(SHELL) -c`, so a busy lane still costs under a second and a red
 ## sweep still fails the gate before any shard runs.
+##
+## Wrapped in scripts/gate-green-run so an identical tree is not swept twice
+## (gascity-nuw): a refinery direct merge runs this lane as its configured
+## test_command and then pushes, and the pre-push hook execs the same lane
+## again on the same SHA. The green-marker check comes FIRST, outside the
+## slot acquire — a run that has nothing to do must not occupy a slot to
+## discover that, and a hit must not wait behind a busy gate to learn it had
+## nothing to do.
 test-mac: test-fsys-darwin-compile
-	./scripts/gate-slot-run test-mac $(SHELL) -c '$(TEST_ENV) GC_FAST_UNIT=1 \
+	./scripts/gate-green-run test-mac ./scripts/gate-slot-run test-mac $(SHELL) -c '$(TEST_ENV) GC_FAST_UNIT=1 \
 		scripts/go-test-observable test-mac -- -p=$(GATE_TEST_P) -parallel=$(GATE_TEST_PARALLEL) -count=1 -timeout 15m $(UNIT_PKGS_SWEEP) && \
 		for p in $(SHARDED_EXAMPLE_PKGS); do \
 			for s in $$(seq 1 $(EXAMPLES_UNIT_TOTAL)); do \

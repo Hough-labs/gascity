@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+#
+# gate-green-run — run one heavy local test lane at most once per identical
+# tree (gascity-nuw).
+#
+# WHY THIS EXISTS
+#   A refinery direct merge pays the Darwin suite TWICE on a tree that never
+#   changed between the two runs. mol-refinery-patrol's merge-push step runs
+#   the rig's configured test_command (`make test-mac`, ~20 minutes on this
+#   host) and then pushes; the pre-push hook execs the same lane again on the
+#   same SHA. One observed merge (gascity-3vr, 2026-08-19) held the gate for
+#   ~45 minutes, ~20 of which re-ran a suite that had just passed on exactly
+#   the tree being pushed. A push killed mid-hook also leaves debris — an
+#   orphaned merge worktree and a stale index.lock — so the second run costs
+#   more than its wall time.
+#
+#   The fix cannot live in either obvious place. The pre-push hook agents
+#   actually run on this host is untracked, git-excluded local config, and
+#   the refinery formula lives in the separate gascity-packs repo. It must
+#   also not be `--no-verify`: skipping hooks is forbidden, and the hook is
+#   doing correct work. So the lane itself becomes idempotent. The first
+#   green run records a marker keyed by the exact content it tested, and a
+#   second run of that same lane on that same content within a short window
+#   reports the recorded pass instead of repeating it. Every other caller,
+#   and every other tree, still runs the suite: this is a cache with a
+#   content key, not a bypass of the gate.
+#
+# WHAT THE KEY COVERS
+#   lane + HEAD tree SHA + `go version` + the verbatim argv of the wrapped
+#   command. The tree SHA covers every tracked input, including the Makefile
+#   recipe and the scripts the lane runs; `go version` covers the toolchain,
+#   which the tree cannot see; argv covers the ambient values the recipe
+#   interpolates through TEST_ENV. Anything the key cannot see disables the
+#   cache rather than being ignored:
+#
+#     - A dirty worktree is NOT cacheable. `git status --porcelain` reports
+#       paths and status letters, not content, so two different edits to one
+#       file are indistinguishable to any key built from it. A run started
+#       against a dirty tree (untracked files included) neither reads nor
+#       writes a marker.
+#     - Gitignored files are the one input the key cannot see. They are not
+#       in the tree and `git status --porcelain` does not report them, so
+#       editing local ignored config between two runs does not invalidate a
+#       marker. That is the same exposure `go build`'s own cache already
+#       carries here, and the TTL below is what bounds it.
+#     - An unreadable tree SHA or `go version` disables the cache. A key
+#       that cannot be computed is not a hit.
+#     - CI disables the cache. Each CI job is meant to run the suite it was
+#       asked to run; a workspace-reusing self-hosted runner must not
+#       inherit a marker from a previous job.
+#
+# WHY A TTL
+#   Test outcomes are not purely a function of the tree. This suite already
+#   contains time-dependent assertions — the provider contract waivers that
+#   expired on 2026-08-12 and turned two ledger tests red (gascity-o0g) are
+#   the standing example. A marker is therefore honored only for
+#   GATE_GREEN_TTL_SECONDS (default 1800) after the run that recorded it
+#   finished. The gap this exists to collapse is seconds to minutes — a gate
+#   finishes, the push starts — so 30 minutes is generous for the real case
+#   while bounding how stale a recorded pass can be.
+#
+# SCOPE
+#   Wired into the `test-mac` recipe only: that is the lane where the
+#   double-run was measured, and the only one where the refinery's gate and
+#   the pre-push hook exec the SAME lane. On Linux the hook runs
+#   test-fast-parallel while the gate runs its own configured command, so
+#   there is no identical-lane pair to collapse there. Wrap another lane
+#   here only once that changes.
+#
+# COMPOSITION
+#   This wraps scripts/gate-slot-run rather than living inside it, and sits
+#   outside it in the recipe. The two answer different questions — "has this
+#   exact content already passed?" and "is there a free slot to run it in?"
+#   — and asking the first one first means a cache hit never occupies a slot
+#   it does not need.
+#
+# PORTABILITY
+#   bash 3.2-compatible (macOS's stock /bin/bash), matching
+#   scripts/gate-slot-run and scripts/push-gate-lock-lib.sh.
+#
+# USAGE
+#   scripts/gate-green-run <lane> <command> [args...]
+#
+# ENVIRONMENT
+#   GATE_GREEN_TTL_SECONDS  seconds a recorded pass stays honored (default 1800)
+#   GATE_GREEN_NO_CACHE     non-empty: ignore any marker and run the lane; a
+#                           green run still records one
+#
+# EXIT STATUS
+#   2   usage error
+#   0   cache hit (nothing ran), or the command's own success
+#   *   the command's exit status, propagated verbatim
+#
+# Covered by scripts/test-gate-green-run.sh.
+
+# No `set -e`: the lane command's exit status is this script's product and
+# must be propagated verbatim, including failures `set -e` would swallow.
+set -uo pipefail
+
+if [ "$#" -lt 2 ]; then
+  echo "usage: scripts/gate-green-run <lane> <command> [args...]" >&2
+  exit 2
+fi
+
+lane="$1"
+shift
+
+GATE_GREEN_DEFAULT_TTL_SECONDS=1800
+
+ttl="${GATE_GREEN_TTL_SECONDS:-$GATE_GREEN_DEFAULT_TTL_SECONDS}"
+case "$ttl" in
+  '' | *[!0-9]*)
+    echo "gate-green: ignoring malformed GATE_GREEN_TTL_SECONDS='${GATE_GREEN_TTL_SECONDS-}'; using ${GATE_GREEN_DEFAULT_TTL_SECONDS}s" >&2
+    ttl="$GATE_GREEN_DEFAULT_TTL_SECONDS"
+    ;;
+esac
+
+# Markers live beside the gate slots, in the repository's common git dir, so
+# every linked worktree of one repo shares them. That sharing is the point:
+# a fast-forward merge in the refinery's worktree produces the identical tree
+# the polecat's worktree already tested, and identical content is identical
+# content regardless of which directory observed it.
+gate_green_dir() {
+  local _ggd_common
+  _ggd_common="$(git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  [ -n "$_ggd_common" ] || return 1
+  # --git-common-dir may print a path relative to $PWD, so absolutize it here
+  # rather than with --path-format=absolute (Git 2.31+): git rev-parse echoes
+  # an unrecognized option and still exits 0, which would smuggle garbage
+  # past the caller's check. Same reasoning as push_gate_slots_dir.
+  _ggd_common="$(cd "$_ggd_common" 2>/dev/null && pwd)" || return 1
+  printf '%s/gate-green\n' "$_ggd_common"
+}
+
+# A tree is cacheable only when git can describe it exactly. Untracked files
+# count as dirt: they are compiled by `go test` like any other source, and
+# porcelain output cannot tell one untracked file's contents from another's.
+gate_green_tree_is_clean() {
+  local _ggt_status
+  _ggt_status="$(git status --porcelain 2>/dev/null)" || return 1
+  [ -z "$_ggt_status" ]
+}
+
+# git hash-object is the portable hash here: this script already requires
+# git, whereas sha256sum(1) and shasum(1) split across Linux and macOS.
+gate_green_key() {
+  local _ggk_lane="$1"
+  shift
+  local _ggk_tree _ggk_go _ggk_arg
+  _ggk_tree="$(git rev-parse 'HEAD^{tree}' 2>/dev/null)" || return 1
+  [ -n "$_ggk_tree" ] || return 1
+  _ggk_go="$(go version 2>/dev/null)" || return 1
+  [ -n "$_ggk_go" ] || return 1
+  {
+    printf '%s\0%s\0%s\0' "$_ggk_lane" "$_ggk_tree" "$_ggk_go"
+    for _ggk_arg in "$@"; do
+      printf '%s\0' "$_ggk_arg"
+    done
+  } | git hash-object --stdin 2>/dev/null
+}
+
+# Markers are small, but they accumulate one per distinct tree tested. Drop
+# the ones no read could honor any more. Approximate by mtime: the honored
+# check below reads the recorded epoch out of the file, so pruning precision
+# is a housekeeping concern, not a correctness one.
+gate_green_prune() {
+  local _ggp_dir="$1" _ggp_ttl="$2" _ggp_minutes
+  _ggp_minutes=$(( (_ggp_ttl + 59) / 60 ))
+  [ "$_ggp_minutes" -gt 0 ] || _ggp_minutes=1
+  find "$_ggp_dir" -type f -name '*.marker' -mmin "+${_ggp_minutes}" -delete 2>/dev/null
+  return 0
+}
+
+gate_in_ci=0
+case "${GITHUB_ACTIONS:-}" in
+  true | 1) gate_in_ci=1 ;;
+esac
+case "${CI:-}" in
+  true | 1) gate_in_ci=1 ;;
+esac
+
+cacheable=0
+uncacheable_reason=""
+cache_dir=""
+key=""
+marker=""
+
+if [ "$gate_in_ci" -eq 1 ]; then
+  uncacheable_reason="CI detected — each job runs its own suite"
+elif ! cache_dir="$(gate_green_dir)"; then
+  uncacheable_reason="no git common dir"
+elif ! gate_green_tree_is_clean; then
+  uncacheable_reason="worktree is dirty; only an exactly-described tree is cacheable"
+elif ! key="$(gate_green_key "$lane" "$@")" || [ -z "$key" ]; then
+  uncacheable_reason="could not compute a content key (tree SHA or go version unreadable)"
+else
+  cacheable=1
+  marker="$cache_dir/$lane.$key.marker"
+fi
+
+if [ "$cacheable" -eq 0 ]; then
+  echo "gate-green: ${lane} is not cacheable (${uncacheable_reason}) — running it." >&2
+elif [ -n "${GATE_GREEN_NO_CACHE:-}" ]; then
+  echo "gate-green: GATE_GREEN_NO_CACHE set — running ${lane} even if it is recorded green." >&2
+elif [ -f "$marker" ]; then
+  recorded_epoch="$(sed -n 's/^recorded_epoch=//p' "$marker" 2>/dev/null | head -1)"
+  case "$recorded_epoch" in
+    '' | *[!0-9]*) recorded_epoch="" ;;
+  esac
+  if [ -n "$recorded_epoch" ]; then
+    now="$(date +%s)"
+    age=$(( now - recorded_epoch ))
+    # A negative age means the marker was written in the future — a clock
+    # step, not a pass this run may lean on. Treat it as a miss.
+    if [ "$age" -ge 0 ] && [ "$age" -lt "$ttl" ]; then
+      echo "gate-green: ${lane} already passed ${age}s ago on this exact tree — not running it again." >&2
+      sed -n 's/^/gate-green:   /p' "$marker" >&2
+      echo "gate-green:   marker=${marker}" >&2
+      echo "gate-green: this is a recorded pass on identical content, not a skipped gate. Set GATE_GREEN_NO_CACHE=1 to force a run." >&2
+      gate_green_prune "$cache_dir" "$ttl"
+      exit 0
+    fi
+  fi
+fi
+
+"$@"
+status=$?
+
+if [ "$status" -eq 0 ] && [ "$cacheable" -eq 1 ]; then
+  if mkdir -p "$cache_dir" 2>/dev/null; then
+    tmp="$marker.tmp.$$"
+    if {
+      echo "lane=$lane"
+      echo "key=$key"
+      echo "tree=$(git rev-parse 'HEAD^{tree}' 2>/dev/null)"
+      echo "commit=$(git rev-parse HEAD 2>/dev/null)"
+      echo "recorded_epoch=$(date +%s)"
+      echo "recorded_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "recorded_by=${GC_SESSION_NAME:-${GC_AGENT:-${USER:-unknown}}}"
+      echo "recorded_in=$(pwd)"
+      echo "go_version=$(go version 2>/dev/null)"
+      echo "command=$*"
+    } >"$tmp" 2>/dev/null; then
+      mv -f "$tmp" "$marker" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+    else
+      rm -f "$tmp" 2>/dev/null
+    fi
+  fi
+  gate_green_prune "$cache_dir" "$ttl"
+fi
+
+exit "$status"

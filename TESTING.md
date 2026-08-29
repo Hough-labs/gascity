@@ -1154,6 +1154,79 @@ are node-local and ephemeral, never committed to Dolt, so extending them
 here would be a no-op). The underlying claim-staleness concern this would
 have addressed is tracked separately under `ga-aw5356`, not here.
 
+#### Per-tree green markers so one tree is not swept twice
+
+The slot cap above rations *concurrent* heavy runs. It does nothing about the
+same lane being run twice in a row on a tree that never changed, and on this
+host that happens on every direct merge. `mol-refinery-patrol`'s merge-push
+step runs the rig's configured `test_command` — `make test-mac`, ~20 minutes
+here — and then pushes; the local pre-push hook execs `make test-mac` again on
+the identical SHA. One observed merge (gascity-3vr, 2026-08-19) held the gate
+for ~45 minutes, roughly 20 of them re-running a suite that had just passed on
+exactly the tree being pushed. A push killed mid-hook also leaves debris — an
+orphaned merge worktree, a stale `index.lock` — so the second run costs more
+than its wall time.
+
+Neither obvious place can hold the fix. The pre-push hook agents actually run
+on this host is untracked, git-excluded local config, and the refinery formula
+lives in the separate gascity-packs repo. `--no-verify` is not on the table
+either: agents do not skip hooks, and the hook is doing correct work. So the
+*lane* becomes idempotent instead. `scripts/gate-green-run` wraps `test-mac`
+(gascity-nuw): the first green run records a marker keyed by the exact content
+it tested, and a second run of that lane on that content within a short window
+reports the recorded pass rather than repeating it.
+
+The key is lane + `HEAD^{tree}` + `go version` + the wrapped command's
+verbatim argv — tracked inputs, the toolchain the tree cannot see, and the
+ambient values the recipe interpolates through `TEST_ENV`. Anything the key
+cannot see disables the cache rather than being quietly ignored: a dirty
+worktree is never cacheable in either direction (porcelain reports paths and
+status letters, not content, and untracked files are compiled like any other
+source), an uncomputable key is not a hit, and `CI`/`GITHUB_ACTIONS` switches
+it off entirely so a workspace-reusing runner cannot inherit a previous job's
+marker. Only exit 0 records; `exit 75` `GATE BUSY` records nothing, being
+INDETERMINATE rather than green.
+
+Markers are honored for `GATE_GREEN_TTL_SECONDS` (default 1800) after the run
+that recorded them, because outcomes are not purely a function of the tree —
+the provider contract waivers that expired on 2026-08-12 and turned two ledger
+tests red (gascity-o0g) are the standing counter-example. The gap this exists
+to collapse is seconds to minutes, so 30 minutes is generous for the real case
+while bounding staleness. `GATE_GREEN_NO_CACHE=1` forces a run for one
+invocation; a green run still records.
+
+They live in the repository's common git dir (`<repo>/.git/gate-green`), so
+every linked worktree of one repo shares them. That sharing is the mechanism,
+not a side effect: a fast-forward merge in the refinery's worktree produces the
+identical tree a polecat's worktree already tested, and identical content is
+identical content regardless of which directory observed it.
+
+The wrapper sits *outside* `gate-slot-run`, and first on the recipe line. The
+two answer different questions — "has this exact content already passed?" and
+"is there a free slot to run it in?" — and asking the cheap one first means a
+cache hit never occupies a slot it does not need, and never gets a spurious
+`GATE BUSY` for a suite it was not going to run.
+
+Scope is `test-mac` alone: that is where the double-run was measured, and the
+only lane where the merge gate and the pre-push hook exec the *same* command.
+On Linux the hook runs `test-fast-parallel` while the gate runs its own
+configured command, so there is no identical-lane pair to collapse. Wrap
+another lane only once that changes.
+
+Covered by `scripts/test-gate-green-run.sh` — the miss/record/hit cycle, every
+key input that must invalidate, every state that disables the cache, the exit
+statuses that must not record, TTL and clock-step handling, pruning, and a
+static assertion that the `test-mac` recipe still routes through the wrapper
+*ahead of* the slot acquire. Two of its cases carry the acceptance criterion
+whole, against real git rather than a stand-in: a lane driven from an actual
+`git push` pre-push hook sees the marker the preceding gate run recorded, and
+a marker recorded in one linked worktree is honored from another — the
+property that makes a fast-forward merge in the refinery's worktree free. It
+runs as the `gate-green-selftest` job inside
+`test-local-parallel` (`fast` and `full` modes), directly rather than through a
+`go test` trampoline, for the same `resourcecensus` reason as
+`push-gate-lock-selftest` above.
+
 ### 2. Testscript (`.txtar` files in `cmd/gc/testdata/`)
 
 Test what the USER sees. Exercise the real CLI entrypoint by re-executing the

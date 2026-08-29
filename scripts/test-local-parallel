@@ -166,6 +166,13 @@ add_local_concurrency_selftest_job() {
   add_job "local-concurrency-selftest" "bash scripts/test-local-concurrency.sh"
 }
 
+# Same census-avoidance rationale again: the per-tree green-marker cache that
+# keeps a refinery direct merge from sweeping an unchanged tree twice
+# (gascity-nuw) is proved by a shell self-test, not a `go test` trampoline.
+add_gate_green_selftest_job() {
+  add_job "gate-green-selftest" "bash scripts/test-gate-green-run.sh"
+}
+
 add_cmd_gc_shards() {
   local label_prefix="$1"
   local gc_fast_unit="$2"
@@ -218,6 +225,7 @@ case "$mode" in
     add_unit_core_job
     add_push_gate_lock_selftest_job
     add_local_concurrency_selftest_job
+    add_gate_green_selftest_job
     add_cmd_gc_shards "unit-cmd-gc" "1" ""
     add_example_shards "unit" "1"
     ;;
@@ -233,6 +241,7 @@ case "$mode" in
     add_unit_core_job
     add_push_gate_lock_selftest_job
     add_local_concurrency_selftest_job
+    add_gate_green_selftest_job
     add_cmd_gc_shards "cmd-gc-process" "0" ""
     add_example_shards "unit" "1"
     add_productmetrics_testhook_job
