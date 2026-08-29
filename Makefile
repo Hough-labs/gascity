@@ -443,7 +443,7 @@ test-ci-policy:
 # top-level tests, examples/bd/dolt one across 273 — and both spawn a
 # subprocess per test, so their cost is `tests x subprocess spawn`, serialized,
 # against one fixed budget. Measured on this Darwin gate they consumed
-# 554-932s (gastown) and 792-1136s (bd/dolt) of a 900s deadline, which decides
+# 554-932s (gastown) and 634-1136s (bd/dolt) of a 900s deadline, which decides
 # the gate by host load rather than by correctness. Bounding -parallel cannot
 # help a package with no intra-binary parallelism to bound, and gascity-cgh
 # already showed a bigger deadline does not converge, so they are sharded.

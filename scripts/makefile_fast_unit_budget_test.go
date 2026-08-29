@@ -116,7 +116,7 @@ func TestSweepPackageListIsSharedAndExcludesEveryShardedPackage(t *testing.T) {
 // gascity-vdhw. examples/gastown and examples/bd/dolt are large, effectively
 // sequential packages that spawn a subprocess per test, so their cost is
 // tests x subprocess spawn against one fixed per-binary deadline. Measured on
-// the Darwin gate they consumed 554-932s and 792-1136s of a 900s budget, which
+// the Darwin gate they consumed 554-932s and 634-1136s of a 900s budget, which
 // makes whether the gate passes a function of host load rather than of
 // correctness. They must therefore leave the sweep and run through the same
 // per-package shard runner cmd/gc uses (gascity-cgh), and a raised -timeout is
