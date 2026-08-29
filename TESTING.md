@@ -553,8 +553,8 @@ checkout, and because the deadline panic dumps whichever test happened to be in
 flight, every occurrence accused a different innocent test and read as a flake
 in it rather than as a package budget problem (gascity-cgh).
 
-`make test` now sweeps `$(UNIT_PKGS_NONCMDGC)` — every unit package except
-`cmd/gc` — and then runs `cmd/gc` as `CMD_GC_UNIT_TOTAL` (default 6) shards
+`make test` now sweeps `$(UNIT_PKGS_SWEEP)` — every unit package except the
+sharded ones — and then runs `cmd/gc` as `CMD_GC_UNIT_TOTAL` (default 6) shards
 through `scripts/test-go-test-shard`, each with its own 15m budget.
 
 Sharding, not a bigger deadline, is what makes this survive load. Measured on
@@ -583,20 +583,58 @@ wall-clock: `cmd/gc` no longer overlaps the rest of the sweep. Use
 `make test-fast-parallel` when you want the same coverage with the shards fanned
 out and are willing to accept that contention.
 
-`make test-mac` shares the same `$(UNIT_PKGS_NONCMDGC)` list and still leaves
+`make test-mac` shares the same `$(UNIT_PKGS_SWEEP)` list and still leaves
 `cmd/gc` entirely to the Mac sharded CI matrix job.
+
+#### The oversized `examples` packages are sharded the same way
+
+`examples/gastown` and `examples/bd/dolt` outgrew the sweep's deadline next
+(gascity-vdhw). They are the same shape as `cmd/gc` but for a different reason:
+both are large and effectively *sequential* — `examples/gastown` has no
+`t.Parallel()` call at all across 247 top-level tests, `examples/bd/dolt` one
+across 273 — and both spawn a subprocess per test. Their cost is therefore
+`tests x subprocess spawn`, serialized, against one fixed budget, and on Darwin
+each fresh-binary exec also pays the Gatekeeper tax measured under gascity-wz1.
+
+Because they have no intra-binary parallelism, bounding `-p` does nothing for
+them; that lever only helps packages that actually overlap. Measured on one
+Darwin host they consumed 554-932s (`examples/gastown`) and 634-1136s
+(`examples/bd/dolt`) against the 900s deadline — a range that straddles the
+wall, so whether the gate passed was decided by host load rather than by
+correctness. Standalone runs at 852s and 1136s confirm the honest serial
+runtime already sits inside the noise margin of its own deadline.
+
+Both packages are therefore in `$(SHARDED_EXAMPLE_PKGS)`, excluded from
+`$(UNIT_PKGS_SWEEP)`, and run as `EXAMPLES_UNIT_TOTAL` (default 4) shards
+through the same `scripts/test-go-test-shard` runner. Four leaves the slowest
+measured standalone run about 284s per shard — over 3x inside the deadline.
+Measured after the split, `examples/gastown` shard 1 of 4 ran in 130s at load
+average ~30.
+
+Unlike `cmd/gc`, these two are **not** covered by a separate Darwin CI job, so
+`make test-mac` has to run the shard loop itself. It chains the sweep and the
+shards with `&&` inside a single `$(SHELL) -c` so the whole target still takes
+exactly one push-gate slot and still fails in under a second on a busy lane.
+
+Three places name this set and must agree: `$(SHARDED_EXAMPLE_PKGS)`, the
+`$(UNIT_PKGS_SWEEP)` grep filter, and `SHARDED_PKGS` in
+`scripts/test-local-parallel` (make cannot source a shell array, so the list is
+genuinely written twice). `TestShardedExamplePackagesAreExcludedFromTheSweep`
+and `TestShardedPackagesMatchTheLocalParallelLane` fail the build if they
+drift — in either direction, since a package listed in one place but not the
+other either runs twice under two deadlines or silently stops being tested.
 
 ### Cross-category runners, timing, and resource isolation
 
 For broad local runs, prefer the repo's sharded wrappers over raw `go test`
 commands. They use the same buckets as CI, run under a scrubbed environment,
-and split single-package bottlenecks such as `cmd/gc` across multiple
-processes.
+and split single-package bottlenecks — `cmd/gc`, `examples/gastown`, and
+`examples/bd/dolt` — across multiple processes.
 
 Use these as the default entry points:
 
 ```bash
-# Fast unit baseline, with cmd/gc split into shards.
+# Fast unit baseline, with cmd/gc and the oversized examples packages sharded.
 make test-fast-parallel
 
 # Full process-backed cmd/gc suite, sharded.

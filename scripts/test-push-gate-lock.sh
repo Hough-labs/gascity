@@ -451,7 +451,7 @@ esac
 # rejected once already — the wrapper landed on the pre-cgh `./...` sweep. Pin
 # the post-cgh body so a future rebase cannot quietly undo gascity-cgh here.
 TEST_SWEEP_LINE="$(grep 'scripts/go-test-observable test --' <<<"$TEST_RECIPE")"
-assert_contains "wiring.make_test_sweep_excludes_cmd_gc" "$TEST_SWEEP_LINE" '$(UNIT_PKGS_NONCMDGC)'
+assert_contains "wiring.make_test_sweep_excludes_sharded_pkgs" "$TEST_SWEEP_LINE" '$(UNIT_PKGS_SWEEP)'
 case "$TEST_SWEEP_LINE" in
     *'./...'*)
         record_fail "wiring.make_test_sweep_drops_dot_dot_dot" \
@@ -460,7 +460,16 @@ case "$TEST_SWEEP_LINE" in
         record_pass "wiring.make_test_sweep_drops_dot_dot_dot" ;;
 esac
 assert_contains "wiring.make_test_mac_shares_the_package_list" \
-    "$(makefile_recipe test-mac)" '$(UNIT_PKGS_NONCMDGC)'
+    "$(makefile_recipe test-mac)" '$(UNIT_PKGS_SWEEP)'
+
+# Darwin runs no separate examples job, so test-mac is the only thing that runs
+# $(SHARDED_EXAMPLE_PKGS) at all (gascity-vdhw). Dropping the loop from this
+# target would not fail anything — the packages would just silently stop being
+# tested on the lane agents actually use.
+assert_contains "wiring.make_test_mac_runs_the_example_shards" \
+    "$(makefile_recipe test-mac)" 'for p in $(SHARDED_EXAMPLE_PKGS)'
+assert_eq "wiring.make_test_mac_takes_exactly_one_slot" \
+    "$(grep -c 'scripts/gate-slot-run' <<<"$(makefile_recipe test-mac)")" "1"
 
 # ---------------- behavioural: the wrapped shard loop actually runs ----------------
 # Taking one slot for the whole loop costs a `$(SHELL) -c '...'`, because
@@ -494,6 +503,8 @@ chmod +x "$SHARD_PROBE/scripts/gate-slot-run" "$SHARD_PROBE/scripts/test-go-test
 {
     printf 'TEST_ENV = env -i PATH="$$PATH" PROBE_LOG="$$PROBE_LOG" PROBE_FAIL_SHARD="$${PROBE_FAIL_SHARD-}"\n'
     printf 'CMD_GC_UNIT_TOTAL ?= 3\n'
+    printf 'SHARDED_EXAMPLE_PKGS = ./examples/one ./examples/two\n'
+    printf 'EXAMPLES_UNIT_TOTAL ?= 2\n'
     printf 'probe:\n'
     awk '
         /^test:/ { in_target = 1; next }
@@ -514,8 +525,12 @@ else
     record_fail "shard_loop.clean_run_succeeds" "make probe failed; log: $(cat "$PROBE_LOG")"
 fi
 assert_eq "shard_loop.takes_one_slot_for_the_whole_loop" "$(grep -c '^ACQUIRE ' "$PROBE_LOG")" "1"
-assert_eq "shard_loop.runs_every_shard"                  "$(grep -c '^SHARD '   "$PROBE_LOG")" "3"
+# 3 cmd/gc shards + EXAMPLES_UNIT_TOTAL shards for each of the two example
+# packages. One slot still covers all of them.
+assert_eq "shard_loop.runs_every_shard"                  "$(grep -c '^SHARD '   "$PROBE_LOG")" "7"
 assert_contains "shard_loop.passes_shard_index_and_total" "$(cat "$PROBE_LOG")" "SHARD 2/3 ./cmd/gc"
+assert_contains "shard_loop.shards_the_first_example_pkg" "$(cat "$PROBE_LOG")" "SHARD 2/2 ./examples/one"
+assert_contains "shard_loop.shards_the_second_example_pkg" "$(cat "$PROBE_LOG")" "SHARD 2/2 ./examples/two"
 assert_contains "shard_loop.keeps_fast_unit_budget"       "$(cat "$PROBE_LOG")" "fast=1 count=1 timeout=15m"
 
 # `|| exit 1` inside the quoted loop is exactly what a quoting slip drops, and
@@ -524,6 +539,67 @@ assert_contains "shard_loop.keeps_fast_unit_budget"       "$(cat "$PROBE_LOG")" 
 ( cd "$SHARD_PROBE" && PROBE_LOG="$PROBE_LOG" PROBE_FAIL_SHARD=2 make probe ) >/dev/null 2>&1
 assert_true "shard_loop.failing_shard_fails_the_gate" test "$?" -ne 0
 assert_eq "shard_loop.failing_shard_stops_the_loop" "$(grep -c '^SHARD ' "$PROBE_LOG")" "2"
+
+# ---------------- behavioural: test-mac's single-slot sweep + shard loop ----------------
+# test-mac is the Darwin lane agents run as their configured test_command, and
+# gascity-vdhw put a shard loop in it for $(SHARDED_EXAMPLE_PKGS). Keeping the
+# fail-in-under-a-second property meant chaining sweep and shards with `&&`
+# inside ONE `$(SHELL) -c` rather than adding a second recipe line, so the
+# whole target is now a single quoted string: the same class of quoting slip
+# the cmd/gc probe above guards, over a recipe that also has to short-circuit.
+MAC_PROBE="$WORK/mac-gate-probe"
+mkdir -p "$MAC_PROBE/scripts"
+cp "$SHARD_PROBE/scripts/gate-slot-run" "$MAC_PROBE/scripts/gate-slot-run"
+cp "$SHARD_PROBE/scripts/test-go-test-shard" "$MAC_PROBE/scripts/test-go-test-shard"
+cat >"$MAC_PROBE/scripts/go-test-observable" <<'PROBE_SWEEP'
+#!/bin/sh
+echo "SWEEP $*" >>"$PROBE_LOG"
+[ -n "${PROBE_FAIL_SWEEP:-}" ] && exit 9
+exit 0
+PROBE_SWEEP
+chmod +x "$MAC_PROBE/scripts/gate-slot-run" "$MAC_PROBE/scripts/test-go-test-shard" \
+    "$MAC_PROBE/scripts/go-test-observable"
+{
+    printf 'TEST_ENV = env -i PATH="$$PATH" PROBE_LOG="$$PROBE_LOG" PROBE_FAIL_SHARD="$${PROBE_FAIL_SHARD-}" PROBE_FAIL_SWEEP="$${PROBE_FAIL_SWEEP-}"\n'
+    printf 'UNIT_PKGS_SWEEP = ./pkg/a ./pkg/b\n'
+    printf 'SHARDED_EXAMPLE_PKGS = ./examples/one ./examples/two\n'
+    printf 'EXAMPLES_UNIT_TOTAL ?= 2\n'
+    printf 'probe:\n'
+    awk '
+        /^test-mac:/ { in_target = 1; next }
+        in_target && /^\t/ { print; next }
+        in_target { exit }
+    ' "$MAKEFILE"
+} >"$MAC_PROBE/Makefile"
+
+PROBE_LOG="$MAC_PROBE/log"
+: >"$PROBE_LOG"
+if ( cd "$MAC_PROBE" && PROBE_LOG="$PROBE_LOG" make probe ) >/dev/null 2>&1; then
+    record_pass "mac_gate.clean_run_succeeds"
+else
+    record_fail "mac_gate.clean_run_succeeds" "make probe failed; log: $(cat "$PROBE_LOG")"
+fi
+assert_eq "mac_gate.takes_one_slot_for_sweep_and_shards" "$(grep -c '^ACQUIRE ' "$PROBE_LOG")" "1"
+assert_eq "mac_gate.runs_the_sweep_once"                 "$(grep -c '^SWEEP '   "$PROBE_LOG")" "1"
+assert_eq "mac_gate.runs_every_example_shard"            "$(grep -c '^SHARD '   "$PROBE_LOG")" "4"
+assert_contains "mac_gate.sweep_keeps_the_package_list"  "$(cat "$PROBE_LOG")" "SWEEP test-mac -- "
+assert_contains "mac_gate.shards_the_first_example_pkg"  "$(cat "$PROBE_LOG")" "SHARD 2/2 ./examples/one"
+assert_contains "mac_gate.shards_the_second_example_pkg" "$(cat "$PROBE_LOG")" "SHARD 2/2 ./examples/two"
+assert_contains "mac_gate.shards_keep_fast_unit_budget"  "$(cat "$PROBE_LOG")" "fast=1 count=1 timeout=15m"
+
+# A red sweep must fail the gate before any shard runs — that is what the `&&`
+# buys, and dropping it would report a green gate off the shards alone.
+: >"$PROBE_LOG"
+( cd "$MAC_PROBE" && PROBE_LOG="$PROBE_LOG" PROBE_FAIL_SWEEP=1 make probe ) >/dev/null 2>&1
+assert_true "mac_gate.failing_sweep_fails_the_gate" test "$?" -ne 0
+assert_eq "mac_gate.failing_sweep_skips_the_shards" "$(grep -c '^SHARD ' "$PROBE_LOG")" "0"
+
+# `|| exit 1` inside the quoted loop is what a quoting slip drops; without it a
+# red example shard would pass the Darwin gate.
+: >"$PROBE_LOG"
+( cd "$MAC_PROBE" && PROBE_LOG="$PROBE_LOG" PROBE_FAIL_SHARD=2 make probe ) >/dev/null 2>&1
+assert_true "mac_gate.failing_shard_fails_the_gate" test "$?" -ne 0
+assert_eq "mac_gate.failing_shard_stops_the_loop" "$(grep -c '^SHARD ' "$PROBE_LOG")" "2"
 
 # ---------------- static wiring assertions against test-local-parallel ----------------
 assert_true "wiring.sources_lib"   grep -q 'push-gate-lock-lib.sh' "$LOCAL_PARALLEL"

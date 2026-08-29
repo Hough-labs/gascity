@@ -10,9 +10,9 @@ Measured 2026-08-26 on `origin/edge-integration` @ 2103ea04f (clean worktree).
 
 | Lane | What it runs | Who runs it |
 |---|---|---|
-| `make test-mac` | `-p=4 -count=1 -timeout 15m $(UNIT_PKGS_NONCMDGC)` — **excludes cmd/gc** | the Darwin pre-push hook; the rig's configured `test_command` |
-| `make test` | the same sweep, **plus** cmd/gc as 6 *sequential* shards | AGENTS.md fallback |
-| `make test-fast-parallel` | shards cmd/gc locally at `LOCAL_TEST_JOBS` | the non-Darwin pre-push branch |
+| `make test-mac` | `-p=4 -count=1 -timeout 15m $(UNIT_PKGS_SWEEP)` — **excludes cmd/gc and `$(SHARDED_EXAMPLE_PKGS)`** — plus those examples packages as 4 *sequential* shards each | the Darwin pre-push hook; the rig's configured `test_command` |
+| `make test` | the same sweep and example shards, **plus** cmd/gc as 6 *sequential* shards | AGENTS.md fallback |
+| `make test-fast-parallel` | shards cmd/gc and the examples packages locally at `LOCAL_TEST_JOBS` | the non-Darwin pre-push branch |
 
 Two facts do most of the adjudication work:
 
@@ -21,13 +21,23 @@ Two facts do most of the adjudication work:
    `uname -s`: Darwin runs `make test-mac`, everything else `make test-fast-parallel`.
    The rig additionally pins `test_command = "make test-mac"` in city.toml
    `[rigs.formula_vars]`. So on this host, **cmd/gc is not in the gate at all.**
+   (gascity-vdhw later added the `$(SHARDED_EXAMPLE_PKGS)` shard loop to
+   `test-mac`, because nothing else on Darwin runs those packages — so unlike
+   cmd/gc they *are* still in the gate, just no longer as one binary.)
 
 2. **`make test`'s sweep phase became byte-identical to `make test-mac`.** Before
    gascity-cgh (961d87935) `make test` was `-p=4 ./...` *including* cmd/gc. After it,
-   both targets run the same `UNIT_PKGS_NONCMDGC` sweep and cmd/gc moved to sequential
+   both targets run the same sweep and cmd/gc moved to sequential
    shards. cgh changed **nothing** about the `test-mac` package set — it renamed
    `MAC_UNIT_PKGS` to `UNIT_PKGS_NONCMDGC`. For the two test-mac-lane beads the only
    relieving change is gascity-6tr's slot cap.
+
+   gascity-vdhw is the first change to that package set: it renamed the list
+   again (`UNIT_PKGS_NONCMDGC` -> `UNIT_PKGS_SWEEP`) and *did* remove two
+   packages from it, `examples/gastown` and `examples/bd/dolt`, which now run
+   as shards on both lanes. A `test-mac` failure in either package dated after
+   that commit is therefore a shard failure, not a sweep failure — check which
+   shard index the log names before adjudicating it against this doc's table.
 
 ## The commit the cmd/gc beads never saw
 

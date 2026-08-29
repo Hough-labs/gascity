@@ -9,6 +9,8 @@ usage: scripts/test-local-parallel <fast|cmd-gc-process|integration|full>
 Environment:
   LOCAL_TEST_JOBS        max concurrent jobs (default: CPU-and-memory-aware)
   CMD_GC_PROCESS_TOTAL  cmd/gc shard count (default: 6)
+  EXAMPLES_UNIT_TOTAL    shard count for each oversized examples package
+                         (default: 4; mirrors the Makefile default)
   GC_TEST_INNER_P        override the per-job GOFLAGS=-p= value (default:
                          outer job budget divided across concurrent jobs)
 USAGE
@@ -90,9 +92,60 @@ add_fsys_compile_job() {
     'tmp=$(mktemp -d); trap '"'"'rm -rf "$tmp"'"'"' EXIT; GOOS=darwin GOARCH=arm64 go test -c -o "$tmp/fsys.test" ./internal/fsys'
 }
 
+# SHARDED_PKGS are the packages too large to run inside the unit-core sweep
+# binary. `go test`'s -timeout is a PER-TEST-BINARY deadline, so one oversized
+# package fails the whole job on its own: cmd/gc first (gascity-cgh), then
+# examples/gastown and examples/bd/dolt (gascity-vdhw), which are effectively
+# sequential and spawn a subprocess per test. Each gets its own shard jobs
+# below instead, and unit-core filters all of them out.
+#
+# This list is duplicated from the Makefile's own filter on purpose — make
+# cannot source a shell array and this script cannot expand a make variable —
+# so TestShardedPackagesMatchTheLocalParallelLane fails the build if the two
+# drift apart.
+SHARDED_PKGS=(./cmd/gc ./examples/gastown ./examples/bd/dolt)
+EXAMPLE_SHARD_TOTAL="${EXAMPLES_UNIT_TOTAL:-4}"
+
+if ! [[ "$EXAMPLE_SHARD_TOTAL" =~ ^[0-9]+$ && "$EXAMPLE_SHARD_TOTAL" -gt 0 ]]; then
+  echo "EXAMPLES_UNIT_TOTAL must be a positive integer" >&2
+  exit 1
+fi
+
+# unit_core_exclusion_regex builds the `grep -v -E` alternation that keeps
+# every sharded package out of the unit-core sweep, anchored the same way the
+# hand-written cmd/gc filter was: full import path, exact match.
+unit_core_exclusion_regex() {
+  local pkg out=""
+  for pkg in "${SHARDED_PKGS[@]}"; do
+    [[ -n "$out" ]] && out+="|"
+    out+="^github.com/gastownhall/gascity/${pkg#./}$"
+  done
+  printf '%s' "$out"
+}
+
 add_unit_core_job() {
   add_job "unit-core" \
-    'GC_FAST_UNIT=1 go test $(go list ./... | grep -v '"'"'^github.com/gastownhall/gascity/cmd/gc$'"'"')'
+    "GC_FAST_UNIT=1 go test \$(go list ./... | grep -v -E '$(unit_core_exclusion_regex)')"
+}
+
+# add_example_shards fans the non-cmd/gc sharded packages out the same way
+# add_cmd_gc_shards does for cmd/gc. Nothing else in this lane runs them once
+# unit-core filters them out, so dropping this would silently stop testing
+# them rather than fail anything.
+add_example_shards() {
+  local label_prefix="$1"
+  local gc_fast_unit="$2"
+  local pkg name i command
+  for pkg in "${SHARDED_PKGS[@]}"; do
+    [[ "$pkg" == "./cmd/gc" ]] && continue
+    name="${pkg#./}"
+    name="${name//\//-}"
+    for i in $(seq 1 "$EXAMPLE_SHARD_TOTAL"); do
+      command="GC_FAST_UNIT=${gc_fast_unit} GO_TEST_COUNT=1 GO_TEST_TIMEOUT=15m"
+      command+=" ./scripts/test-go-test-shard ${pkg} ${i} ${EXAMPLE_SHARD_TOTAL}"
+      add_job "${label_prefix}-${name}-${i}-of-${EXAMPLE_SHARD_TOTAL}" "$command"
+    done
+  done
 }
 
 # Runs as a direct shell job rather than through a `go test` wrapper because a
@@ -166,6 +219,7 @@ case "$mode" in
     add_push_gate_lock_selftest_job
     add_local_concurrency_selftest_job
     add_cmd_gc_shards "unit-cmd-gc" "1" ""
+    add_example_shards "unit" "1"
     ;;
   cmd-gc-process)
     add_cmd_gc_shards "cmd-gc-process" "0" ""
@@ -180,6 +234,7 @@ case "$mode" in
     add_push_gate_lock_selftest_job
     add_local_concurrency_selftest_job
     add_cmd_gc_shards "cmd-gc-process" "0" ""
+    add_example_shards "unit" "1"
     add_productmetrics_testhook_job
     add_integration_jobs
     ;;
