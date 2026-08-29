@@ -1654,6 +1654,16 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 	if err != nil {
 		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing live source workflows", err)
 	}
+	// Convoy-first graph.v2 roots carry gc.input_convoy_id and no
+	// gc.source_bead_id, so the lookup above cannot see them at all and
+	// delete-source reported result=already_clean over a live molecule
+	// (gascity-op7b). Union in the convoy-linked roots before collecting
+	// beads so cleanup acts on every live root for this source.
+	graphRoots, err := sourceworkflow.ListLiveGraphV2Roots(info.store, currentSourceID)
+	if err != nil {
+		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing live graph.v2 workflows", err)
+	}
+	roots = appendUnseenRoots(roots, graphRoots)
 	if err := c.mergeRootMatches(info, roots); err != nil {
 		return nil, c.recordScanFailure(index, info, currentSourceStoreRef, "listing source workflow beads", err)
 	}
@@ -1663,6 +1673,28 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 	}
 	c.anyStoreScanned = true
 	return children, nil
+}
+
+// appendUnseenRoots appends the roots in extra that base does not already
+// contain, matching on bead ID. The source-bead and input-convoy lookups can
+// both reach the same root, so the union must not double-count it into
+// matched_roots.
+func appendUnseenRoots(base, extra []beads.Bead) []beads.Bead {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base))
+	for _, root := range base {
+		seen[root.ID] = struct{}{}
+	}
+	for _, root := range extra {
+		if _, dup := seen[root.ID]; dup {
+			continue
+		}
+		seen[root.ID] = struct{}{}
+		base = append(base, root)
+	}
+	return base
 }
 
 // mergeRootMatches gathers every workflow bead under the given roots in one

@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/convoy"
 )
 
 // ConflictError is returned when a graph workflow launch is blocked by one
@@ -168,8 +169,14 @@ func WorkflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootSt
 
 // ListLiveRoots returns the live (not-closed) workflow roots in store that
 // belong to sourceBeadID, scoped to sourceStoreRef when set. The query
-// indexes on gc.source_bead_id and filters via IsWorkflowRoot so both
-// legacy gc.kind=workflow roots and graph.v2-only roots are visible.
+// indexes on gc.source_bead_id and filters via IsWorkflowRoot, so it sees
+// every root that carries that key — legacy gc.kind=workflow roots and
+// graph.v2 roots alike.
+//
+// It does NOT see convoy-first graph.v2 roots, which carry no
+// gc.source_bead_id at all and so never reach the IsWorkflowRoot filter.
+// Callers that must account for those roots need ListLiveGraphV2Roots as
+// well; see its doc comment for why the key is absent by design.
 func ListLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef string) ([]beads.Bead, error) {
 	sourceBeadID = NormalizeSourceBeadID(sourceBeadID)
 	if store == nil || sourceBeadID == "" {
@@ -189,6 +196,66 @@ func ListLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef
 		}
 		return !WorkflowMatchesSource(root, sourceBeadID, sourceStoreRef, rootStoreRef)
 	})
+	slices.SortFunc(roots, func(a, b beads.Bead) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+	return roots, nil
+}
+
+// ListLiveGraphV2Roots returns the live (not-closed) convoy-first graph.v2
+// workflow roots in store that were launched from sourceBeadID.
+//
+// Convoy-first graph.v2 roots deliberately carry no gc.source_bead_id.
+// engdocs/design/convoy-first-formulas-and-drain-v0.md specifies both "Do not
+// stamp graph.v2 workflow roots with gc.source_bead_id" and, as an acceptance
+// criterion, "Graph.v2 roots use gc.input_convoy_id and gc.graphv2_root_key,
+// not gc.source_bead_id"; internal/sling passes an empty source bead ID on
+// that launch path accordingly. ListLiveRoots indexes on gc.source_bead_id and
+// is therefore structurally blind to these roots, so cleanup that consults it
+// alone reports a false "already clean" over a live molecule.
+//
+// This walks the link that does exist instead: the convoys tracking
+// sourceBeadID, then the live workflow roots whose gc.input_convoy_id names
+// one of them. Beads that carry the convoy link without being workflow roots
+// (a molecule's own step beads) are filtered out via IsWorkflowRoot, so a
+// caller cannot close steps out from under a live run.
+//
+// It is deliberately a second lookup rather than a widening of ListLiveRoots:
+// the legacy source-workflow conflict check is legacy-only by design ("Graph.v2
+// roots do not create new legacy source links"), so callers opt in where
+// graph.v2 visibility is actually correct.
+func ListLiveGraphV2Roots(store beads.Store, sourceBeadID string) ([]beads.Bead, error) {
+	sourceBeadID = NormalizeSourceBeadID(sourceBeadID)
+	if store == nil || sourceBeadID == "" {
+		return nil, nil
+	}
+	convoys, err := convoy.TrackingConvoysForItem(store, sourceBeadID)
+	if err != nil {
+		return nil, fmt.Errorf("listing convoys tracking %s: %w", sourceBeadID, err)
+	}
+	live := beads.HandlesFor(store).Live
+	seen := make(map[string]struct{}, len(convoys))
+	roots := make([]beads.Bead, 0, len(convoys))
+	for _, tracking := range convoys {
+		matched, err := live.List(beads.ListQuery{
+			Metadata: map[string]string{
+				beadmeta.InputConvoyIDMetadataKey: tracking.ID,
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("listing graph.v2 roots for convoy %s: %w", tracking.ID, err)
+		}
+		for _, root := range matched {
+			if !IsWorkflowRoot(root) {
+				continue
+			}
+			if _, dup := seen[root.ID]; dup {
+				continue
+			}
+			seen[root.ID] = struct{}{}
+			roots = append(roots, root)
+		}
+	}
 	slices.SortFunc(roots, func(a, b beads.Bead) int {
 		return strings.Compare(a.ID, b.ID)
 	})

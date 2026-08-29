@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/convoy"
 )
 
 func TestWithLockHonorsContextWhileWaitingForLocalLock(t *testing.T) {
@@ -953,4 +955,140 @@ func TestSnapshotRestoreWorkflowBeadsRestoresMutableState(t *testing.T) {
 	if got := childAfter.Metadata["unrelated_metadata"]; got != "keep" {
 		t.Fatalf("child unrelated metadata = %q, want keep", got)
 	}
+}
+
+func TestListLiveGraphV2RootsFindsConvoyFirstRoot(t *testing.T) {
+	// Regression (gascity-op7b): convoy-first graph.v2 roots deliberately
+	// carry no gc.source_bead_id — engdocs/design/convoy-first-formulas-and-drain-v0.md
+	// specifies "Do not stamp graph.v2 workflow roots with gc.source_bead_id"
+	// and internal/sling passes an empty source bead ID on that launch path.
+	// ListLiveRoots indexes on gc.source_bead_id, so it is structurally blind
+	// to them and delete-source reported result=already_clean over a live
+	// molecule. The link that does exist is gc.input_convoy_id.
+	store := beads.NewMemStore()
+	source, err := store.Create(beads.Bead{Title: "work bead", Type: "task", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+	inputConvoy, err := store.Create(beads.Bead{
+		Title:    "input convoy for " + source.ID,
+		Type:     "convoy",
+		Status:   "open",
+		Metadata: map[string]string{"gc.synthetic": "true"},
+	})
+	if err != nil {
+		t.Fatalf("Create(convoy): %v", err)
+	}
+	if err := convoy.TrackItem(store, inputConvoy.ID, source.ID); err != nil {
+		t.Fatalf("TrackItem: %v", err)
+	}
+	root, err := store.Create(beads.Bead{
+		Title:  "mol-polecat-work",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.InputConvoyIDMetadataKey:   inputConvoy.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+
+	// Precondition: the legacy lookup cannot see this root at all. If this
+	// ever starts returning the root, the stamping design changed and this
+	// whole second lookup should be revisited.
+	legacy, err := ListLiveRoots(store, source.ID, "", "")
+	if err != nil {
+		t.Fatalf("ListLiveRoots: %v", err)
+	}
+	if len(legacy) != 0 {
+		t.Fatalf("ListLiveRoots returned %d roots; want 0 (convoy-first roots carry no gc.source_bead_id)", len(legacy))
+	}
+
+	roots, err := ListLiveGraphV2Roots(store, source.ID)
+	if err != nil {
+		t.Fatalf("ListLiveGraphV2Roots: %v", err)
+	}
+	if len(roots) != 1 || roots[0].ID != root.ID {
+		t.Fatalf("ListLiveGraphV2Roots = %v; want exactly [%s]", rootIDsForTest(roots), root.ID)
+	}
+}
+
+func TestListLiveGraphV2RootsIgnoresClosedRootsAndNonRoots(t *testing.T) {
+	store := beads.NewMemStore()
+	source, err := store.Create(beads.Bead{Title: "work bead", Type: "task", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+	inputConvoy, err := store.Create(beads.Bead{Title: "input convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create(convoy): %v", err)
+	}
+	if err := convoy.TrackItem(store, inputConvoy.ID, source.ID); err != nil {
+		t.Fatalf("TrackItem: %v", err)
+	}
+	// Closed root: cleanup only ever acts on live roots. MemStore.Create
+	// forces status=open, so close it explicitly rather than declaring it
+	// closed at creation (which silently yields an open bead).
+	closedRoot, err := store.Create(beads.Bead{
+		Title:  "finished molecule",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.InputConvoyIDMetadataKey:   inputConvoy.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(closed root): %v", err)
+	}
+	if err := store.Close(closedRoot.ID); err != nil {
+		t.Fatalf("Close(root): %v", err)
+	}
+	// Carries the convoy link but is not a workflow root — a step bead
+	// pointing at its own molecule's input convoy must not be collected as
+	// a root, or delete-source would close steps out from under a live run.
+	if _, err := store.Create(beads.Bead{
+		Title:    "not a root",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.InputConvoyIDMetadataKey: inputConvoy.ID},
+	}); err != nil {
+		t.Fatalf("Create(non-root): %v", err)
+	}
+
+	roots, err := ListLiveGraphV2Roots(store, source.ID)
+	if err != nil {
+		t.Fatalf("ListLiveGraphV2Roots: %v", err)
+	}
+	if len(roots) != 0 {
+		t.Fatalf("ListLiveGraphV2Roots = %v; want none", rootIDsForTest(roots))
+	}
+}
+
+func TestListLiveGraphV2RootsRejectsEmptyInputs(t *testing.T) {
+	store := beads.NewMemStore()
+	roots, err := ListLiveGraphV2Roots(store, "   ")
+	if err != nil {
+		t.Fatalf("ListLiveGraphV2Roots(blank): %v", err)
+	}
+	if len(roots) != 0 {
+		t.Fatalf("blank source bead returned %d roots; want 0", len(roots))
+	}
+	roots, err = ListLiveGraphV2Roots(nil, "bd-1")
+	if err != nil {
+		t.Fatalf("ListLiveGraphV2Roots(nil store): %v", err)
+	}
+	if len(roots) != 0 {
+		t.Fatalf("nil store returned %d roots; want 0", len(roots))
+	}
+}
+
+func rootIDsForTest(roots []beads.Bead) []string {
+	ids := make([]string, 0, len(roots))
+	for _, root := range roots {
+		ids = append(ids, root.ID)
+	}
+	return ids
 }
