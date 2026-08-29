@@ -2742,16 +2742,37 @@ func TestRecordStartCrashDisabledWhenNoRuntimeDir(t *testing.T) {
 // slow-but-healthy setup commands killed mid-flight by the fixed wall-clock
 // deadline (e.g. a large `git worktree add` checkout streaming progress past
 // setup_timeout). With the activity budget enabled, output resets the idle
-// clock, so a command that streams for 3x the idle window and exits 0 must
+// clock, so a command that streams well past the idle window and exits 0 must
 // succeed.
+//
+// The budget below is sized from measurement, not from the sleep literal. The
+// loop's observable output gap is NOT the 0.1s it sleeps: every iteration also
+// forks and execs /bin/sleep, and the measured inter-write gap for this loop
+// shape is p50 203ms, p99 307ms, max 373ms. The original 300ms budget
+// therefore sat *below* the p99 gap — the assertion was already losing at the
+// tail — and the test failed 10-25% of runs on an otherwise healthy machine,
+// taxing every pre-push gate on the rig (gascity-g3q5).
+//
+// Two properties keep this both stable and meaningful, and they trade against
+// each other through the iteration count alone:
+//
+//   - Slack: 3s clears the measured p50 by ~15x and the measured max by ~8x.
+//   - Coverage: total runtime (~5s) still exceeds the idle budget by ~1.7x, so
+//     the pre-fix fixed-deadline behavior this test exists to catch would
+//     still kill the command. Shrinking the loop until it fits inside one idle
+//     window would make the test pass even with the activity budget removed.
 func TestRunSetupCommandActivityStreamingSurvivesIdleWindow(t *testing.T) {
-	ops := &tmuxStartOps{tm: &Tmux{}, setupMaxTimeout: 30 * time.Second}
+	// The ceiling is deliberately out of reach: this test asserts the idle
+	// dimension only, and TestRunSetupCommandActivityCeilingKillsRunaway
+	// covers the ceiling. A tight ceiling here would only add a second way to
+	// flake.
+	ops := &tmuxStartOps{tm: &Tmux{}, setupMaxTimeout: 2 * time.Minute}
 
 	err := ops.runSetupCommand(
 		context.Background(),
-		"for i in 1 2 3 4 5 6 7 8 9 10; do echo progress $i; sleep 0.1; done; exit 0",
+		`i=1; while [ "$i" -le 25 ]; do echo "progress $i"; sleep 0.1; i=$((i+1)); done; exit 0`,
 		map[string]string{},
-		300*time.Millisecond, // idle budget — total runtime (~1s) far exceeds it
+		3*time.Second, // idle budget — total runtime (~5s) still exceeds it
 	)
 	if err != nil {
 		t.Fatalf("streaming setup command killed despite visible progress: %v", err)
