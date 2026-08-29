@@ -15,8 +15,9 @@
 # cache outright (dirty worktree, no git dir, CI), the exit statuses that
 # must NOT record a pass (ordinary failure and gate-busy alike), TTL expiry
 # and clock steps, the GATE_GREEN_NO_CACHE escape hatch, marker
-# auditability, pruning, and a static assertion that the Makefile's test-mac
-# recipe still routes through this wrapper ahead of the slot gate.
+# auditability, the redaction that keeps assignment values out of the marker,
+# pruning, and a static assertion that the Makefile's test-mac recipe still
+# routes through this wrapper ahead of the slot gate.
 #
 # Two cases carry the bead's actual acceptance criterion rather than a
 # component of it, and both use real git rather than a stand-in: a lane run
@@ -46,6 +47,11 @@ assert_contains() {
     local name="$1" haystack="$2" needle="$3"
     if [[ "$haystack" == *"$needle"* ]]; then record_pass "$name"
     else record_fail "$name" "missing '$needle' in: $haystack"; fi
+}
+assert_not_contains() {
+    local name="$1" haystack="$2" needle="$3"
+    if [[ "$haystack" != *"$needle"* ]]; then record_pass "$name"
+    else record_fail "$name" "found '$needle' in: $haystack"; fi
 }
 
 WORK="$(mktemp -d)"
@@ -292,6 +298,31 @@ touch -t 200001010000 "$MARKER_DIR/stale-lane.deadbeef.marker"
 run_gate test-mac lane-cmd alpha
 assert_true "prune.drops_expired_markers" test ! -e "$MARKER_DIR/stale-lane.deadbeef.marker"
 assert_eq   "prune.keeps_the_live_marker" "$(marker_count)" "1"
+
+# ---------------- assignment values never reach the marker ----------------
+# Once make expands $(TEST_ENV) the wrapped argv is a long `env -i VAR=value`
+# list — PATH, HOME, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, OLLAMA_API_KEY.
+# A marker recording that verbatim would persist whatever the caller had
+# exported into a file this script re-prints to stderr on EVERY later cache
+# hit, so a value must never be written. The names must survive, because they
+# are what makes a marker auditable, and the key must still tell two different
+# values apart — redaction is a display rule, not a weakening of the cache.
+reset_markers
+SECRET="s3cr3t-not-for-disk"
+run_gate test-mac lane-cmd "SECRET_TOKEN=$SECRET" -p=4 --
+REDACTED_MARKER="$(cat "$MARKER_DIR"/*.marker 2>/dev/null)"
+assert_not_contains "redaction.marker_omits_the_value"     "$REDACTED_MARKER" "$SECRET"
+assert_contains     "redaction.marker_keeps_the_name"      "$REDACTED_MARKER" "SECRET_TOKEN=<redacted>"
+assert_contains     "redaction.keeps_non_assignment_args"  "$REDACTED_MARKER" "-p=4 --"
+
+before="$(run_count)"; run_gate test-mac lane-cmd "SECRET_TOKEN=$SECRET" -p=4 --
+assert_eq           "redaction.still_hits_the_marker" "$(( $(run_count) - before ))" "0"
+assert_not_contains "redaction.hit_output_omits_the_value" "$(cat "$ERR")" "$SECRET"
+
+# The value is elided from the marker but not from the key: a different value
+# is different content and must run the lane again.
+before="$(run_count)"; run_gate test-mac lane-cmd "SECRET_TOKEN=other-value" -p=4 --
+assert_eq "redaction.value_change_still_reruns" "$(( $(run_count) - before ))" "1"
 
 # ---------------- Makefile wiring ----------------
 # The recipe must ask "already green?" BEFORE it asks for a slot: a cache hit

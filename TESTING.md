@@ -1195,6 +1195,14 @@ to collapse is seconds to minutes, so 30 minutes is generous for the real case
 while bounding staleness. `GATE_GREEN_NO_CACHE=1` forces a run for one
 invocation; a green run still records.
 
+A marker records enough to audit a hit — lane, tree, commit, timestamps, who
+recorded it, toolchain, command shape — but never an assignment's *value*.
+Expanded, the wrapped argv is `env -i PATH=... ANTHROPIC_API_KEY=...
+GOFLAGS=...`, and a marker is re-printed to stderr on every later cache hit, so
+leading `VAR=` words are written `VAR=<redacted>` while `-p=4`, `--` and the
+runner path stay literal. The values still feed the cache key, which is a hash:
+redaction changes what a marker shows, not what it distinguishes.
+
 They live in the repository's common git dir (`<repo>/.git/gate-green`), so
 every linked worktree of one repo shares them. That sharing is the mechanism,
 not a side effect: a fast-forward merge in the refinery's worktree produces the
@@ -1215,7 +1223,8 @@ another lane only once that changes.
 
 Covered by `scripts/test-gate-green-run.sh` — the miss/record/hit cycle, every
 key input that must invalidate, every state that disables the cache, the exit
-statuses that must not record, TTL and clock-step handling, pruning, and a
+statuses that must not record, TTL and clock-step handling, the redaction that
+keeps assignment values off disk, pruning, and a
 static assertion that the `test-mac` recipe still routes through the wrapper
 *ahead of* the slot acquire. Two of its cases carry the acceptance criterion
 whole, against real git rather than a stand-in: a lane driven from an actual

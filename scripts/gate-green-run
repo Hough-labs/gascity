@@ -49,6 +49,18 @@
 #       asked to run; a workspace-reusing self-hosted runner must not
 #       inherit a marker from a previous job.
 #
+# WHAT THE MARKER RECORDS
+#   Enough to audit a hit — lane, tree, commit, timestamps, who recorded it,
+#   toolchain, and the shape of the command — but never an assignment's
+#   VALUE. Once make has expanded $(TEST_ENV) the wrapped argv is `env -i
+#   PATH=... ANTHROPIC_API_KEY=... GOFLAGS=... ...`, so recording argv
+#   verbatim would persist whatever the caller had exported into a file this
+#   script then echoes to stderr on every later cache hit. Leading `VAR=`
+#   words are written `VAR=<redacted>`; everything else (`-p=4`, `--`, the
+#   runner path) is kept literally. The values still take part in the cache
+#   key, which is a hash — redaction is what the marker shows, not what it
+#   distinguishes.
+#
 # WHY A TTL
 #   Test outcomes are not purely a function of the tree. This suite already
 #   contains time-dependent assertions — the provider contract waivers that
@@ -159,6 +171,31 @@ gate_green_key() {
   } | git hash-object --stdin 2>/dev/null
 }
 
+# Renders argv for the marker with every assignment's value elided. The names
+# are the audit value ("which lane, which runner, which flags"); the values are
+# secrets-in-waiting and are already covered by the hash key above, so they are
+# never written to disk. Only a leading, syntactically valid variable name
+# counts as an assignment, so `-p=4` and `--` pass through untouched.
+gate_green_redact_argv() {
+  local _ggr_arg _ggr_name _ggr_out="" _ggr_first=1
+  for _ggr_arg in "$@"; do
+    _ggr_name="${_ggr_arg%%=*}"
+    if [ "$_ggr_name" != "$_ggr_arg" ]; then
+      case "$_ggr_name" in
+        '' | [0-9]* | *[!A-Za-z0-9_]*) ;;
+        *) _ggr_arg="$_ggr_name=<redacted>" ;;
+      esac
+    fi
+    if [ "$_ggr_first" -eq 1 ]; then
+      _ggr_out="$_ggr_arg"
+      _ggr_first=0
+    else
+      _ggr_out="$_ggr_out $_ggr_arg"
+    fi
+  done
+  printf '%s\n' "$_ggr_out"
+}
+
 # Markers are small, but they accumulate one per distinct tree tested. Drop
 # the ones no read could honor any more. Approximate by mtime: the honored
 # check below reads the recorded epoch out of the file, so pruning precision
@@ -239,7 +276,7 @@ if [ "$status" -eq 0 ] && [ "$cacheable" -eq 1 ]; then
       echo "recorded_by=${GC_SESSION_NAME:-${GC_AGENT:-${USER:-unknown}}}"
       echo "recorded_in=$(pwd)"
       echo "go_version=$(go version 2>/dev/null)"
-      echo "command=$*"
+      echo "command=$(gate_green_redact_argv "$@")"
     } >"$tmp" 2>/dev/null; then
       mv -f "$tmp" "$marker" 2>/dev/null || rm -f "$tmp" 2>/dev/null
     else
