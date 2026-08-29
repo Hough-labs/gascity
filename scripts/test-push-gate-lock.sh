@@ -15,7 +15,8 @@
 # FD inheritance (a detached descendant must not pin a slot), dead-holder
 # diagnostics, the missing-flock degrade path, malformed tunables, the
 # GC_PUSH_GATE_NO_CAP escape hatch, both city-root resolution modes, the
-# slots-dir fallback, the non-blocking acquire path, scripts/gate-slot-run's
+# slots-dir fallback, the non-blocking acquire path, FIFO queue discipline
+# (ordering, yielding, reaping, expiry, degrade), scripts/gate-slot-run's
 # busy/propagate/bypass contract, `make test`'s cmd/gc shard loop taking one
 # slot for the whole loop, and static assertions that
 # scripts/test-local-parallel and the Makefile gate targets wire all of it
@@ -318,6 +319,224 @@ else
     record_fail "nonblocking.announces_not_waiting" "could not acquire a slot to set up the case"
 fi
 
+
+# ---------------- queue discipline: an earlier waiter is not overtaken (gascity-3ndv) ----------------
+# The wait loop used to be a poll-and-race: every waiter re-attempted a
+# non-blocking flock every POLL_SECONDS, so at release time whichever waiter's
+# poll happened to land first won, independent of arrival order. Measured
+# consequence: a waiter queued with a 2700s budget was overtaken for its full
+# budget by at least four later arrivals and never ran, and a refinery waiter
+# queued 9 minutes earlier than another lost both slots that freed within 2
+# seconds of each other. Acquire is ordered by a FIFO ticket queue now, and
+# the non-blocking callers (the Makefile gate targets) yield to a queued
+# waiter instead of overtaking it — a free slot that a waiter is already in
+# line for is not theirs to take.
+#
+# Everything here is deterministic: a parked ticket is held by a real process
+# for as long as the case needs it, so no assertion depends on which of two
+# pollers happens to wake first.
+
+# Park a ticket in the queue from a separate process and hold it until the
+# sentinel file is removed. Stands in for a waiter that queued first and has
+# not been served yet — the state the ordering guarantee is about.
+queue_park() {
+    local _qp_dir="$1" _qp_label="$2" _qp_sentinel="$3" _qp_maxwait="${4:-60}"
+    : >"$_qp_sentinel"
+    LIB="$LIB" QDIR="$_qp_dir" LABEL="$_qp_label" SENT="$_qp_sentinel" MAXW="$_qp_maxwait" \
+        bash -c '. "$LIB"; fd=""; ticket=""
+                 push_gate_queue_join "$QDIR" fd ticket "$MAXW" "$LABEL" || exit 1
+                 while [ -e "$SENT" ]; do sleep 0.2; done
+                 push_gate_queue_leave "$fd" "$ticket"' &
+}
+
+queue_has_live_ticket() { [[ "$(push_gate_queue_ahead_count "$1")" -ge 1 ]]; }
+slot_is_held() { ! flock -n "$1" -c 'exit 0' 2>/dev/null; }
+
+# Poll a predicate to a deadline instead of sleeping a guessed interval.
+wait_until() {
+    local _wu_secs="$1"; shift
+    local _wu_deadline=$(( $(date +%s) + _wu_secs ))
+    while :; do
+        if "$@"; then return 0; fi
+        [[ "$(date +%s)" -ge "$_wu_deadline" ]] && return 1
+        sleep 0.2
+    done
+}
+
+QSLOTS="$WORK/queue-slots"
+QUEUE_DIR="$(push_gate_queue_dir "$QSLOTS")"
+assert_eq "queue.dir_sits_under_the_slot_dir" "$QUEUE_DIR" "$QSLOTS/queue"
+
+# Both slots are free for every case below, so any acquire that happens is a
+# real overtake rather than an artifact of contention.
+PARK_SENT="$WORK/park-early.sentinel"
+queue_park "$QUEUE_DIR" "waiter-early" "$PARK_SENT" 60
+PARK_PID=$!
+if wait_until 10 queue_has_live_ticket "$QUEUE_DIR"; then
+    record_pass "queue.join_publishes_a_ticket"
+
+    # A non-blocking caller has no queue position, so it must not take a slot
+    # that a queued waiter is already in line for. This is the case that
+    # matters in production: gate-slot-run defaults to a non-blocking acquire,
+    # so unless these yield, the queue orders nothing.
+    NBQ_OUT="$(LIB="$LIB" DIR="$QSLOTS" PUSH_GATE_MAX_CONCURRENT=2 PUSH_GATE_MAX_WAIT_SECONDS=0 PUSH_GATE_POLL_SECONDS=1 \
+        bash -c '. "$LIB"; push_gate_acquire_slot "$DIR" z holder-NBQ; echo "rc=$?"' 2>&1)"
+    assert_contains "queue.nonblocking_yields_to_queued_waiter" "$NBQ_OUT" "rc=1"
+    assert_contains "queue.nonblocking_yield_says_why"          "$NBQ_OUT" "yielding"
+    # A yield is not a wait that expired; saying "timed out" here would send
+    # an operator hunting a saturated host exactly as the zero-wait bug did.
+    case "$NBQ_OUT" in
+        *"timed out"*)
+            record_fail "queue.nonblocking_yield_never_reports_timeout" "found 'timed out' in output: $NBQ_OUT" ;;
+        *)
+            record_pass "queue.nonblocking_yield_never_reports_timeout" ;;
+    esac
+
+    # A later BLOCKING waiter must queue behind the earlier one rather than
+    # take the free slot, and give up at its own bound while still behind it.
+    LATE_OUT="$(LIB="$LIB" DIR="$QSLOTS" PUSH_GATE_MAX_CONCURRENT=2 PUSH_GATE_MAX_WAIT_SECONDS=3 PUSH_GATE_POLL_SECONDS=1 \
+        bash -c '. "$LIB"; push_gate_acquire_slot "$DIR" z holder-LATE; echo "rc=$?"' 2>&1)"
+    assert_contains "queue.later_waiter_does_not_overtake_earlier" "$LATE_OUT" "rc=1"
+    assert_contains "queue.later_waiter_reports_its_position"      "$LATE_OUT" "queued behind"
+    # "the lane was saturated for my whole bound" and "I never reached the
+    # front" call for different responses, so the timeout must say which.
+    assert_contains "queue.timeout_behind_waiters_names_the_cause" "$LATE_OUT" "still behind"
+else
+    record_fail "queue.join_publishes_a_ticket" "no ticket appeared in $QUEUE_DIR"
+fi
+
+# Head of the queue leaves -> the follower goes through. Ordering must not be
+# able to turn into a deadlock.
+rm -f "$PARK_SENT"
+wait "$PARK_PID" 2>/dev/null || true
+AFTER_OUT="$(LIB="$LIB" DIR="$QSLOTS" PUSH_GATE_MAX_CONCURRENT=2 PUSH_GATE_MAX_WAIT_SECONDS=5 PUSH_GATE_POLL_SECONDS=1 \
+    bash -c '. "$LIB"; push_gate_acquire_slot "$DIR" z holder-AFTER; echo "rc=$?"' 2>&1)"
+assert_contains "queue.follower_acquires_once_head_leaves" "$AFTER_OUT" "rc=0"
+
+# The ticket orders the WAIT only. An acquirer that kept its ticket would
+# block every follower for the length of its gate run — the queue would then
+# serialize the whole lane down to one slot. Assert the drop while the
+# acquirer is still alive and holding the slot, so process exit cannot be what
+# cleans up.
+LEAVE_SENT="$WORK/leave.sentinel"
+: >"$LEAVE_SENT"
+LIB="$LIB" DIR="$QSLOTS" SENT="$LEAVE_SENT" PUSH_GATE_MAX_CONCURRENT=2 PUSH_GATE_MAX_WAIT_SECONDS=10 PUSH_GATE_POLL_SECONDS=1 \
+    bash -c '. "$LIB"; fd=""
+             push_gate_acquire_slot "$DIR" fd holder-LEAVE || exit 1
+             while [ -e "$SENT" ]; do sleep 0.2; done
+             push_gate_release_slot "$fd"' &
+LEAVE_PID=$!
+if wait_until 10 slot_is_held "$QSLOTS/slot-0.lock"; then
+    assert_eq "queue.acquirer_leaves_the_queue" "$(push_gate_queue_ahead_count "$QUEUE_DIR")" "0"
+else
+    record_fail "queue.acquirer_leaves_the_queue" "the queued waiter never took a slot"
+fi
+rm -f "$LEAVE_SENT"
+wait "$LEAVE_PID" 2>/dev/null || true
+
+# An abandoned ticket must not wedge the queue. The kernel drops a dead
+# waiter's flock, so a ticket file nobody holds is by definition abandoned —
+# the same liveness rule the slots themselves use, no PID probing.
+mkdir -p "$QUEUE_DIR"
+GHOST_TICKET="$QUEUE_DIR/t-000000000001-999999999.lock"
+printf '%s %s %s %s\n' "999999999" "1970-01-01T00:00:00Z" "9999999999" "ghost-waiter" >"$GHOST_TICKET"
+GHOST_OUT="$(LIB="$LIB" DIR="$QSLOTS" PUSH_GATE_MAX_CONCURRENT=2 PUSH_GATE_MAX_WAIT_SECONDS=5 PUSH_GATE_POLL_SECONDS=1 \
+    bash -c '. "$LIB"; push_gate_acquire_slot "$DIR" z holder-GHOST; echo "rc=$?"' 2>&1)"
+assert_contains "queue.abandoned_ticket_does_not_block" "$GHOST_OUT" "rc=0"
+assert_false    "queue.abandoned_ticket_is_reaped"      test -e "$GHOST_TICKET"
+
+# A ticket cannot hold the lane past its own declared bound. Without this, one
+# waiter that is alive but wedged (SIGSTOP, a stalled parent) would close the
+# gate for everyone else indefinitely — trading the old unbounded starvation
+# for a new one. Parked with a zero budget, so it is already expired.
+EXP_SENT="$WORK/park-expired.sentinel"
+queue_park "$QUEUE_DIR" "waiter-expired" "$EXP_SENT" 0
+EXP_PID=$!
+if wait_until 10 test -s "$QUEUE_DIR/.seq"; then
+    sleep 1
+    EXP_OUT="$(LIB="$LIB" DIR="$QSLOTS" PUSH_GATE_MAX_CONCURRENT=2 PUSH_GATE_MAX_WAIT_SECONDS=0 PUSH_GATE_POLL_SECONDS=1 \
+        bash -c '. "$LIB"; push_gate_acquire_slot "$DIR" z holder-EXPQ; echo "rc=$?"' 2>&1)"
+    assert_contains "queue.expired_ticket_stops_holding_the_lane" "$EXP_OUT" "rc=0"
+else
+    record_fail "queue.expired_ticket_stops_holding_the_lane" "the expired waiter never joined"
+fi
+rm -f "$EXP_SENT"
+wait "$EXP_PID" 2>/dev/null || true
+
+# Ordering is layered over the slots, not the mutual exclusion itself. If the
+# queue cannot be set up, the gate still has to work — degrade to the old
+# unordered poll rather than failing the caller, the same way a missing
+# flock(1) degrades.
+QBLOCKED="$WORK/queue-blocked-slots"
+mkdir -p "$QBLOCKED"
+: >"$QBLOCKED/queue"
+QB_OUT="$(LIB="$LIB" DIR="$QBLOCKED" PUSH_GATE_MAX_CONCURRENT=2 PUSH_GATE_MAX_WAIT_SECONDS=3 PUSH_GATE_POLL_SECONDS=1 \
+    bash -c '. "$LIB"; push_gate_acquire_slot "$DIR" z holder-QBLOCKED; echo "rc=$?"' 2>&1)"
+assert_contains "queue.unusable_queue_degrades_to_unordered" "$QB_OUT" "rc=0"
+assert_contains "queue.unusable_queue_warns"                 "$QB_OUT" "wait queue"
+
+# Two real waiters competing for one slot, both queued before it frees: the
+# one that queued FIRST must be served first. This is the bead's own scenario
+# end to end rather than a probe of the ordering predicate — on the
+# poll-and-race loop the winner was whichever waiter's poll happened to land
+# first after the release, which is why a refinery waiter queued 9 minutes
+# earlier lost both slots that freed within 2 seconds of each other.
+queue_count_at_least() { [[ "$(push_gate_queue_ahead_count "$1")" -ge "$2" ]]; }
+
+ORDER_SLOTS="$WORK/order-slots"
+ORDER_QUEUE="$(push_gate_queue_dir "$ORDER_SLOTS")"
+ORDER_LOG="$WORK/order.log"
+: >"$ORDER_LOG"
+
+order_waiter() {
+    LIB="$LIB" DIR="$ORDER_SLOTS" LOG="$ORDER_LOG" NAME="$1" \
+    PUSH_GATE_MAX_CONCURRENT=1 PUSH_GATE_MAX_WAIT_SECONDS=30 PUSH_GATE_POLL_SECONDS=1 \
+        bash -c '. "$LIB"; fd=""
+                 if push_gate_acquire_slot "$DIR" fd "$NAME"; then
+                     echo "$NAME" >>"$LOG"
+                     sleep 0.5
+                     push_gate_release_slot "$fd"
+                 fi' &
+}
+
+# The lane is occupied from a SEPARATE process on purpose: a slot FD held in
+# this shell would be inherited by the waiters below, and _push_gate_fd_in_use
+# would make them skip that slot number entirely rather than queue for it.
+PUSH_GATE_MAX_CONCURRENT=1
+mkdir -p "$ORDER_SLOTS"
+ORDER_OCCUPY_SENT="$WORK/order-occupy.sentinel"
+: >"$ORDER_OCCUPY_SENT"
+SENT="$ORDER_OCCUPY_SENT" flock "$ORDER_SLOTS/slot-0.lock" \
+    -c 'while [ -e "$SENT" ]; do sleep 0.2; done' &
+ORDER_OCCUPY_PID=$!
+if wait_until 10 slot_is_held "$ORDER_SLOTS/slot-0.lock"; then
+    order_waiter "waiter-first"
+    ORDER_A=$!
+    if wait_until 10 queue_count_at_least "$ORDER_QUEUE" 1; then
+        order_waiter "waiter-second"
+        ORDER_B=$!
+        if wait_until 10 queue_count_at_least "$ORDER_QUEUE" 2; then
+            # Both are queued, in a known order, and neither can run until
+            # this release — so the outcome is decided by the queue alone.
+            rm -f "$ORDER_OCCUPY_SENT"
+            wait "$ORDER_OCCUPY_PID" 2>/dev/null || true
+            wait "$ORDER_A" 2>/dev/null || true
+            wait "$ORDER_B" 2>/dev/null || true
+            assert_eq "queue.fifo_serves_the_earlier_waiter_first" \
+                "$(tr '\n' ',' <"$ORDER_LOG")" "waiter-first,waiter-second,"
+        else
+            record_fail "queue.fifo_serves_the_earlier_waiter_first" "the second waiter never queued"
+        fi
+    else
+        record_fail "queue.fifo_serves_the_earlier_waiter_first" "the first waiter never queued"
+    fi
+else
+    record_fail "queue.fifo_serves_the_earlier_waiter_first" "could not occupy the lane to set up the case"
+fi
+rm -f "$ORDER_OCCUPY_SENT"
+wait "$ORDER_OCCUPY_PID" 2>/dev/null || true
+PUSH_GATE_MAX_CONCURRENT=2
+
 # ---------------- scripts/gate-slot-run: the Makefile gate wrapper ----------------
 # gascity-6tr: `make test` and `make test-mac` reach go-test-observable
 # directly, so the Darwin lane every agent actually runs bypassed the cap that
@@ -386,6 +605,32 @@ if push_gate_acquire_slot "$GSR_SLOTS" FD_GSR "holder-occupies-lane"; then
 else
     record_fail "gate_slot_run.busy_exits_75" "could not occupy the lane to set up the case"
 fi
+
+# A FREE lane with a waiter already queued for it: the wrapper must still
+# report GATE BUSY rather than overtake the waiter. Exit 75 already means
+# "the lane was not available to you, nothing ran, this is INDETERMINATE",
+# which is exactly true of a yield — so the caller contract does not change,
+# only who gets the slot.
+GSR_QUEUE_DIR="$(push_gate_queue_dir "$GSR_SLOTS")"
+GSR_PARK_SENT="$WORK/gsr-park.sentinel"
+queue_park "$GSR_QUEUE_DIR" "gsr-early-waiter" "$GSR_PARK_SENT" 60
+GSR_PARK_PID=$!
+if wait_until 10 queue_has_live_ticket "$GSR_QUEUE_DIR"; then
+    GSRQ_OUT="$(env "${GSR_ENV[@]}" bash "$GATE_SLOT_RUN" selftest-lane sh -c 'echo SHOULD_NOT_RUN' 2>&1)"
+    GSRQ_RC=$?
+    assert_eq       "gate_slot_run.queued_waiter_exits_75"          "$GSRQ_RC"  "75"
+    assert_contains "gate_slot_run.queued_waiter_says_indeterminate" "$GSRQ_OUT" "INDETERMINATE"
+    case "$GSRQ_OUT" in
+        *SHOULD_NOT_RUN*)
+            record_fail "gate_slot_run.queued_waiter_does_not_run_command" "the gate command ran ahead of a queued waiter" ;;
+        *)
+            record_pass "gate_slot_run.queued_waiter_does_not_run_command" ;;
+    esac
+else
+    record_fail "gate_slot_run.queued_waiter_exits_75" "could not queue a waiter to set up the case"
+fi
+rm -f "$GSR_PARK_SENT"
+wait "$GSR_PARK_PID" 2>/dev/null || true
 PUSH_GATE_MAX_CONCURRENT=2
 
 # ---------------- static wiring assertions against the Makefile gate targets ----------------

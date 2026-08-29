@@ -1095,6 +1095,30 @@ wait maps to `exit 75` (`EX_TEMPFAIL`) — distinct from a real test failure
 and from `scripts/push-ownership-guard.sh`'s unrelated `exit 1` contract for
 bead-ownership staleness.
 
+That wait is **ordered** (gascity-3ndv). Slots bound how many gates run at
+once; they say nothing about who goes next, and until this was fixed the wait
+was a bare poll-and-race — every waiter re-attempted a non-blocking `flock`
+every `PUSH_GATE_POLL_SECONDS`, so whichever waiter's poll happened to land
+first after a release won, independent of how long anyone had waited. That is
+LIFO-ish under sustained arrivals and unbounded for any individual waiter:
+measured on this host, a waiter queued with a 2700s budget was passed over for
+its entire budget by at least four later arrivals, and a refinery waiter
+queued nine minutes earlier than another lost both slots that freed within two
+seconds of each other.
+
+Waiters now take a FIFO ticket under `<slot_dir>/queue` before their first
+sweep, and may take a slot only once no live ticket sits ahead of theirs. A
+ticket is a lock file held for the length of the wait, so ticket liveness works
+exactly like slot liveness — the kernel drops it when the waiter dies, and an
+unlocked ticket is by definition abandoned and reaped on sight. A waiter drops
+its ticket the moment it holds a slot: the ticket orders the *wait*, and
+holding it through the run would block every follower for the length of the
+gate. Each ticket also records its own waiter's deadline and stops counting
+past it, so a waiter that is alive but wedged cannot hold the lane
+indefinitely. If the queue cannot be set up at all, acquire degrades to the old
+unordered poll with a diagnostic rather than failing — ordering is layered
+over the slots, never in place of them.
+
 `scripts/gate-slot-run` defaults that wait to **zero** instead — a
 non-blocking acquire, reported as `not waiting` / `no free slot` rather than a
 timeout, because it never waited. Agents run these gates under harness
@@ -1109,6 +1133,17 @@ immediately. Export a non-zero `PUSH_GATE_MAX_WAIT_SECONDS` to queue instead.
 `gate-slot-run` also bypasses the cap under `CI`/`GITHUB_ACTIONS`, where one
 job per box means there is no cross-invocation contention to bound and a
 spurious 75 would only turn a green build red.
+
+Non-blocking does **not** mean "take any slot that happens to be free". A
+caller that took no ticket holds no position, so it yields to waiters that did:
+a free slot someone is already queued for is not that invocation's to take, and
+`exit 75` now covers "yielded to N queued waiters" as well as "all slots busy".
+From the caller's side these are the same outcome — nothing ran, the result is
+INDETERMINATE, do not relaunch immediately — so the exit contract is unchanged;
+only who gets the slot is. This half is load-bearing rather than a courtesy:
+nearly all real gate traffic arrives through this default non-blocking path, so
+without it the queue would order only the waiters while every fresh arrival
+kept overtaking them, which is the starvation itself.
 
 That 75 survives verbatim only for callers that invoke `test-local-parallel`
 or `gate-slot-run` directly. Under `make` — the four heavy targets,
@@ -1129,9 +1164,11 @@ already lists as required; if it is absent the run proceeds uncapped with a
 warning rather than blocking. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap
 entirely for one invocation.
 
-The slot mechanics — plus the non-blocking acquire path, `gate-slot-run`'s
-busy/propagate/bypass contract, and static assertions that the `test` and
-`test-mac` recipes still route through it — are covered by
+The slot mechanics — plus the non-blocking acquire path, FIFO queue discipline
+(ordering, non-blocking yield, reaping, deadline expiry, and the degrade when
+the queue is unusable), `gate-slot-run`'s busy/propagate/bypass contract, and
+static assertions that the `test` and `test-mac` recipes still route through
+it — are covered by
 `scripts/test-push-gate-lock.sh`, run directly as the
 `push-gate-lock-selftest` job inside `test-local-parallel` itself (`fast` and
 `full` modes) rather than through a `go test` trampoline.

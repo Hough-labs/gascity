@@ -36,6 +36,18 @@
 #   its whole budget discovering it. A caller that genuinely wants to queue
 #   can still export a non-zero PUSH_GATE_MAX_WAIT_SECONDS.
 #
+#   WHAT "BUSY" MEANS SINCE gascity-3ndv
+#     Non-blocking no longer means "take any slot that happens to be free".
+#     Waiters that DID queue hold FIFO tickets, and this lane yields to them:
+#     a free slot someone is already in line for is not this invocation's to
+#     take, so exit 75 can now mean "yielded to N queued waiters" as well as
+#     "all slots busy". Both are the same thing from the caller's side —
+#     nothing ran, the result is INDETERMINATE, do not relaunch immediately —
+#     so the exit contract is unchanged. This matters because nearly all gate
+#     traffic arrives through this default path: if these did not yield, the
+#     queue would order only the waiters while every fresh arrival overtook
+#     them, which is the starvation the queue exists to end.
+#
 # PORTABILITY
 #   bash 3.2-compatible (macOS's stock /bin/bash), matching the floor held by
 #   scripts/push-gate-lock-lib.sh and the sibling runner scripts.
