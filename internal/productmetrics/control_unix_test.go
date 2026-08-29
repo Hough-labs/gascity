@@ -1339,7 +1339,10 @@ func TestDisableAndPurgeExactTokenConflictAndPeerCleanRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			service.deps.disableUploaderWait = testutil.GoroutineRaceTimeout
+			attempts := make(chan struct{}, 1)
+			service.deps.beforeDisableUploaderLock = func() { attempts <- struct{}{} }
 			call := startDisableAndPurge(t, service)
+			receiveUploaderAttempt(t, attempts)
 			owner := waitForMetricsState(t, home, func(state persistedState) bool {
 				return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
 			})
@@ -1662,7 +1665,10 @@ func TestDisableAndPurgeRejectsUnprovenPeerSuccessor(t *testing.T) {
 			}
 			deps.disableUploaderWait = testutil.GoroutineRaceTimeout
 			service := mustOpenTestService(t, deps)
+			attempts := make(chan struct{}, 1)
+			service.deps.beforeDisableUploaderLock = func() { attempts <- struct{}{} }
 			call := startDisableAndPurge(t, service)
+			receiveUploaderAttempt(t, attempts)
 			owner := waitForMetricsState(t, home, func(state persistedState) bool {
 				return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
 			})
@@ -1728,7 +1734,10 @@ func TestDisableAndPurgeRejectsPeerSuccessorReplacedDuringCleanProof(t *testing.
 		return nil
 	}
 	service := mustOpenTestService(t, deps)
+	attempts := make(chan struct{}, 1)
+	service.deps.beforeDisableUploaderLock = func() { attempts <- struct{}{} }
 	call := startDisableAndPurge(t, service)
+	receiveUploaderAttempt(t, attempts)
 	owner := waitForMetricsState(t, home, func(state persistedState) bool {
 		return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
 	})
