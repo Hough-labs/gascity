@@ -261,20 +261,21 @@ func MaterializeSyntheticRepo(dst, commit string) error {
 	if err != nil {
 		return err
 	}
-	marker := syntheticMarker{
-		Schema:      1,
-		Repository:  Repository,
-		Commit:      commit,
-		ContentHash: hash,
-	}
-	data, err := toml.Marshal(marker)
+	// Fingerprint the tree we just wrote from the embedded packs — it is
+	// verified by construction — so the next validation can confirm it is
+	// untouched without re-reading every file. Computed before the marker
+	// exists; syntheticTreeFingerprint excludes the marker for that reason.
+	fingerprint, err := syntheticTreeFingerprint(dst)
 	if err != nil {
-		return fmt.Errorf("marshaling bundled pack cache marker: %w", err)
+		return err
 	}
-	if err := fsys.WriteFileAtomic(fsys.OSFS{}, filepath.Join(dst, syntheticMarkerFile), data, 0o644); err != nil {
-		return fmt.Errorf("writing bundled pack cache marker: %w", err)
-	}
-	return nil
+	return writeSyntheticMarker(dst, syntheticMarker{
+		Schema:          1,
+		Repository:      Repository,
+		Commit:          commit,
+		ContentHash:     hash,
+		TreeFingerprint: fingerprint,
+	})
 }
 
 // ValidateSyntheticRepoFast verifies that dir is a synthetic bundled-pack cache
@@ -371,6 +372,26 @@ func ValidateSyntheticRepo(dir, commit string) error {
 	if marker.ContentHash != wantHash {
 		return fmt.Errorf("bundled pack cache content hash %q does not match current binary %q", marker.ContentHash, wantHash)
 	}
+	// Change-detection gate. The recorded fingerprint describes the tree as it
+	// stood when its contents were last compared byte-for-byte, so a match
+	// means nothing has been created, removed, resized, re-moded or rewritten
+	// since. Re-reading every cached file to reach the same conclusion is what
+	// made this call seconds long on the path every gc invocation takes
+	// (gascity-i7v). A mismatch — or a marker with no fingerprint — falls
+	// through to the full comparison below, which is what detects and reports
+	// corruption for the caller to heal.
+	if marker.TreeFingerprint != "" {
+		if fingerprint, err := syntheticTreeFingerprint(dir); err == nil && fingerprint == marker.TreeFingerprint {
+			return nil
+		}
+	}
+	return validateSyntheticRepoContents(dir)
+}
+
+// validateSyntheticRepoContents compares the materialized file set and every
+// file's content and mode against the packs embedded in this binary. It is the
+// authoritative integrity check and reads every cached file.
+func validateSyntheticRepoContents(dir string) error {
 	if err := validateSyntheticRepoFileSet(dir); err != nil {
 		return err
 	}
@@ -378,6 +399,113 @@ func ValidateSyntheticRepo(dir, commit string) error {
 		if err := validatePackFiles(layout.Pack, filepath.Join(dir, filepath.FromSlash(layout.Subpath))); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// syntheticTreeFingerprint returns a stat-only fingerprint of the materialized
+// file set under dir: each entry's relative path, type, mode, size and
+// modification time. It never opens a file, so it costs a directory walk
+// rather than a full content hash.
+//
+// The marker file is excluded because it carries the fingerprint itself, and
+// because MaterializeSyntheticRepo computes the fingerprint before writing it.
+func syntheticTreeFingerprint(dir string) (string, error) {
+	var entries []string
+	if err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == dir {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == syntheticMarkerFile {
+			return nil
+		}
+		if entry.IsDir() {
+			entries = append(entries, "d "+rel)
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		entries = append(entries, fmt.Sprintf("f %s %04o %d %d %d",
+			rel, info.Mode().Perm(), info.Mode().Type(), info.Size(), info.ModTime().UnixNano()))
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("fingerprinting bundled pack cache: %w", err)
+	}
+	sort.Strings(entries)
+	sum := sha256.Sum256([]byte(strings.Join(entries, "\n")))
+	return fmt.Sprintf("sha256:%x", sum[:]), nil
+}
+
+// SyntheticTreeFingerprintCurrent reports whether dir's marker records a tree
+// fingerprint that still matches the materialized file set. It is false for a
+// marker written before the field existed, which is the signal callers use to
+// decide a backfill stamp is worth taking the cache write lock for.
+func SyntheticTreeFingerprintCurrent(dir string) bool {
+	marker, err := readSyntheticMarker(dir)
+	if err != nil || marker.TreeFingerprint == "" {
+		return false
+	}
+	fingerprint, err := syntheticTreeFingerprint(dir)
+	return err == nil && fingerprint == marker.TreeFingerprint
+}
+
+// StampSyntheticTreeFingerprint records the current tree fingerprint on dir's
+// marker so later validations can take the cheap change-detection path. It
+// backfills caches materialized by a gc build that predates the field.
+//
+// The tree is compared byte-for-byte first: a fingerprint is a statement that
+// this exact file set was verified, so it is never written for a cache that
+// does not currently validate. Callers hold the repo-cache write lock.
+func StampSyntheticTreeFingerprint(dir, commit string) error {
+	if err := ValidateSyntheticRepoFast(dir, commit); err != nil {
+		return err
+	}
+	if err := validateSyntheticRepoContents(dir); err != nil {
+		return err
+	}
+	marker, err := readSyntheticMarker(dir)
+	if err != nil {
+		return err
+	}
+	fingerprint, err := syntheticTreeFingerprint(dir)
+	if err != nil {
+		return err
+	}
+	marker.TreeFingerprint = fingerprint
+	return writeSyntheticMarker(dir, marker)
+}
+
+// readSyntheticMarker decodes dir's bundled-pack cache marker.
+func readSyntheticMarker(dir string) (syntheticMarker, error) {
+	var marker syntheticMarker
+	data, err := os.ReadFile(filepath.Join(dir, syntheticMarkerFile))
+	if err != nil {
+		return marker, fmt.Errorf("reading bundled pack cache marker: %w", err)
+	}
+	if _, err := toml.Decode(string(data), &marker); err != nil {
+		return marker, fmt.Errorf("parsing bundled pack cache marker: %w", err)
+	}
+	return marker, nil
+}
+
+// writeSyntheticMarker atomically replaces dir's bundled-pack cache marker.
+func writeSyntheticMarker(dir string, marker syntheticMarker) error {
+	data, err := toml.Marshal(marker)
+	if err != nil {
+		return fmt.Errorf("marshaling bundled pack cache marker: %w", err)
+	}
+	if err := fsys.WriteFileAtomic(fsys.OSFS{}, filepath.Join(dir, syntheticMarkerFile), data, 0o644); err != nil {
+		return fmt.Errorf("writing bundled pack cache marker: %w", err)
 	}
 	return nil
 }
@@ -452,7 +580,15 @@ type syntheticMarker struct {
 	Repository  string `toml:"repository"`
 	Commit      string `toml:"commit"`
 	ContentHash string `toml:"content_hash"`
+	// TreeFingerprint is a stat-only fingerprint of the materialized file set,
+	// recorded when the tree was last verified byte-for-byte. It is advisory:
+	// an empty value (a marker written before this field existed) simply costs
+	// the full comparison, so old and new gc builds share a cache safely.
+	TreeFingerprint string `toml:"tree_fingerprint,omitempty"`
 }
+
+// syntheticTreeFingerprintTOMLKey is the marker key holding TreeFingerprint.
+const syntheticTreeFingerprintTOMLKey = "tree_fingerprint"
 
 type fileEntry struct {
 	data []byte

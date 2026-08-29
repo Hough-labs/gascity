@@ -244,6 +244,7 @@ func ensureRequiredBuiltinSourcesCached(cityPath string) error {
 			return fmt.Errorf("resolving cache path for bundled %s pack: %w", name, err)
 		}
 		if builtinpacks.ValidateSyntheticRepo(cachePath, commit) == nil {
+			backfillBundledCacheTreeFingerprint(cachePath, commit)
 			continue
 		}
 		if _, err := packman.EnsureRepoInCache(cityPath, source, commit); err != nil {
@@ -251,6 +252,34 @@ func ensureRequiredBuiltinSourcesCached(cityPath string) error {
 		}
 	}
 	return nil
+}
+
+// backfillBundledCacheTreeFingerprint records the change-detection fingerprint
+// on a cache whose marker predates it, so subsequent invocations validate the
+// cache by a stat walk instead of re-reading every file (gascity-i7v).
+//
+// The caller has just validated the cache in full, which is the precondition
+// StampSyntheticTreeFingerprint re-checks under the lock. This runs at most
+// once per cache directory per binary: once the fingerprint is current the
+// guard is a stat walk and no lock is taken, which is what keeps the warm
+// readiness pass lock-free.
+//
+// Best-effort by construction: the fingerprint is an optimization, so a cache
+// root that cannot be locked or written (a read-only or concurrently-repaired
+// cache) simply leaves the next invocation on the full comparison — the same
+// behavior as before this fingerprint existed. It is never a reason to fail a
+// readiness pass whose actual work already succeeded.
+func backfillBundledCacheTreeFingerprint(cachePath, commit string) {
+	if builtinpacks.SyntheticTreeFingerprintCurrent(cachePath) {
+		return
+	}
+	root, err := packman.RepoCacheRoot()
+	if err != nil {
+		return
+	}
+	_, _ = config.WithRepoCacheWriteLock(root, func() (string, error) {
+		return "", builtinpacks.StampSyntheticTreeFingerprint(cachePath, commit)
+	})
 }
 
 func requiredBuiltinSourcesUsable(cityPath string) bool {
