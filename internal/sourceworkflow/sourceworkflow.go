@@ -224,6 +224,13 @@ func ListLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef
 // the legacy source-workflow conflict check is legacy-only by design ("Graph.v2
 // roots do not create new legacy source links"), so callers opt in where
 // graph.v2 visibility is actually correct.
+//
+// A graph.v2 root poured on a multi-member convoy is shared by every member,
+// so it is returned for each of them. That is intentional: the root really is
+// live for this bead, and reporting it lets a caller disclose the full blast
+// radius (delete-source previews the matched roots and bead count before any
+// --apply). Hiding a shared root would reinstate the silent false "already
+// clean" this lookup exists to remove.
 func ListLiveGraphV2Roots(store beads.Store, sourceBeadID string) ([]beads.Bead, error) {
 	sourceBeadID = NormalizeSourceBeadID(sourceBeadID)
 	if store == nil || sourceBeadID == "" {

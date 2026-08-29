@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -1091,4 +1092,117 @@ func rootIDsForTest(roots []beads.Bead) []string {
 		ids = append(ids, root.ID)
 	}
 	return ids
+}
+
+func TestListLiveGraphV2RootsReturnsSharedRootForEveryConvoyMember(t *testing.T) {
+	// A graph.v2 root poured on a multi-member convoy is shared by all of
+	// them, so each member resolves to it. Pinned deliberately: the
+	// alternative (hiding a shared root) would reinstate the silent false
+	// "already clean" this lookup exists to remove. Callers disclose the
+	// blast radius instead — delete-source previews matched roots and bead
+	// counts before --apply.
+	store := beads.NewMemStore()
+	first, err := store.Create(beads.Bead{Title: "member one", Type: "task", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("Create(first): %v", err)
+	}
+	second, err := store.Create(beads.Bead{Title: "member two", Type: "task", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("Create(second): %v", err)
+	}
+	batch, err := store.Create(beads.Bead{Title: "batch convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create(convoy): %v", err)
+	}
+	for _, member := range []string{first.ID, second.ID} {
+		if err := convoy.TrackItem(store, batch.ID, member); err != nil {
+			t.Fatalf("TrackItem(%s): %v", member, err)
+		}
+	}
+	root, err := store.Create(beads.Bead{
+		Title:  "shared molecule",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.InputConvoyIDMetadataKey:   batch.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+
+	for _, member := range []string{first.ID, second.ID} {
+		roots, err := ListLiveGraphV2Roots(store, member)
+		if err != nil {
+			t.Fatalf("ListLiveGraphV2Roots(%s): %v", member, err)
+		}
+		if len(roots) != 1 || roots[0].ID != root.ID {
+			t.Fatalf("member %s resolved to %v; want [%s]", member, rootIDsForTest(roots), root.ID)
+		}
+	}
+}
+
+func TestListLiveGraphV2RootsDeduplicatesRootAcrossConvoys(t *testing.T) {
+	// Two convoys can track the same bead (a re-pour mints a fresh one-item
+	// convoy while the previous one is still open). A root reachable through
+	// more than one of them must be reported once, or delete-source would
+	// double-count it into matched_roots.
+	store := beads.NewMemStore()
+	source, err := store.Create(beads.Bead{Title: "work bead", Type: "task", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("Create(source): %v", err)
+	}
+	convoyA, err := store.Create(beads.Bead{Title: "convoy a", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create(convoyA): %v", err)
+	}
+	convoyB, err := store.Create(beads.Bead{Title: "convoy b", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create(convoyB): %v", err)
+	}
+	for _, c := range []string{convoyA.ID, convoyB.ID} {
+		if err := convoy.TrackItem(store, c, source.ID); err != nil {
+			t.Fatalf("TrackItem(%s): %v", c, err)
+		}
+	}
+	sharedRoot, err := store.Create(beads.Bead{
+		Title:  "root reachable from both convoys",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.InputConvoyIDMetadataKey:   convoyA.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	secondRoot, err := store.Create(beads.Bead{
+		Title:  "root from the re-pour",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.InputConvoyIDMetadataKey:   convoyB.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(secondRoot): %v", err)
+	}
+
+	roots, err := ListLiveGraphV2Roots(store, source.ID)
+	if err != nil {
+		t.Fatalf("ListLiveGraphV2Roots: %v", err)
+	}
+	if len(roots) != 2 {
+		t.Fatalf("ListLiveGraphV2Roots = %v; want both roots exactly once", rootIDsForTest(roots))
+	}
+	got := rootIDsForTest(roots)
+	if !slices.IsSorted(got) {
+		t.Fatalf("roots %v are not sorted by ID", got)
+	}
+	if !slices.Contains(got, sharedRoot.ID) || !slices.Contains(got, secondRoot.ID) {
+		t.Fatalf("roots = %v; want %s and %s", got, sharedRoot.ID, secondRoot.ID)
+	}
 }
