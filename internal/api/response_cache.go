@@ -27,12 +27,35 @@ var timeBucketResponseCacheTTL = 2 * time.Second
 // the shared cache expects an event index makes an entry survive across the
 // event-sequence churn of a busy city while still expiring on a wall-clock
 // TTL.
-func responseCacheTimeBucket(now time.Time) uint64 {
+//
+// The window is counted from this Server's own origin, not from the Unix
+// epoch. Dividing absolute epoch nanoseconds placed every boundary on a fixed
+// multiple of the TTL, so a boundary could fall between two requests however
+// wide the TTL was — widening it only made that rarer. A caller pinning a
+// one-hour TTL to hold two requests in one bucket still got a rebuild whenever
+// the pair straddled a wall-clock hour boundary (gascity-hqj0). Anchoring to
+// the origin makes the first window a full TTL long, and — because both
+// instants carry monotonic readings — leaves the generation immune to
+// wall-clock steps.
+//
+// A zero origin — a Server built as a bare struct literal rather than through
+// newServer — counts from the Unix epoch, which is exactly the absolute
+// behavior this had before it took an origin. An instant at or before the
+// origin belongs to the first window.
+func (s *Server) responseCacheTimeBucket(now time.Time) uint64 {
 	ttl := timeBucketResponseCacheTTL
 	if ttl <= 0 {
 		return uint64(now.UnixNano())
 	}
-	return uint64(now.UnixNano() / int64(ttl))
+	origin := s.responseCacheBucketOrigin
+	if origin.IsZero() {
+		origin = time.Unix(0, 0)
+	}
+	elapsed := now.Sub(origin)
+	if elapsed < 0 {
+		return 0
+	}
+	return uint64(elapsed / ttl)
 }
 
 // responseCacheMaxEntries caps the in-memory cache. Query-parameter

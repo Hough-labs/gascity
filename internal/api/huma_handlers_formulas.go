@@ -224,7 +224,7 @@ func (s *Server) humaHandleFormulaFeed(_ context.Context, input *FormulaFeedInpu
 	// endpoint has no blocking variant, so there is no strict-freshness
 	// caller to bypass for (same lever as /status in gascity#3186).
 	cacheKey := "formula-feed?" + scopeKind + "|" + scopeRef + "|" + strconv.Itoa(input.Limit)
-	bucket := responseCacheTimeBucket(time.Now())
+	bucket := s.responseCacheTimeBucket(time.Now())
 	if body, ok := cachedResponseAs[formulaFeedBody](s, cacheKey, bucket); ok {
 		return &struct {
 			Body formulaFeedBody

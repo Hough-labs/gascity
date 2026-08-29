@@ -46,6 +46,67 @@ func (s *countingStore) ListByAssignee(assignee, status string, limit int) ([]be
 	return s.Store.ListByAssignee(assignee, status, limit)
 }
 
+// TestResponseCacheTimeBucketAnchorsToServerOrigin pins gascity-hqj0: the time
+// bucket counts TTL-wide windows from the Server's own origin, never from
+// absolute Unix-epoch multiples. Two instants milliseconds apart that straddle
+// a wall-clock hour boundary must share a bucket under an hour-wide TTL. Under
+// the old absolute division they did not, so every "pin a wide TTL to hold one
+// bucket" cache test below carried a failure window once an hour, as wide as
+// its first request was slow.
+func TestResponseCacheTimeBucketAnchorsToServerOrigin(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
+
+	// The reported failure: a /status request served at 20:59:58.5 whose
+	// repeat landed just after 21:00:00.
+	origin := time.Date(2026, 8, 28, 20, 59, 58, int(500*time.Millisecond), time.UTC)
+	s := &Server{responseCacheBucketOrigin: origin}
+	base := s.responseCacheTimeBucket(origin)
+
+	tests := []struct {
+		name string
+		now  time.Time
+		want uint64
+	}{
+		{"at the origin", origin, base},
+		{"across the absolute hour boundary", origin.Add(1500 * time.Millisecond), base},
+		{"last instant of the window", origin.Add(time.Hour - time.Nanosecond), base},
+		{"one full TTL on", origin.Add(time.Hour), base + 1},
+		{"two full TTLs on", origin.Add(2 * time.Hour), base + 2},
+		{"before the origin", origin.Add(-time.Minute), base},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := s.responseCacheTimeBucket(tc.now); got != tc.want {
+				t.Errorf("bucket(%s) = %d, want %d", tc.now.Format(time.RFC3339Nano), got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResponseCacheTimeBucketZeroOriginCountsFromEpoch covers the guard for a
+// Server built as a bare struct literal, which several tests in this package
+// do: a zero origin counts from the Unix epoch — the behavior the bucket had
+// before it took an origin — rather than saturating time.Time.Sub at the
+// maximum Duration, which would freeze the generation and make the cache
+// never roll.
+func TestResponseCacheTimeBucketZeroOriginCountsFromEpoch(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	t.Cleanup(func() { timeBucketResponseCacheTTL = oldTTL })
+
+	s := &Server{}
+	now := time.Date(2026, 8, 28, 20, 59, 58, 0, time.UTC)
+	got := s.responseCacheTimeBucket(now)
+	if want := uint64(now.UnixNano() / int64(time.Hour)); got != want {
+		t.Fatalf("zero-origin bucket = %d, want %d (absolute epoch division)", got, want)
+	}
+	if next := s.responseCacheTimeBucket(now.Add(time.Hour)); next != got+1 {
+		t.Fatalf("zero-origin bucket one TTL on = %d, want %d", next, got+1)
+	}
+}
+
 // TestHandleStatusCachesAcrossIndexChanges pins the gascity#3186 fix: /status
 // keys its response cache on a wall-clock TTL bucket, not the event sequence,
 // so a busy city (whose sequence advances every poll) still hits the cache
@@ -55,8 +116,13 @@ func (s *countingStore) ListByAssignee(assignee, status string, limit int) ([]be
 func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 	// Pin a wide TTL so every request in this test lands in the same time
 	// bucket; this isolates the "index churn must not bust the cache" property
-	// from wall-clock bucket-boundary timing. The TTL-expiry/staleness bound is
-	// covered separately by TestHandleStatusCacheExpiresOnTTL. The TTL floor is
+	// from wall-clock bucket-boundary timing. The isolation holds only because
+	// the bucket counts windows from the Server's own origin
+	// (responseCacheTimeBucket): dividing absolute epoch nanoseconds put a
+	// boundary on every wall-clock hour however wide the TTL was, and this test
+	// failed whenever its two requests straddled one (gascity-hqj0). The
+	// TTL-expiry/staleness bound is covered separately by
+	// TestHandleStatusCacheExpiresOnTTL. The TTL floor is
 	// pinned off so the bucket cache alone carries the assertion; the floor's
 	// own behavior is covered by
 	// TestHandleStatusServesRecentResponseDespiteIndexAdvance.

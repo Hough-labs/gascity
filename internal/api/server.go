@@ -96,6 +96,13 @@ type Server struct {
 	responseCacheMu      sync.Mutex
 	responseCacheEntries map[string]responseCacheEntry
 
+	// responseCacheBucketOrigin anchors the time-bucket generation shared by
+	// the /status, /formulas/feed and all=true /beads caches
+	// (responseCacheTimeBucket). Latched once at construction so bucket
+	// boundaries fall one TTL apart from this Server's start instead of on
+	// absolute wall-clock multiples of the TTL.
+	responseCacheBucketOrigin time.Time
+
 	// storeHealth caches the on-disk size walk and maintenance-log read
 	// for /v0/status's StoreHealth block. Refreshed on expiry; missing
 	// store directories produce a zero-value entry so repeated requests
@@ -250,13 +257,14 @@ func NewReadOnly(state State) *Server {
 func newServer(state State, readOnly bool) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
-		state:          state,
-		mux:            mux,
-		readOnly:       readOnly,
-		idem:           newIdempotencyCache(30 * time.Minute),
-		rigIdem:        newRigIdemIndex(),
-		webhookDedup:   newWebhookDedupCache(defaultWebhookDedupTTL),
-		webhookLimiter: newWebhookRateLimiter(),
+		state:                     state,
+		mux:                       mux,
+		readOnly:                  readOnly,
+		idem:                      newIdempotencyCache(30 * time.Minute),
+		rigIdem:                   newRigIdemIndex(),
+		webhookDedup:              newWebhookDedupCache(defaultWebhookDedupTTL),
+		webhookLimiter:            newWebhookRateLimiter(),
+		responseCacheBucketOrigin: time.Now(),
 	}
 	// Latch the rollout snapshot once: prefer the State's boot latch (the
 	// production controllerState); fall back to resolving from Config() for

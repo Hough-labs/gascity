@@ -56,7 +56,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	var bucket uint64
 	if input.All && !blocking {
 		cacheKey = cacheKeyFor("beads", input)
-		bucket = responseCacheTimeBucket(time.Now())
+		bucket = s.responseCacheTimeBucket(time.Now())
 		if body, ok := cachedResponseAs[ListBody[beads.Bead]](s, cacheKey, bucket); ok {
 			return &ListOutput[beads.Bead]{
 				Index:     s.latestIndex(),
