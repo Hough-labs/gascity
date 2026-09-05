@@ -2,6 +2,7 @@ package sling
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -561,5 +562,38 @@ extends = ["plain-base"]
 	// that follows surfaces the real error.
 	if got := declaredBriefVars("no-such-formula", []string{dir}); len(got) != 0 {
 		t.Errorf("unloadable formula: want no declared vars, got %v", got)
+	}
+}
+
+// failingQuerier fails every Get, standing in for a transient store fault on
+// the read the carry depends on.
+type failingQuerier struct{ err error }
+
+func (f failingQuerier) Get(string) (beads.Bead, error) { return beads.Bead{}, f.err }
+
+// TestResolveBeadBriefCarryHintsWhenBeadUnreadable pins that an unreadable bead
+// is reported rather than silently skipped. This path DELIVERS the brief now,
+// so falling silent here would let a formula plan against a bare title with no
+// signal — the exact failure the original note existed to surface.
+func TestResolveBeadBriefCarryHintsWhenBeadUnreadable(t *testing.T) {
+	env := newBriefTestEnv(t, map[string]string{"plan-context": briefFixtureContextOnly})
+	opts := SlingOpts{Target: env.agent, BeadOrFormula: "tb-unreadable"}
+
+	carry := resolveBeadBriefCarry(opts, env.deps, failingQuerier{err: errors.New("dolt: connection refused")}, "tb-unreadable", "plan-context")
+
+	if carry.Hint == "" {
+		t.Fatal("unreadable bead: want a hint, got silence")
+	}
+	if !strings.Contains(carry.Hint, "tb-unreadable") || !strings.Contains(carry.Hint, "connection refused") {
+		t.Errorf("hint should name the bead and the cause: %q", carry.Hint)
+	}
+	if len(carry.Vars) != 0 {
+		t.Errorf("unreadable bead must carry nothing, got %v", carry.Vars)
+	}
+	// A caller who supplied the var owns the context, so an unreadable bead is
+	// not their problem and must stay silent.
+	optsWithVar := SlingOpts{Target: env.agent, BeadOrFormula: "tb-unreadable", Vars: []string{"context_path=/caller/bundle"}}
+	if c := resolveBeadBriefCarry(optsWithVar, env.deps, failingQuerier{err: errors.New("boom")}, "tb-unreadable", "plan-context"); c.Hint != "" {
+		t.Errorf("caller-supplied context_path should stay silent, got %q", c.Hint)
 	}
 }

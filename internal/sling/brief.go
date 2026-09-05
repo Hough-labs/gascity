@@ -84,7 +84,13 @@ func resolveBeadBriefCarry(opts SlingOpts, deps SlingDeps, querier BeadQuerier, 
 	}
 	bead, err := querier.Get(beadID)
 	if err != nil {
-		return beadBriefCarry{}
+		// Do NOT fall silent here. This path now DELIVERS the brief rather than
+		// merely warning that it was dropped, so an unreadable bead means the
+		// formula may plan against a bare title — the exact failure the old note
+		// existed to surface. The hint is only appended when the attach itself
+		// succeeded, so a genuinely missing bead still fails loudly on the
+		// attach instead of producing a spurious note here.
+		return beadBriefCarry{Hint: briefCarryFailedHint(beadID, err)}
 	}
 	brief := formatBeadBrief(bead)
 	if brief == "" {
