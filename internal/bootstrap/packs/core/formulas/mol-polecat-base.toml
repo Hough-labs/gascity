@@ -180,15 +180,29 @@ Do the actual implementation work.
 - Keep changes scoped to the assigned issue
 - Don't gold-plate or scope-creep
 
-**If resuming a rejected branch:** Read `metadata.rejection_reason`
-from load-context. Focus on fixing the specific issue that caused
-rejection — don't redo everything.
+**Read the brief before you write any code.** Steps run in independent
+shell contexts, and this step is routinely a session's FIRST action: a
+restart — yours via `gc runtime request-restart`, a context-pressure drain,
+or a controller respawn — pours a fresh session straight in here, and
+whatever `load-context` read lives only as long as the session that read
+it. So recover the brief from the bead rather than working from the branch
+state, the step text, or what you think you remember:
 
-Derive your work bead in this shell context:
 ```bash
 CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
 WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+gc bd show "$WORK_BEAD_ID"                                       # description, notes, acceptance criteria
+gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].design // empty'  # design, when the operator wrote one
+gc bd show "$WORK_BEAD_ID" --json | jq '.[0].metadata'           # branch, work_dir, rejection_reason
 ```
+
+The description is what to build; `design` and `acceptance_criteria`, when
+set, are the contract you will be reviewed against. Where the bead and your
+recollection disagree, the bead wins.
+
+**If `metadata.rejection_reason` is set:** the refinery rejected a prior
+attempt and that branch still exists. Fix the specific issue it names —
+don't redo everything.
 
 **Commit frequently with detailed messages.** Every commit gets a
 subject AND a body. The body is what makes the repo navigable a year
@@ -262,7 +276,22 @@ Review your changes and verify they work.
 **Config: build_command = {{build_command}}**
 **Config: test_command = {{test_command}}**
 
-**1. Review the diff:**
+**1. Recover what you are reviewed against:**
+
+This step can be a fresh session's first action too, so read the contract
+from the bead instead of trusting a `load-context` that may have run in a
+session that is gone:
+```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+gc bd show "$WORK_BEAD_ID"                                       # description, notes, acceptance criteria
+gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].design // empty'  # design, when the operator wrote one
+```
+
+Each acceptance criterion is a claim you must be able to evidence from the
+checks below. A criterion you cannot evidence is not done.
+
+**2. Review the diff:**
 ```bash
 git diff origin/{{base_branch}}...HEAD
 git log --oneline origin/{{base_branch}}..HEAD
@@ -272,7 +301,7 @@ git diff --stat origin/{{base_branch}}...HEAD
 Check for: bugs, security issues, style violations, missing error handling,
 debug cruft, unintended file changes. Fix anything you find.
 
-**2. Run quality checks (skip empty commands):**
+**3. Run quality checks (skip empty commands):**
 ```bash
 {{setup_command}}
 {{typecheck_command}}
@@ -284,7 +313,7 @@ debug cruft, unintended file changes. Fix anything you find.
 **ALL CHECKS MUST PASS.** If your change caused the failure, fix it.
 If pre-existing, file a bead.
 
-**3. Ensure everything is committed:**
+**4. Ensure everything is committed:**
 ```bash
 git status                  # Must be clean
 git log origin/{{base_branch}}..HEAD --oneline  # Must show your commits
