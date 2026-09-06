@@ -1,7 +1,6 @@
 package bootstrap
 
 import (
-	"context"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -21,18 +20,7 @@ func coreFormulaSearchPaths(t *testing.T) []string {
 
 func compileCorePolecatReport(t *testing.T) *formula.Recipe {
 	t.Helper()
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
-
-	recipe, err := formula.Compile(context.Background(), "mol-polecat-report", coreFormulaSearchPaths(t), map[string]string{
-		"convoy_id":   "gc-convoy",
-		"base_branch": "main",
-	})
-	if err != nil {
-		t.Fatalf("compile mol-polecat-report: %v", err)
-	}
-	return recipe
+	return compileCoreFormula(t, "mol-polecat-report")
 }
 
 func TestCoreMolPolecatReportCompilesWriteReportTerminalStep(t *testing.T) {
