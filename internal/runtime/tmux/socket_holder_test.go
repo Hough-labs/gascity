@@ -77,19 +77,75 @@ func TestObserveNamedSocketRefusedConsultsHolder(t *testing.T) {
 	}
 }
 
-// TestObserveNamedSocketAbsentPathSkipsHolder keeps the common cold start
-// cheap: a socket that is not on disk cannot be held, so the process-table
-// observation must not run.
-func TestObserveNamedSocketAbsentPathSkipsHolder(t *testing.T) {
-	err := observeNamedSocketUsing(context.Background(), "missing-socket",
-		func(string) (os.FileInfo, error) { return nil, os.ErrNotExist },
-		func(context.Context, string) (net.Conn, error) { return nil, syscall.ECONNREFUSED },
-		func(context.Context, string) socketHolderState {
-			t.Fatal("holder observation ran for an absent socket")
-			return socketHolderUnknown
+// TestObserveNamedSocketAbsentPathConsultsHolder pins the fix for
+// gascity-3z7d. This test previously asserted the opposite — that an absent
+// socket file "cannot be held", so the holder observation was skipped as an
+// optimisation. That premise is false and was measured false on 2026-09-08:
+// `rm` a live tmux server's socket and the server keeps running with every
+// session still bound to it; only the path to it is gone.
+//
+// That made the absent-path branch the one route by which the preflight
+// authorized a cold start over a live server, which binds a second server and
+// orphans the fleet. It is also self-perpetuating: an unlinked-but-live socket
+// is exactly the residue a clobber leaves, so the branch re-armed the very
+// failure the rest of this file prevents.
+//
+// Cost of consulting the holder here is one process-table read on the genuine
+// cold-start path (city start). Cost of skipping it was the fleet.
+func TestObserveNamedSocketAbsentPathConsultsHolder(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		holder     socketHolderState
+		wantSafe   bool
+		wantReason string
+	}{
+		{
+			name:     "nothing holds the name: genuine cold start still works",
+			holder:   socketHolderAbsent,
+			wantSafe: true,
+		},
+		{
+			name:       "live server on an unlinked socket: never safe to rebind",
+			holder:     socketHolderPresent,
+			wantReason: "reason=unlinked-socket-live-holder",
+		},
+		{
+			name:       "holder unknown: fail closed",
+			holder:     socketHolderUnknown,
+			wantReason: "reason=socket-holder-unknown-on-absent-path",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			holderCalls := 0
+			err := observeNamedSocketUsing(context.Background(), "missing-socket",
+				func(string) (os.FileInfo, error) { return nil, os.ErrNotExist },
+				func(context.Context, string) (net.Conn, error) { return nil, syscall.ECONNREFUSED },
+				func(context.Context, string) socketHolderState {
+					holderCalls++
+					return tc.holder
+				})
+			if holderCalls != 1 {
+				t.Fatalf("holder calls = %d, want 1 (absence of the file is not absence of the server)", holderCalls)
+			}
+			if tc.wantSafe {
+				if err != nil {
+					t.Fatalf("observe = %v, want nil (nothing holds the name, cold start must still work)", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("observe = nil, want a refusal: a live server still holds this socket")
+			}
+			// Must NOT be reported as saturation: retrying cannot re-link a
+			// socket, so advertising "transient" would spin instead of
+			// surfacing a state that needs an operator.
+			if errors.Is(err, errSocketHolderLive) {
+				t.Fatalf("observe = %v, want a degraded (not saturated/retryable) classification", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantReason) {
+				t.Fatalf("observe = %q, want %q", err, tc.wantReason)
+			}
 		})
-	if err != nil {
-		t.Fatalf("observe absent socket = %v, want nil", err)
 	}
 }
 

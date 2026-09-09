@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -544,6 +545,11 @@ func (t *Tmux) newSessionGuarded(args ...string) error {
 
 	mode, err := t.probeServerPresence()
 	if err != nil {
+		// Refusing is the designed outcome, not an anomaly — but it is
+		// invisible unless said out loud, and "why did no session start?"
+		// is otherwise indistinguishable from "nothing asked for one".
+		log.Printf("tmux new-session: REFUSED on socket %q (server present but not safely reachable): %v",
+			t.cfg.SocketName, err)
 		return err
 	}
 	if mode == newSessionModeColdStart {
@@ -581,7 +587,16 @@ func (t *Tmux) coldStartSession(args []string) (handled bool, err error) {
 	if mode != newSessionModeColdStart {
 		return false, nil
 	}
+	// The only invocation in gc permitted to create a tmux server. It is also
+	// the only one that CAN orphan a fleet, so it says so before it acts:
+	// a clobber previously left no trace at all, which is what made the
+	// 2026-09-08 fleet loss take hours to reconstruct from process forensics.
+	log.Printf("tmux new-session: COLD START authorized on socket %q (preflight proved no server holds %s) — this invocation may create the server",
+		t.cfg.SocketName, namedSocketPath(t.cfg.SocketName))
 	_, err = t.run(args...)
+	if err != nil {
+		log.Printf("tmux new-session: cold start on socket %q failed: %v", t.cfg.SocketName, err)
+	}
 	return true, err
 }
 
