@@ -181,7 +181,7 @@ func contextUsageMessage(tokens, window int) string {
 			k(tokens), k(window), pct)
 	default:
 		return fmt.Sprintf(
-			"Context usage: %s/%s (~%.0f%%) — HIGH. Recycle this session now: reach a clean seam, run your handoff (durable notes + work-item updates + memory), then `gc session reset` yourself to resume fresh from that durable state. Repeated compaction degrades awareness — a clean reset beats running to compaction. Do this once you are at a seam; do NOT abandon work mid-step. (If an operator has told you to stay up, honor that and just hold at a clean seam instead of resetting.)\n",
+			"Context usage: %s/%s (~%.0f%%) — HIGH. Recycle this session now: reach a clean seam, write your durable notes + work-item updates + memory, then run `gc handoff \"<subject>\"` yourself to resume fresh from that durable state. Repeated compaction degrades awareness — a clean reset beats running to compaction. Do this once you are at a seam; do NOT abandon work mid-step. (If an operator has told you to stay up, honor that and just hold at a clean seam instead of resetting.)\n",
 			k(tokens), k(window), pct)
 	}
 }

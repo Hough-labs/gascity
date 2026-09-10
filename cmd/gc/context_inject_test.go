@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -57,8 +59,8 @@ func TestContextInjectUrgentBand(t *testing.T) {
 	// 900k of 1M = 90% — urgent band.
 	p := writeTranscript(t, usageLine("claude-opus-4-8[1m]", 50_000, 800_000, 50_000))
 	got := contextInjectLine(hookInputFor(p))
-	if !strings.Contains(got, "HIGH") || !strings.Contains(got, "gc session reset") {
-		t.Errorf("urgent line must direct to handoff + self gc session reset: %q", got)
+	if !strings.Contains(got, "HIGH") || !strings.Contains(got, "gc handoff") {
+		t.Errorf("urgent line must direct to handoff + self `gc handoff`: %q", got)
 	}
 	if !strings.Contains(got, "operator") {
 		t.Errorf("urgent line must preserve the operator-stay-up override: %q", got)
@@ -180,5 +182,130 @@ func TestContextInjectSidecarDoesNotShrinkWindow(t *testing.T) {
 	got := contextInjectLine(hookInputFor(p))
 	if !strings.Contains(got, "700k/1000k") {
 		t.Errorf("a 200k-classified newest entry must not shrink the 1M session window: %q", got)
+	}
+}
+
+// The urgent tier is the only tier that names a recycle verb, it fires
+// automatically on a threshold, and nobody is in the loop when it does. So the
+// verb it names has to survive: `gc session reset` strands the seat it fires on
+// (five session.reset_stalled events on record) — the session record drops, the
+// seat sleeps with flags degraded to `config`, and only an operator running
+// `gc session wake` brings it back. `gc handoff` is the measured-working
+// alternative. Driven through contextInjectLine so the real tier selector picks
+// the band rather than the test asserting against a copied literal.
+func TestContextInjectUrgentTierNamesWorkingRecycleVerb(t *testing.T) {
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	// 900k of 1M = 90% — above the 80% urgent threshold.
+	p := writeTranscript(t, usageLine("claude-fable-5", 50_000, 800_000, 50_000))
+	got := contextInjectLine(hookInputFor(p))
+	if !strings.Contains(got, "gc handoff") {
+		t.Errorf("urgent tier must name `gc handoff` as the recycle verb: %q", got)
+	}
+	if strings.Contains(got, "gc session reset") {
+		t.Errorf("urgent tier must not name the stranding verb `gc session reset`: %q", got)
+	}
+}
+
+// Naming the right command is only half the fix: an agent runs the injected
+// invocation verbatim, and `gc handoff` requires a subject (RangeArgs(1, 2) in
+// newHandoffCmd), so the bare form exits non-zero and strands the seat just as
+// surely as the old verb did. Parse the invocation back out of the message and
+// hand it to the real command's own argument validator, so this tracks
+// cmd_handoff.go instead of restating its rules.
+func TestContextInjectUrgentTierNamesRunnableInvocation(t *testing.T) {
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	p := writeTranscript(t, usageLine("claude-fable-5", 50_000, 800_000, 50_000))
+	got := contextInjectLine(hookInputFor(p))
+
+	m := regexp.MustCompile("`(gc handoff[^`]*)`").FindStringSubmatch(got)
+	if m == nil {
+		t.Fatalf("urgent tier names no backticked `gc handoff ...` invocation: %q", got)
+	}
+	fields := shellFields(m[1])
+	if len(fields) < 2 {
+		t.Fatalf("unparseable invocation %q in urgent tier", m[1])
+	}
+	handoff := newHandoffCmd(io.Discard, io.Discard)
+	if err := handoff.Args(handoff, fields[2:]); err != nil {
+		t.Errorf("urgent tier recommends %q, which gc handoff rejects: %v", m[1], err)
+	}
+}
+
+// shellFields splits a command line into the arguments a shell would hand the
+// program: whitespace separates, double quotes group.
+func shellFields(s string) []string {
+	var out []string
+	var cur strings.Builder
+	inQuote, started := false, false
+	for _, r := range s {
+		switch {
+		case r == '"':
+			inQuote = !inQuote
+			started = true
+		case !inQuote && (r == ' ' || r == '\t'):
+			if started {
+				out = append(out, cur.String())
+				cur.Reset()
+				started = false
+			}
+		default:
+			cur.WriteRune(r)
+			started = true
+		}
+	}
+	if started {
+		out = append(out, cur.String())
+	}
+	return out
+}
+
+// The verb must not reappear in ANOTHER tier later. Sweep every band — silent,
+// advisory, urgent — including both threshold edges, and assert none of them
+// recommends `gc session reset`.
+func TestContextInjectNoTierNamesSessionReset(t *testing.T) {
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	// claude-fable-5 is a 1M-window model, so tokens = pct * 10_000.
+	for _, pct := range []int{0, 30, 59, 60, 61, 70, 79, 80, 81, 90, 99, 100} {
+		p := writeTranscript(t, usageLine("claude-fable-5", pct*10_000, 0, 0))
+		if got := contextInjectLine(hookInputFor(p)); strings.Contains(got, "gc session reset") {
+			t.Errorf("%d%% tier names the stranding verb `gc session reset`: %q", pct, got)
+		}
+	}
+}
+
+// Regression: the fix belongs to the urgent tier alone. Assert the advisory
+// string byte-for-byte so an edit aimed at the wrong tier fails here.
+func TestContextInjectAdvisoryStringUnchanged(t *testing.T) {
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	// 700k of 1M = 70% — between the 60% advisory and 80% urgent thresholds.
+	p := writeTranscript(t, usageLine("claude-fable-5", 10_000, 680_000, 10_000))
+	const want = "Context usage: 700k/1000k (~70%). Approaching the recycle zone. " +
+		"Steer toward a clean seam: finish in-flight work, don't open new " +
+		"long-horizon tasks, and keep durable notes/work-items current so a " +
+		"handoff is cheap. Plan to hand off and reset before this climbs into " +
+		"the urgent band — a fresh session from durable notes outperforms " +
+		"riding lossy compaction.\n"
+	if got := contextInjectLine(hookInputFor(p)); got != want {
+		t.Errorf("advisory tier changed\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// Regression: swapping the verb must not cost the urgent tier its other
+// load-bearing clauses. Each of these is still correct guidance and each has
+// its own reason to exist — the clean seam, the mid-step warning, and the
+// operator override that keeps a supervised seat from recycling itself.
+func TestContextInjectUrgentTierKeepsLoadBearingClauses(t *testing.T) {
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	p := writeTranscript(t, usageLine("claude-fable-5", 50_000, 800_000, 50_000))
+	got := contextInjectLine(hookInputFor(p))
+	for _, want := range []string{
+		"reach a clean seam",
+		"durable notes + work-item updates + memory",
+		"do NOT abandon work mid-step",
+		"(If an operator has told you to stay up, honor that and just hold at a clean seam instead of resetting.)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("urgent tier lost the clause %q: %q", want, got)
+		}
 	}
 }
