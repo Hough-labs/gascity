@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/google/shlex"
 )
 
 func writeTranscript(t *testing.T, lines ...string) string {
@@ -221,42 +223,17 @@ func TestContextInjectUrgentTierNamesRunnableInvocation(t *testing.T) {
 	if m == nil {
 		t.Fatalf("urgent tier names no backticked `gc handoff ...` invocation: %q", got)
 	}
-	fields := shellFields(m[1])
+	fields, err := shlex.Split(m[1])
+	if err != nil {
+		t.Fatalf("unparseable invocation %q in urgent tier: %v", m[1], err)
+	}
 	if len(fields) < 2 {
-		t.Fatalf("unparseable invocation %q in urgent tier", m[1])
+		t.Fatalf("invocation %q is not a gc subcommand", m[1])
 	}
 	handoff := newHandoffCmd(io.Discard, io.Discard)
 	if err := handoff.Args(handoff, fields[2:]); err != nil {
 		t.Errorf("urgent tier recommends %q, which gc handoff rejects: %v", m[1], err)
 	}
-}
-
-// shellFields splits a command line into the arguments a shell would hand the
-// program: whitespace separates, double quotes group.
-func shellFields(s string) []string {
-	var out []string
-	var cur strings.Builder
-	inQuote, started := false, false
-	for _, r := range s {
-		switch {
-		case r == '"':
-			inQuote = !inQuote
-			started = true
-		case !inQuote && (r == ' ' || r == '\t'):
-			if started {
-				out = append(out, cur.String())
-				cur.Reset()
-				started = false
-			}
-		default:
-			cur.WriteRune(r)
-			started = true
-		}
-	}
-	if started {
-		out = append(out, cur.String())
-	}
-	return out
 }
 
 // The verb must not reappear in ANOTHER tier later. Sweep every band — silent,
