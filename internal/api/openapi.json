@@ -1115,6 +1115,26 @@
         ],
         "type": "object"
       },
+      "BeadReleasedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "type": "string"
+          },
+          "prior_assignee": {
+            "type": "string"
+          },
+          "released_by": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "prior_assignee",
+          "released_by"
+        ],
+        "type": "object"
+      },
       "BeadStrandedPayload": {
         "additionalProperties": false,
         "properties": {
@@ -2393,6 +2413,9 @@
           },
           {
             "$ref": "#/components/schemas/BeadEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/BeadReleasedPayload"
           },
           {
             "$ref": "#/components/schemas/BeadStrandedPayload"
@@ -11915,6 +11938,7 @@
             "bead.created": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated",
             "bead.dead_assignee_reopened": "#/components/schemas/TypedEventStreamEnvelopeBeadDeadAssigneeReopened",
             "bead.deleted": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted",
+            "bead.released": "#/components/schemas/TypedEventStreamEnvelopeBeadReleased",
             "bead.stranded": "#/components/schemas/TypedEventStreamEnvelopeBeadStranded",
             "bead.updated": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReapSkipped",
@@ -12006,6 +12030,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadReleased"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadStranded"
@@ -12485,6 +12512,57 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope bead.deleted",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeBeadReleased": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadReleasedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.released",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope bead.released",
         "type": "object"
       },
       "TypedEventStreamEnvelopeBeadStranded": {
@@ -13209,6 +13287,7 @@
                 "bead.claim_rejected",
                 "bead.dead_assignee_reopened",
                 "bead.stranded",
+                "bead.released",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -16349,6 +16428,7 @@
             "bead.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated",
             "bead.dead_assignee_reopened": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened",
             "bead.deleted": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted",
+            "bead.released": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadReleased",
             "bead.stranded": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadStranded",
             "bead.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped",
@@ -16440,6 +16520,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadReleased"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadStranded"
@@ -16939,6 +17022,61 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope bead.deleted",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeBeadReleased": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BeadReleasedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "bead.released",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope bead.released",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBeadStranded": {
@@ -17718,6 +17856,7 @@
                 "bead.claim_rejected",
                 "bead.dead_assignee_reopened",
                 "bead.stranded",
+                "bead.released",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",

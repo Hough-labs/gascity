@@ -50,7 +50,21 @@ const (
 	// patrol only reports: whether to publish the branch, hand it to the merge
 	// queue, or discard it is an operator/pack decision, and the typed payload
 	// carries the commit count and origin status that decision needs.
-	BeadStranded       = "bead.stranded"
+	BeadStranded = "bead.stranded"
+	// BeadReleased fires when a conditional release (ReleaseIfCurrent) actually
+	// reverses a work assignment: status in_progress -> open, assignee cleared.
+	// The store performs that reversal inside a transaction that writes no audit
+	// row, so before this event an assignment reversal was invisible to every
+	// audit surface — the 2026-09-07 incident that returned a live worker's
+	// in-flight step to the pool twice had to be chased through Dolt commit
+	// messages because the events table held nothing at either release
+	// timestamp. The payload names the releasing call site, a fact the store
+	// cannot supply about its own caller, so the pool reconciler and the
+	// `gc bd release-if-current` verb are distinguishable from the event alone.
+	// Emitted only when a release actually happened: the conditional release is
+	// a no-op whenever the live row no longer matches, and emitting on those
+	// would bury the signal under the reconciler's routine polling.
+	BeadReleased       = "bead.released"
 	MailSent           = "mail.sent"
 	MailRead           = "mail.read"
 	MailArchived       = "mail.archived"
@@ -269,6 +283,7 @@ var KnownEventTypes = []string{
 	BeadClaimRejected,
 	BeadDeadAssigneeReopened,
 	BeadStranded,
+	BeadReleased,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,

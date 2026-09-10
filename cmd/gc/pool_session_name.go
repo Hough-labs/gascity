@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -101,6 +102,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	openSessionInfos []session.Info,
 	result DesiredStateResult,
 	rigStores map[string]beads.Store,
+	rec events.Recorder,
 ) []releasedPoolAssignment {
 	// Partial input snapshots can make active work look orphaned for this
 	// tick only: missing work affects drain decisions, and missing sessions
@@ -108,7 +110,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	if result.snapshotQueryPartial() {
 		return nil
 	}
-	return releaseOrphanedPoolAssignments(store, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores)
+	return releaseOrphanedPoolAssignments(store, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, rec)
 }
 
 // releaseOrphanedPoolAssignments reopens active pool-routed work whose
@@ -124,6 +126,7 @@ func releaseOrphanedPoolAssignments(
 	assignedWorkStores []beads.Store,
 	assignedWorkStoreRefs []string,
 	rigStores map[string]beads.Store,
+	rec events.Recorder,
 ) []releasedPoolAssignment {
 	if store == nil || cfg == nil || len(assignedWorkBeads) == 0 {
 		return nil
@@ -205,7 +208,7 @@ func releaseOrphanedPoolAssignments(
 		if !allowsRelease {
 			continue
 		}
-		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
+		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached, rec) {
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
@@ -391,7 +394,7 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 //     This single Update also clears the affinity metadata alongside
 //     status/assignee, so it is the correct path for continuation-group beads:
 //     the group is never exposed on an open, unassigned bead.
-func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetached bool) bool {
+func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetached bool, rec events.Recorder) bool {
 	if store == nil || strings.TrimSpace(wb.ID) == "" {
 		return false
 	}
@@ -400,7 +403,7 @@ func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetach
 	// that gap would expose the routing vector on a claimable bead. The recheck
 	// fallback clears status, assignee, and affinity metadata in one Update.
 	if !beadHasActiveContinuationGroup(wb) {
-		if released, handled := releasePoolAssignmentIfCurrent(store, wb); handled {
+		if released, handled := releasePoolAssignmentIfCurrent(store, wb, rec); handled {
 			if !released {
 				return false
 			}
@@ -437,7 +440,7 @@ func beadHasActiveContinuationGroup(wb beads.Bead) bool {
 // or a snapshot shape outside the verb's contract) and the caller must take
 // the recheck fallback. handled=true with released=false means the store
 // answered authoritatively and the release must NOT be retried unconditionally.
-func releasePoolAssignmentIfCurrent(store beads.Store, wb beads.Bead) (released, handled bool) {
+func releasePoolAssignmentIfCurrent(store beads.Store, wb beads.Bead, rec events.Recorder) (released, handled bool) {
 	expectedAssignee := strings.TrimSpace(wb.Assignee)
 	// ReleaseIfCurrent's contract covers in_progress assignments only, and bd
 	// backends may persist an unassigned bead as SQL NULL rather than '', so
@@ -464,8 +467,13 @@ func releasePoolAssignmentIfCurrent(store beads.Store, wb beads.Bead) (released,
 	}
 	if !released {
 		log.Printf("releaseOrphanedPoolAssignments: skipping release for %s: assignment changed since snapshot (re-claimed or transitioned)", wb.ID)
+		return false, true
 	}
-	return released, true
+	// The store reversed the assignment inside a transaction that writes no
+	// audit row, so this is the only place the reversal becomes observable —
+	// and the only place that knows which caller performed it.
+	emitBeadReleased(rec, wb.ID, expectedAssignee, beadReleaseReconcilerInitiator, time.Now())
+	return true, true
 }
 
 // clearReleasedPoolAssignmentMetadata clears session-affinity (and optionally

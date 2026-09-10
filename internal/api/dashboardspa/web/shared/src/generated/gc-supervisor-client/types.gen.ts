@@ -374,6 +374,12 @@ export type BeadGraphResponse = {
     root: Bead;
 };
 
+export type BeadReleasedPayload = {
+    bead_id: string;
+    prior_assignee: string;
+    released_by: string;
+};
+
 export type BeadStrandedPayload = {
     /**
      * ID of the stranded work bead (also the envelope Subject).
@@ -872,7 +878,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadStrandedPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadReleasedPayload | BeadStrandedPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -5146,6 +5152,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeBeadDeadAssigneeReopened) | ({
     type: 'bead.deleted';
 } & TypedEventStreamEnvelopeBeadDeleted) | ({
+    type: 'bead.released';
+} & TypedEventStreamEnvelopeBeadReleased) | ({
     type: 'bead.stranded';
 } & TypedEventStreamEnvelopeBeadStranded) | ({
     type: 'bead.updated';
@@ -5377,6 +5385,23 @@ export type TypedEventStreamEnvelopeBeadDeleted = {
     subject?: string;
     ts: string;
     type: 'bead.deleted';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope bead.released
+ */
+export type TypedEventStreamEnvelopeBeadReleased = {
+    actor: string;
+    message?: string;
+    payload: BeadReleasedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.released';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6654,6 +6679,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened) | ({
     type: 'bead.deleted';
 } & TypedTaggedEventStreamEnvelopeBeadDeleted) | ({
+    type: 'bead.released';
+} & TypedTaggedEventStreamEnvelopeBeadReleased) | ({
     type: 'bead.stranded';
 } & TypedTaggedEventStreamEnvelopeBeadStranded) | ({
     type: 'bead.updated';
@@ -6890,6 +6917,24 @@ export type TypedTaggedEventStreamEnvelopeBeadDeleted = {
     subject?: string;
     ts: string;
     type: 'bead.deleted';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.released
+ */
+export type TypedTaggedEventStreamEnvelopeBeadReleased = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: BeadReleasedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.released';
     workflow?: WorkflowEventProjection;
 };
 

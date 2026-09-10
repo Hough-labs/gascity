@@ -1221,6 +1221,13 @@ type BeadGraphResponse struct {
 	Root  Bead                   `json:"root"`
 }
 
+// BeadReleasedPayload defines model for BeadReleasedPayload.
+type BeadReleasedPayload struct {
+	BeadId        string `json:"bead_id"`
+	PriorAssignee string `json:"prior_assignee"`
+	ReleasedBy    string `json:"released_by"`
+}
+
 // BeadStrandedPayload defines model for BeadStrandedPayload.
 type BeadStrandedPayload struct {
 	// BeadId ID of the stranded work bead (also the envelope Subject).
@@ -5283,6 +5290,21 @@ type TypedEventStreamEnvelopeBeadDeleted struct {
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeBeadReleased defines model for TypedEventStreamEnvelopeBeadReleased.
+type TypedEventStreamEnvelopeBeadReleased struct {
+	Actor     string                   `json:"actor"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   BeadReleasedPayload      `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeBeadStranded defines model for TypedEventStreamEnvelopeBeadStranded.
 type TypedEventStreamEnvelopeBeadStranded struct {
 	Actor     string                   `json:"actor"`
@@ -6468,6 +6490,22 @@ type TypedTaggedEventStreamEnvelopeBeadDeleted struct {
 	City      string                   `json:"city"`
 	Message   *string                  `json:"message,omitempty"`
 	Payload   BeadEventPayload         `json:"payload"`
+	RunId     *string                  `json:"run_id,omitempty"`
+	Seq       int64                    `json:"seq"`
+	SessionId *string                  `json:"session_id,omitempty"`
+	StepId    *string                  `json:"step_id,omitempty"`
+	Subject   *string                  `json:"subject,omitempty"`
+	Ts        time.Time                `json:"ts"`
+	Type      string                   `json:"type"`
+	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBeadReleased defines model for TypedTaggedEventStreamEnvelopeBeadReleased.
+type TypedTaggedEventStreamEnvelopeBeadReleased struct {
+	Actor     string                   `json:"actor"`
+	City      string                   `json:"city"`
+	Message   *string                  `json:"message,omitempty"`
+	Payload   BeadReleasedPayload      `json:"payload"`
 	RunId     *string                  `json:"run_id,omitempty"`
 	Seq       int64                    `json:"seq"`
 	SessionId *string                  `json:"session_id,omitempty"`
@@ -9334,6 +9372,32 @@ func (t *EventPayload) FromBeadEventPayload(v BeadEventPayload) error {
 
 // MergeBeadEventPayload performs a merge with any union data inside the EventPayload, using the provided BeadEventPayload
 func (t *EventPayload) MergeBeadEventPayload(v BeadEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsBeadReleasedPayload returns the union data inside the EventPayload as a BeadReleasedPayload
+func (t EventPayload) AsBeadReleasedPayload() (BeadReleasedPayload, error) {
+	var body BeadReleasedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBeadReleasedPayload overwrites any union data inside the EventPayload as the provided BeadReleasedPayload
+func (t *EventPayload) FromBeadReleasedPayload(v BeadReleasedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBeadReleasedPayload performs a merge with any union data inside the EventPayload, using the provided BeadReleasedPayload
+func (t *EventPayload) MergeBeadReleasedPayload(v BeadReleasedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -12251,6 +12315,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadDeleted(v Ty
 	return err
 }
 
+// AsTypedEventStreamEnvelopeBeadReleased returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadReleased
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadReleased() (TypedEventStreamEnvelopeBeadReleased, error) {
+	var body TypedEventStreamEnvelopeBeadReleased
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadReleased overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadReleased
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadReleased(v TypedEventStreamEnvelopeBeadReleased) error {
+	v.Type = "bead.released"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadReleased performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadReleased
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadReleased(v TypedEventStreamEnvelopeBeadReleased) error {
+	v.Type = "bead.released"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeBeadStranded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadStranded
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadStranded() (TypedEventStreamEnvelopeBeadStranded, error) {
 	var body TypedEventStreamEnvelopeBeadStranded
@@ -14349,6 +14441,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeBeadDeadAssigneeReopened()
 	case "bead.deleted":
 		return t.AsTypedEventStreamEnvelopeBeadDeleted()
+	case "bead.released":
+		return t.AsTypedEventStreamEnvelopeBeadReleased()
 	case "bead.stranded":
 		return t.AsTypedEventStreamEnvelopeBeadStranded()
 	case "bead.updated":
@@ -14640,6 +14734,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadD
 // MergeTypedTaggedEventStreamEnvelopeBeadDeleted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadDeleted
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadDeleted(v TypedTaggedEventStreamEnvelopeBeadDeleted) error {
 	v.Type = "bead.deleted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadReleased returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadReleased
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadReleased() (TypedTaggedEventStreamEnvelopeBeadReleased, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadReleased
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadReleased overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadReleased
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadReleased(v TypedTaggedEventStreamEnvelopeBeadReleased) error {
+	v.Type = "bead.released"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadReleased performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadReleased
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadReleased(v TypedTaggedEventStreamEnvelopeBeadReleased) error {
+	v.Type = "bead.released"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16748,6 +16870,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened()
 	case "bead.deleted":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadDeleted()
+	case "bead.released":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadReleased()
 	case "bead.stranded":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadStranded()
 	case "bead.updated":

@@ -116,6 +116,12 @@ export const zBeadDeadAssigneeReopenedPayload = z.object({
     routed_to: z.string().optional()
 });
 
+export const zBeadReleasedPayload = z.object({
+    bead_id: z.string(),
+    prior_assignee: z.string(),
+    released_by: z.string()
+});
+
 export const zBeadStrandedPayload = z.object({
     bead_id: z.string(),
     branch: z.string(),
@@ -3216,6 +3222,7 @@ export const zEventPayload = z.union([
     zBeadClaimRejectedPayload,
     zBeadDeadAssigneeReopenedPayload,
     zBeadEventPayload,
+    zBeadReleasedPayload,
     zBeadStrandedPayload,
     zBeadWorktreeReapSkippedPayload,
     zBeadWorktreeReapedPayload,
@@ -3429,6 +3436,23 @@ export const zTypedEventStreamEnvelopeBeadDeleted = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('bead.deleted'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope bead.released
+ */
+export const zTypedEventStreamEnvelopeBeadReleased = z.object({
+    actor: z.string(),
+    message: z.string().optional(),
+    payload: zBeadReleasedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('bead.released'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -4701,6 +4725,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeBeadCreated.extend({ type: z.literal('bead.created') }),
     zTypedEventStreamEnvelopeBeadDeadAssigneeReopened.extend({ type: z.literal('bead.dead_assignee_reopened') }),
     zTypedEventStreamEnvelopeBeadDeleted.extend({ type: z.literal('bead.deleted') }),
+    zTypedEventStreamEnvelopeBeadReleased.extend({ type: z.literal('bead.released') }),
     zTypedEventStreamEnvelopeBeadStranded.extend({ type: z.literal('bead.stranded') }),
     zTypedEventStreamEnvelopeBeadUpdated.extend({ type: z.literal('bead.updated') }),
     zTypedEventStreamEnvelopeBeadWorktreeReapSkipped.extend({ type: z.literal('bead.worktree.reap_skipped') }),
@@ -4872,6 +4897,24 @@ export const zTypedTaggedEventStreamEnvelopeBeadDeleted = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('bead.deleted'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.released
+ */
+export const zTypedTaggedEventStreamEnvelopeBeadReleased = z.object({
+    actor: z.string(),
+    city: z.string(),
+    message: z.string().optional(),
+    payload: zBeadReleasedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('bead.released'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -6218,6 +6261,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeBeadCreated.extend({ type: z.literal('bead.created') }),
     zTypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened.extend({ type: z.literal('bead.dead_assignee_reopened') }),
     zTypedTaggedEventStreamEnvelopeBeadDeleted.extend({ type: z.literal('bead.deleted') }),
+    zTypedTaggedEventStreamEnvelopeBeadReleased.extend({ type: z.literal('bead.released') }),
     zTypedTaggedEventStreamEnvelopeBeadStranded.extend({ type: z.literal('bead.stranded') }),
     zTypedTaggedEventStreamEnvelopeBeadUpdated.extend({ type: z.literal('bead.updated') }),
     zTypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped.extend({ type: z.literal('bead.worktree.reap_skipped') }),

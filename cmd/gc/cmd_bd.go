@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/spf13/cobra"
 )
 
@@ -531,6 +532,20 @@ func doBdReleaseIfCurrent(cityPath string, cfg *config.City, target execStoreTar
 		fmt.Fprintf(stderr, "gc bd release-if-current: opening store: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	rec := openCityRecorderAt(cityPath, stderr)
+	defer func() {
+		if closer, ok := rec.(io.Closer); ok {
+			_ = closer.Close()
+		}
+	}()
+	return releaseIfCurrentOnStore(store, rec, id, expectedAssignee, stdout, stderr)
+}
+
+// releaseIfCurrentOnStore is the body of `gc bd release-if-current` with the
+// store and the event sink supplied by the caller, so the verb's release path
+// — including the bead.released emission that names this call site as the
+// origin — is exercisable without standing up a live city.
+func releaseIfCurrentOnStore(store beads.Store, rec events.Recorder, id, expectedAssignee string, stdout, stderr io.Writer) int {
 	releaser, ok := store.(beads.ConditionalAssignmentReleaser)
 	if !ok {
 		fmt.Fprintf(stderr, "gc bd release-if-current: %v for %T\n", beads.ErrConditionalReleaseUnsupported, store) //nolint:errcheck // best-effort stderr
@@ -547,6 +562,7 @@ func doBdReleaseIfCurrent(cityPath string, cfg *config.City, target execStoreTar
 		return 1
 	}
 	if released {
+		emitBeadReleased(rec, id, expectedAssignee, beadReleaseCLIInitiator, time.Now())
 		fmt.Fprintln(stdout, "released") //nolint:errcheck // best-effort stdout
 		return 0
 	}

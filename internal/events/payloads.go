@@ -77,10 +77,26 @@ type BeadClaimRejectedPayload struct {
 // IsEventPayload marks BeadClaimRejectedPayload as an events.Payload variant.
 func (BeadClaimRejectedPayload) IsEventPayload() {}
 
+// BeadReleasedPayload is the typed payload for bead.released events. Emitted
+// when a conditional release reverses BeadID's assignment: PriorAssignee held
+// the bead before the release, and ReleasedBy names the call site that
+// performed it (the pool reconciler or the `gc bd release-if-current` verb).
+// ReleasedBy is the field the incident this event exists for actually needed —
+// the store cannot name its own caller, so it is stamped at the call site.
+type BeadReleasedPayload struct {
+	BeadID        string `json:"bead_id"`
+	PriorAssignee string `json:"prior_assignee"`
+	ReleasedBy    string `json:"released_by"`
+}
+
+// IsEventPayload marks BeadReleasedPayload as an events.Payload variant.
+func (BeadReleasedPayload) IsEventPayload() {}
+
 func init() {
 	RegisterPayload(BeadWorktreeReaped, BeadWorktreeReapedPayload{})
 	RegisterPayload(BeadWorktreeReapSkipped, BeadWorktreeReapSkippedPayload{})
 	RegisterPayload(BeadClaimRejected, BeadClaimRejectedPayload{})
+	RegisterPayload(BeadReleased, BeadReleasedPayload{})
 }
 
 // StoreDiskWarnPayload is the typed payload for gc.store.disk_warn events.
