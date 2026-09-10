@@ -318,10 +318,10 @@ targeted invocation (`gc sling <target> <bead-id> --on <formula>`), the
 router injects `issue` — the target bead's ID — plus the routing variables
 `rig_name`, `binding_name`, and `binding_prefix`, and an automatic
 `base_branch` / `target_branch` when the formula references them.
-Precedence, highest first: explicit `--var` > rig `formula_vars` >
-routing-injected values > formula-level `default`s. Under v2 the `issue`
-injection is replaced by the reserved `{{convoy_id}}` derivation, and
-`issue` survives there only as a deprecated compat alias.
+Precedence, highest first: explicit `--var` > agent `formula_vars` > rig
+`formula_vars` > routing-injected values > formula-level `default`s. Under
+v2 the `issue` injection is replaced by the reserved `{{convoy_id}}`
+derivation, and `issue` survives there only as a deprecated compat alias.
 
 ### 1.5. Conditions
 

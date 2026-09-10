@@ -4729,6 +4729,74 @@ func TestRigPatchesAgentFormulaVarsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestAgentFormulaVarsParsing verifies the TOML surface documented in
+// docs/guides/gastown-config-recipes.md ("Give one lane its own gate
+// commands") decodes as written: an [agent.formula_vars] table on an inline
+// [[agent]], and a [rigs.patches.formula_vars] table on a per-rig agent
+// override. The snippets in that guide are copied here verbatim so a doc that
+// promises a config shape cannot drift from the parser that has to accept it.
+func TestAgentFormulaVarsParsing(t *testing.T) {
+	input := `
+[workspace]
+name = "my-city"
+
+[[agent]]
+name = "view-worker"
+dir = "myproject"
+
+[agent.formula_vars]
+test_command = "npm test"
+
+[[rigs]]
+name = "myproject"
+path = "/home/user/myproject"
+
+[rigs.formula_vars]
+build_command = "make build"
+test_command = "make test"
+
+[[rigs.patches]]
+agent = "gastown.polecat"
+
+[rigs.patches.formula_vars]
+test_command = "npm test"
+lint_command = "npm run lint"
+`
+	cfg, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("len(Agents) = %d, want 1", len(cfg.Agents))
+	}
+	if got := cfg.Agents[0].FormulaVars["test_command"]; got != "npm test" {
+		t.Errorf("agent FormulaVars[test_command] = %q, want %q", got, "npm test")
+	}
+
+	if len(cfg.Rigs) != 1 {
+		t.Fatalf("len(Rigs) = %d, want 1", len(cfg.Rigs))
+	}
+	// The rig layer the guide shows the lane inheriting from.
+	if got := cfg.Rigs[0].FormulaVars["build_command"]; got != "make build" {
+		t.Errorf("rig FormulaVars[build_command] = %q, want %q", got, "make build")
+	}
+
+	if len(cfg.Rigs[0].RigPatches) != 1 {
+		t.Fatalf("len(RigPatches) = %d, want 1", len(cfg.Rigs[0].RigPatches))
+	}
+	ov := cfg.Rigs[0].RigPatches[0]
+	if ov.Agent != "gastown.polecat" {
+		t.Errorf("patch agent = %q, want %q", ov.Agent, "gastown.polecat")
+	}
+	if got := ov.FormulaVars["test_command"]; got != "npm test" {
+		t.Errorf("override FormulaVars[test_command] = %q, want %q", got, "npm test")
+	}
+	if got := ov.FormulaVars["lint_command"]; got != "npm run lint" {
+		t.Errorf("override FormulaVars[lint_command] = %q, want %q", got, "npm run lint")
+	}
+}
+
 // --- DeriveBeadsPrefix tests ---
 
 func TestDeriveBeadsPrefix(t *testing.T) {

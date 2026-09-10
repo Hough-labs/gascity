@@ -165,6 +165,56 @@ name = "myproject"
 branch = "develop"
 ```
 
+### Give one lane its own gate commands
+
+A rig with more than one lane — separate Go modules, or a Go service beside a
+TypeScript front end — needs different gate commands per lane. Rig-scoped
+`formula_vars` cannot express that: every lane shares one set, so a worker on
+the wrong tree runs gates that touch none of its work, passes them, and submits
+green. Nothing reads as misconfigured, because the vars *are* set — just
+pointed at a tree that lane never edits.
+
+Set `formula_vars` on the agent instead. It layers over the rig's:
+
+```toml
+# city.toml
+[[rigs]]
+name = "myproject"
+
+[rigs.formula_vars]
+build_command = "make build"
+test_command = "make test"
+
+[[rigs.patches]]
+agent = "gastown.polecat"
+
+[rigs.patches.formula_vars]
+test_command = "npm test"
+lint_command = "npm run lint"
+```
+
+The merge is key-by-key, so the lane inherits every rig var it does not
+restate — overriding `test_command` here leaves the rig's `build_command` in
+place. Precedence, highest first: `--var` > agent `formula_vars` > rig
+`formula_vars` > formula defaults.
+
+The same field works on an inline agent declaration:
+
+```toml
+[[agent]]
+name = "view-worker"
+dir = "myproject"
+
+[agent.formula_vars]
+test_command = "npm test"
+```
+
+<Note>
+`gc bd mol wisp` injects the **rig** layer only — it resolves a rig, never an
+agent, so a formula poured that way gets the rig's gates. Agent-scoped vars
+reach formulas through `gc sling`.
+</Note>
+
 ### Change an agent's default sling formula
 
 `default_sling_formula` names the formula sling applies automatically for an

@@ -221,9 +221,21 @@ absolute filesystem path), `BuildSlingFormulaVars` folds these entries into
 the final var map. Precedence (highest wins):
 
 1. Explicit `--var key=value` on the CLI
-2. `rigs.<name>.formula_vars[key]`
-3. Routing-injected defaults (`issue`, `rig_name`, `base_branch`, `target_branch`, ...)
-4. Formula-declared `[vars.<name>].default`
+2. `agent.formula_vars[key]`
+3. `rigs.<name>.formula_vars[key]`
+4. Routing-injected defaults (`issue`, `rig_name`, `base_branch`, `target_branch`, ...)
+5. Formula-declared `[vars.<name>].default`
+
+Agent-scoped `formula_vars` is what lets a multi-lane rig give each lane its
+own gates. The two layers merge key-by-key, so an agent that restates only
+`test_command` still inherits the rig's other gate commands — a whole-layer
+replace would blank them, and the lane would pass gates that ran nothing.
+Agents bound to no rig still get their own vars: the agent layer needs no rig
+lookup.
+
+The `gc bd` passthrough (`cmd/gc/bd_formula_vars.go`) injects the RIG layer
+only. It resolves a rig for store routing and never an agent, so a wisp poured
+through `gc bd` gets its rig's gates rather than the pouring lane's.
 
 `gc formula show --rig <name>` surfaces active rig defaults as
 `(rig default="...")` next to the var description so operators can verify
