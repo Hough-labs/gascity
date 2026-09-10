@@ -585,7 +585,74 @@ func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID,
 	if !hookClaimHasIdentity(canonical.Assignee, []string{assignee}) {
 		return canonical, false, nil
 	}
-	return canonical, true, nil
+	return hookVerifyClaimStatusFlip(store, canonical, beadID, assignee)
+}
+
+// hookClaimStatusInProgress reports whether a bead carries the status a claim is
+// defined to leave behind. bd's richer statuses collapse to Gas City's three in
+// mapBdStatus, so in_progress is the only value that means "claimed".
+func hookClaimStatusInProgress(status string) bool {
+	return strings.EqualFold(strings.TrimSpace(status), "in_progress")
+}
+
+// hookVerifyClaimStatusFlip confirms a claim actually flipped the bead to
+// in_progress, and re-applies the claim once when it did not.
+//
+// A claim is two coupled writes — assignee and status — and under a store timeout
+// the discovery read can succeed while the status flip is lost, leaving the bead
+// half-claimed: our assignee set, status still open. bd reports that mutation as a
+// success and the canonical readback agrees on the assignee, so verifying identity
+// alone accepts it. Publishing it hands a worker a bead whose mandated post-claim
+// ownership gate refuses it (assignee matches, status does not); the worker
+// drain-acks, and once its session is replaced the bead is invisible to both
+// discovery paths — assigned-work lookup keys on the new session's identity, and
+// the pool demand probe requires --unassigned. Five sessions burned that way in 26h
+// (gascity-ib53).
+//
+// bd update --claim is idempotent for the current claimant, so re-applying is the
+// cheap repair for a lost write. Exactly one re-apply is attempted: the caller's
+// claim budget is shared across candidates, and a flip that will not take twice is
+// a store fault to report, not to grind on. The healthy path re-applies nothing,
+// since this runs on every hook tick through the adoption paths.
+//
+// Outcomes match the contract the callers already handle: a persistent half-claim
+// is an operational failure (ok=false, error) that drains as claims_errored rather
+// than as idle no_work; a re-apply lost to a different claimant is a race
+// (ok=false, no error) reported as bead.claim_rejected; and a committed re-apply
+// whose readback fails keeps the committed-but-unreadable shape (ok=true, error)
+// that stops the hook instead of stranding a live assignment.
+func hookVerifyClaimStatusFlip(store *beads.BdStore, canonical beads.Bead, beadID, assignee string) (beads.Bead, bool, error) {
+	if hookClaimStatusInProgress(canonical.Status) {
+		return canonical, true, nil
+	}
+	reclaimed, ok, err := store.Claim(beadID)
+	if err != nil {
+		return canonical, false, fmt.Errorf("re-applying lost status flip on claimed bead %q: %w", beadID, err)
+	}
+	if !ok {
+		// Another claimant won the bead while its flip was missing. Re-read so the
+		// caller can name the winner in the rejection event, matching the claim
+		// conflict path above; a read error degrades to a silent no-op.
+		current, getErr := store.Get(beadID)
+		if getErr != nil {
+			return beads.Bead{}, false, nil
+		}
+		return current, false, nil
+	}
+	if !hookClaimHasIdentity(reclaimed.Assignee, []string{assignee}) {
+		return reclaimed, false, nil
+	}
+	reread, err := store.Get(beadID)
+	if err != nil {
+		return reclaimed, true, fmt.Errorf("reloading bead %q after re-applying its status flip: %w", beadID, err)
+	}
+	if !hookClaimHasIdentity(reread.Assignee, []string{assignee}) {
+		return reread, false, nil
+	}
+	if !hookClaimStatusInProgress(reread.Status) {
+		return reread, false, fmt.Errorf("claiming bead %q: assignee is %q but status is %q after re-applying the claim, want in_progress", beadID, reread.Assignee, reread.Status)
+	}
+	return reread, true, nil
 }
 
 // stampHookClaimIdentity records the claiming worker's execution identity on the
