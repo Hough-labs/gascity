@@ -574,6 +574,10 @@ func (d *managedDoltPreflightOrderDispatcher) drain(context.Context) bool {
 	return true
 }
 
+func (d *managedDoltPreflightOrderDispatcher) inFlightTracking() map[string]struct{} {
+	return nil
+}
+
 func hasLabelPrefix(labels []string, prefix string) bool {
 	for _, label := range labels {
 		if strings.HasPrefix(label, prefix) {
@@ -1419,6 +1423,10 @@ func (r *recordingOrderDispatcher) drain(ctx context.Context) bool {
 	return true
 }
 
+func (r *recordingOrderDispatcher) inFlightTracking() map[string]struct{} {
+	return nil
+}
+
 type blockingOrderDispatcher struct {
 	mu         sync.Mutex
 	drainCalls int
@@ -1448,6 +1456,10 @@ func (b *blockingOrderDispatcher) drain(ctx context.Context) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+func (b *blockingOrderDispatcher) inFlightTracking() map[string]struct{} {
+	return nil
 }
 
 func (b *blockingOrderDispatcher) waitForDrainCalls(t *testing.T, want int) {
@@ -1687,8 +1699,9 @@ func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 	// just order-tracking-sweep's own. The old narrow scope only swept the
 	// sweep order's tracking to bootstrap it, relying on order-tracking-sweep
 	// to then clean the rest — a single-point-of-failure that jammed every
-	// order when slow reconciler cycles kept that one order from firing. The
-	// staleAfter cutoff still protects in-flight dispatches regardless of order.
+	// order when slow reconciler cycles kept that one order from firing.
+	// In-flight dispatches are spared by identity, not by the cutoff — see
+	// TestOrderTrackingSweepWatchdogSkipsInFlightDispatch.
 	store := beads.NewMemStore()
 	sweepTracking, err := store.Create(beads.Bead{
 		Title:  "order:" + orderTrackingSweepOrder,
@@ -7062,4 +7075,143 @@ func TestWarnIfClosedOrderTrackingBacklogLarge_CapFormatAtLimit(t *testing.T) {
 func TestWarnIfClosedOrderTrackingBacklogLarge_SilentOnNilStore(_ *testing.T) {
 	// nil store: must not panic.
 	warnIfClosedOrderTrackingBacklogLarge(nil, io.Discard)
+}
+
+// TestOrderTrackingSweepWatchdogSkipsInFlightDispatch proves the controller
+// watchdog consults the dispatcher's in-flight set before closing stale
+// tracking beads (gascity-j46m). Without this the watchdog closes the tracking
+// bead of any dispatch that outlives orderTrackingSweepWatchdogStaleAfter (2m)
+// — well inside an exec order's own 300s default budget — which opens the
+// single-flight gate and lets the order re-fire alongside the running one.
+func TestOrderTrackingSweepWatchdogSkipsInFlightDispatch(t *testing.T) {
+	store := beads.NewMemStore()
+	release := make(chan struct{})
+	execStarted := make(chan struct{})
+	fakeExec := func(context.Context, string, string, []string) ([]byte, error) {
+		close(execStarted)
+		<-release
+		return []byte("ok\n"), nil
+	}
+
+	abandoned, err := store.Create(beads.Bead{
+		Title:  "order:abandoned",
+		Labels: []string{"order-run:abandoned", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(abandoned): %v", err)
+	}
+
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:     "long-exec",
+		Trigger:  "cooldown",
+		Interval: "2m",
+		Exec:     "scripts/long.sh",
+	}}, store, nil, fakeExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		ad.drain(context.Background())
+	})
+
+	start := time.Now()
+	ad.dispatch(context.Background(), t.TempDir(), start)
+	<-execStarted
+
+	live := trackingBeads(t, store, "order-run:long-exec")
+	if len(live) != 1 {
+		t.Fatalf("live tracking beads = %d, want 1", len(live))
+	}
+
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		od:                  ad,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(start.Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+
+	gotLive, err := store.Get(live[0].ID)
+	if err != nil {
+		t.Fatalf("Get(live): %v", err)
+	}
+	if gotLive.Status == "closed" {
+		t.Fatalf("watchdog closed the tracking bead of a running dispatch (%s)", live[0].ID)
+	}
+	gotAbandoned, err := store.Get(abandoned.ID)
+	if err != nil {
+		t.Fatalf("Get(abandoned): %v", err)
+	}
+	if gotAbandoned.Status != "closed" {
+		t.Fatalf("abandoned tracking status = %s, want closed (the watchdog must still reclaim orphans)", gotAbandoned.Status)
+	}
+}
+
+// TestOrderTrackingSweepWatchdogSkipsRetiredDispatcherInFlight proves the
+// exemption also covers dispatchers retired by a config reload but still
+// draining. Their goroutines keep writing tracking-bead outcomes, so their
+// in-flight beads must be protected exactly like the live dispatcher's.
+func TestOrderTrackingSweepWatchdogSkipsRetiredDispatcherInFlight(t *testing.T) {
+	store := beads.NewMemStore()
+	release := make(chan struct{})
+	execStarted := make(chan struct{})
+	fakeExec := func(context.Context, string, string, []string) ([]byte, error) {
+		close(execStarted)
+		<-release
+		return []byte("ok\n"), nil
+	}
+
+	retired := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:     "retired-exec",
+		Trigger:  "cooldown",
+		Interval: "2m",
+		Exec:     "scripts/retired.sh",
+	}}, store, nil, fakeExec, nil)
+	if retired == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		retired.drain(context.Background())
+	})
+
+	start := time.Now()
+	retired.dispatch(context.Background(), t.TempDir(), start)
+	<-execStarted
+
+	live := trackingBeads(t, store, "order-run:retired-exec")
+	if len(live) != 1 {
+		t.Fatalf("live tracking beads = %d, want 1", len(live))
+	}
+
+	cr := &CityRuntime{
+		cityName:                "test-city",
+		cfg:                     &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore:     store,
+		retiredOrderDispatchers: []orderDispatcher{retired},
+		stdout:                  io.Discard,
+		stderr:                  io.Discard,
+		logPrefix:               "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(start.Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+
+	gotLive, err := store.Get(live[0].ID)
+	if err != nil {
+		t.Fatalf("Get(live): %v", err)
+	}
+	if gotLive.Status == "closed" {
+		t.Fatalf("watchdog closed the tracking bead of a draining retired dispatcher (%s)", live[0].ID)
+	}
 }

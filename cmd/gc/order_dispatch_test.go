@@ -10245,3 +10245,241 @@ func TestRunDispatchGuardedRecoversPanic(t *testing.T) {
 		t.Errorf("expected the recovered panic to be logged, got %q", logs.String())
 	}
 }
+
+// --- in-flight dispatch exemption from the stale-tracking sweep (gascity-j46m) ---
+
+// TestSweepStaleOrderTrackingSkipsInFlightDispatch proves the stale sweep
+// leaves a tracking bead alone while its dispatchOne goroutine is still
+// running, and still closes a stale bead that nothing is dispatching. An open
+// tracking bead is the ONLY signal hasOpenWorkStrict has that a dispatch is in
+// flight, so closing one underneath a live dispatch opens the single-flight
+// gate and lets the same order fire again concurrently.
+func TestSweepStaleOrderTrackingSkipsInFlightDispatch(t *testing.T) {
+	store := beads.NewMemStore()
+	inFlight, err := store.Create(beads.Bead{
+		Title:  "order:long-exec",
+		Labels: []string{"order-run:long-exec", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(in-flight): %v", err)
+	}
+	abandoned, err := store.Create(beads.Bead{
+		Title:  "order:orphaned",
+		Labels: []string{"order-run:orphaned", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(abandoned): %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingWithOptionsLimitMode(
+		store,
+		time.Now().Add(time.Hour),
+		time.Minute,
+		nil,
+		orderTrackingWatchdogMetadataInitiator,
+		false,
+		0,
+		false,
+		map[string]struct{}{inFlight.ID: {}},
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptionsLimitMode: %v", err)
+	}
+
+	gotInFlight, err := store.Get(inFlight.ID)
+	if err != nil {
+		t.Fatalf("Get(in-flight): %v", err)
+	}
+	if gotInFlight.Status == "closed" {
+		t.Fatalf("in-flight tracking bead %s was closed by the stale sweep; a live dispatch is not stale bookkeeping", inFlight.ID)
+	}
+	gotAbandoned, err := store.Get(abandoned.ID)
+	if err != nil {
+		t.Fatalf("Get(abandoned): %v", err)
+	}
+	if gotAbandoned.Status != "closed" {
+		t.Fatalf("abandoned tracking bead status = %s, want closed", gotAbandoned.Status)
+	}
+	if result.trackingClosed != 1 {
+		t.Errorf("trackingClosed = %d, want 1", result.trackingClosed)
+	}
+	if result.trackingInFlightSkipped != 1 {
+		t.Errorf("trackingInFlightSkipped = %d, want 1", result.trackingInFlightSkipped)
+	}
+}
+
+// TestSweepStaleOrderTrackingInFlightSkipDoesNotConsumeCloseBudget proves an
+// exempt bead does not eat a slot in the watchdog's per-tick close budget.
+// Charging the budget for beads that were never closed would let a handful of
+// long-running dispatches starve the sweep of its ability to reclaim genuinely
+// orphaned tracking beads.
+func TestSweepStaleOrderTrackingInFlightSkipDoesNotConsumeCloseBudget(t *testing.T) {
+	store := beads.NewMemStore()
+	inFlight, err := store.Create(beads.Bead{
+		Title:  "order:live",
+		Labels: []string{"order-run:live", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(in-flight): %v", err)
+	}
+	stale := make([]string, 0, 2)
+	for i := range 2 {
+		b, err := store.Create(beads.Bead{
+			Title:  fmt.Sprintf("order:stale-%d", i),
+			Labels: []string{fmt.Sprintf("order-run:stale-%d", i), labelOrderTracking},
+		})
+		if err != nil {
+			t.Fatalf("Create(stale-%d): %v", i, err)
+		}
+		stale = append(stale, b.ID)
+	}
+
+	result, err := sweepStaleOrderTrackingWithOptionsLimitMode(
+		store,
+		time.Now().Add(time.Hour),
+		time.Minute,
+		nil,
+		orderTrackingWatchdogMetadataInitiator,
+		false,
+		2,
+		false,
+		map[string]struct{}{inFlight.ID: {}},
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptionsLimitMode: %v", err)
+	}
+	if result.trackingClosed != 2 {
+		t.Fatalf("trackingClosed = %d, want 2 (the exempt bead must not consume the budget)", result.trackingClosed)
+	}
+	for _, id := range stale {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Errorf("stale bead %s status = %s, want closed", id, got.Status)
+		}
+	}
+}
+
+// TestInFlightTrackingFollowsDispatchLifecycle proves the dispatcher publishes
+// the tracking bead ID of every running dispatchOne goroutine, and drops it
+// once the goroutine returns. This set is what the sweep consults, so it must
+// be exact in both directions: a missing ID re-exposes the close-underneath
+// bug, and a leaked ID would make a genuinely orphaned bead unsweepable.
+func TestInFlightTrackingFollowsDispatchLifecycle(t *testing.T) {
+	store := beads.NewMemStore()
+	release := make(chan struct{})
+	execStarted := make(chan struct{})
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		close(execStarted)
+		<-release
+		return []byte("ok\n"), nil
+	}
+
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:     "slow-exec",
+		Trigger:  "cooldown",
+		Interval: "2m",
+		Exec:     "scripts/slow.sh",
+	}}, store, nil, fakeExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	if got := ad.inFlightTracking(); len(got) != 0 {
+		t.Fatalf("inFlightTracking() before dispatch = %v, want empty", got)
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	<-execStarted
+
+	inFlight := ad.inFlightTracking()
+	if len(inFlight) != 1 {
+		t.Fatalf("inFlightTracking() during dispatch = %v, want exactly one tracking bead", inFlight)
+	}
+	open := trackingBeads(t, store, "order-run:slow-exec")
+	if len(open) != 1 {
+		t.Fatalf("tracking beads = %d, want 1", len(open))
+	}
+	if _, ok := inFlight[open[0].ID]; !ok {
+		t.Fatalf("inFlightTracking() = %v, want the live tracking bead %s", inFlight, open[0].ID)
+	}
+
+	close(release)
+	if !ad.drain(context.Background()) {
+		t.Fatal("drain did not complete")
+	}
+	if got := ad.inFlightTracking(); len(got) != 0 {
+		t.Fatalf("inFlightTracking() after drain = %v, want empty", got)
+	}
+}
+
+// TestWatchdogSweepKeepsSingleFlightClosedForLongExec is the end-to-end
+// regression for gascity-j46m. An exec order's default dispatch budget is 300s
+// (orders.Order.TimeoutOrDefault), but the controller watchdog closes stale
+// tracking beads after orderTrackingSweepWatchdogStaleAfter (2m) — a bookkeeping
+// TTL a fifth of the workload it is applied to. The 2m constant was written for
+// the order-tracking-sweep order's own short tracking bead (7868e63e7) and was
+// never revisited when the watchdog widened to every order (6c9af50c1).
+//
+// Closing the bead mid-dispatch makes hasOpenWorkStrict report no open work, so
+// the single-flight gate opens and the same script fires again alongside the
+// one still running.
+func TestWatchdogSweepKeepsSingleFlightClosedForLongExec(t *testing.T) {
+	store := beads.NewMemStore()
+	release := make(chan struct{})
+	execStarted := make(chan struct{})
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		close(execStarted)
+		<-release
+		return []byte("ok\n"), nil
+	}
+
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:     "long-exec",
+		Trigger:  "cooldown",
+		Interval: "2m",
+		Exec:     "scripts/long.sh",
+	}}, store, nil, fakeExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	mad, ok := ad.(*memoryOrderDispatcher)
+	if !ok {
+		t.Fatalf("dispatcher type = %T, want *memoryOrderDispatcher", ad)
+	}
+
+	start := time.Now()
+	ad.dispatch(context.Background(), t.TempDir(), start)
+	<-execStarted
+
+	// The watchdog fires while the exec is still well inside its own 300s
+	// budget. Sweeping at that moment must not touch the live tracking bead.
+	_, err := sweepStaleOrderTrackingAcrossStoresLimit(
+		[]beads.Store{store},
+		start.Add(orderTrackingSweepWatchdogStaleAfter+time.Second),
+		orderTrackingSweepWatchdogStaleAfter,
+		nil,
+		orderTrackingWatchdogMetadataInitiator,
+		false,
+		orderTrackingSweepCloseBudget,
+		ad.inFlightTracking(),
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingAcrossStoresLimit: %v", err)
+	}
+
+	openWork, err := mad.hasOpenWorkStrict(store, "long-exec")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if !openWork {
+		t.Fatal("single-flight gate reports no open work while the exec is still running; the order would re-dispatch concurrently with itself")
+	}
+
+	close(release)
+	if !ad.drain(context.Background()) {
+		t.Fatal("drain did not complete")
+	}
+}

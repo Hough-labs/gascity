@@ -1477,6 +1477,32 @@ func orderSetChangeSummary(oldOrders, newOrders []orders.Order) string {
 	return strings.Join(parts, "; ")
 }
 
+// inFlightOrderTracking unions the tracking bead IDs of every dispatch this
+// controller still has running, across the live dispatcher and any dispatcher
+// retired by a config reload but not yet drained. Retired dispatchers count:
+// their goroutines keep running and still write tracking-bead outcomes, so
+// their beads need the same protection from the stale sweep as the live
+// dispatcher's.
+func (cr *CityRuntime) inFlightOrderTracking() map[string]struct{} {
+	out := make(map[string]struct{})
+	collect := func(od orderDispatcher) {
+		if od == nil {
+			return
+		}
+		for id := range od.inFlightTracking() {
+			out[id] = struct{}{}
+		}
+	}
+	collect(cr.od)
+	for _, od := range cr.retiredOrderDispatchers {
+		collect(od)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	if !cr.orderSweepWatchdogLast.IsZero() && now.Sub(cr.orderSweepWatchdogLast) < orderTrackingSweepWatchdogInterval {
 		return
@@ -1496,13 +1522,18 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	// order's tracking so that order could bootstrap and clean the rest — a
 	// single-point-of-failure: when slow reconciler cycles keep order-tracking-
 	// sweep from firing, every order's tracking jams and no order fires (#2168).
-	// The staleAfter cutoff still protects in-flight dispatches regardless of
-	// which order they belong to, so a direct all-orders sweep is safe and
-	// recovers the jam without depending on any single order being scheduled.
-	// Closed-history retention is intentionally left to the maintenance exec
-	// order or the gc order sweep-tracking CLI; the watchdog only recovers
-	// stale open tracking beads.
-	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget)
+	// A direct all-orders sweep recovers that jam without depending on any
+	// single order being scheduled. Closed-history retention is intentionally
+	// left to the maintenance exec order or the gc order sweep-tracking CLI;
+	// the watchdog only recovers stale open tracking beads.
+	//
+	// Widening it that way made the cutoff load-bearing for orders it was
+	// never sized against. It does NOT by itself protect in-flight dispatches:
+	// at two minutes it is a fifth of an exec order's 300s default budget, so
+	// a dispatch still well inside its own deadline had its tracking bead
+	// closed underneath it. Live dispatches are excluded by identity instead —
+	// see sweepStaleOrderTrackingWithOptionsLimitMode.
+	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget, cr.inFlightOrderTracking())
 	if err := errors.Join(storeErr, sweepErr); err != nil {
 		if cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -1511,6 +1542,9 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	n := result.trackingClosed
 	if n > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
+	}
+	if result.trackingInFlightSkipped > 0 && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog spared %d tracking bead(s) with a dispatch still running\n", cr.logPrefix, result.trackingInFlightSkipped) //nolint:errcheck // best-effort stderr
 	}
 }
 
