@@ -4653,6 +4653,82 @@ build_command = "make build"
 	}
 }
 
+// TestAgentFormulaVarsRoundTrip verifies that an agent's formula_vars survives
+// TOML marshal/unmarshal, so a multi-lane rig can declare per-lane gate
+// commands on the agent itself. Mirrors TestRigFormulaVarsRoundTrip.
+func TestAgentFormulaVarsRoundTrip(t *testing.T) {
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Agents: []Agent{{
+			Name: "polecat-view",
+			Dir:  "mo",
+			FormulaVars: map[string]string{
+				"test_command": "make test-view",
+				"lint_command": "npm run lint",
+			},
+		}},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse(Marshal output): %v", err)
+	}
+	if len(got.Agents) != 1 {
+		t.Fatalf("len(Agents) after round-trip = %d, want 1", len(got.Agents))
+	}
+	if v := got.Agents[0].FormulaVars["test_command"]; v != "make test-view" {
+		t.Errorf("FormulaVars[test_command] = %q, want %q", v, "make test-view")
+	}
+	if v := got.Agents[0].FormulaVars["lint_command"]; v != "npm run lint" {
+		t.Errorf("FormulaVars[lint_command] = %q, want %q", v, "npm run lint")
+	}
+}
+
+// TestRigPatchesAgentFormulaVarsRoundTrip verifies the [[rigs.patches]]
+// override surface — the shape a city.toml uses to give one rig's lane its own
+// gates — carries formula_vars through Save/Load intact.
+func TestRigPatchesAgentFormulaVarsRoundTrip(t *testing.T) {
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Agents:    []Agent{{Name: "polecat"}},
+		Rigs: []Rig{{
+			Name: "mo",
+			Path: "/home/user/mo",
+			RigPatches: []AgentOverride{{
+				Agent: "polecat",
+				FormulaVars: map[string]string{
+					"test_command": "make test-view",
+					"lint_command": "npm run lint",
+				},
+			}},
+		}},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse(Marshal output): %v", err)
+	}
+	if len(got.Rigs) != 1 || len(got.Rigs[0].RigPatches) != 1 {
+		t.Fatalf("rigs/patches after round-trip = %d/%d, want 1/1", len(got.Rigs), len(got.Rigs[0].RigPatches))
+	}
+	ov := got.Rigs[0].RigPatches[0]
+	if ov.Agent != "polecat" {
+		t.Errorf("patch agent = %q, want %q", ov.Agent, "polecat")
+	}
+	if v := ov.FormulaVars["test_command"]; v != "make test-view" {
+		t.Errorf("FormulaVars[test_command] = %q, want %q", v, "make test-view")
+	}
+	if v := ov.FormulaVars["lint_command"]; v != "npm run lint" {
+		t.Errorf("FormulaVars[lint_command] = %q, want %q", v, "npm run lint")
+	}
+}
+
 // --- DeriveBeadsPrefix tests ---
 
 func TestDeriveBeadsPrefix(t *testing.T) {

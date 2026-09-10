@@ -1362,6 +1362,78 @@ func TestBuildSlingFormulaVarsSeedsEmptyRoutingNamespaceForUnboundAgent(t *testi
 	}
 }
 
+// TestBuildSlingFormulaVarsAgentBeatsRig locks the whole formula-var
+// precedence chain in one pass: explicit --var beats agent formula_vars, agent
+// beats rig, and rig still supplies every key the agent did not restate.
+//
+// The last clause is the point of agent-scoped vars. A multi-lane rig gives one
+// lane its own test_command without having to re-declare the rig's other gates;
+// a whole-layer replace would silently blank them and the lane would submit
+// green against gates that ran nothing.
+func TestBuildSlingFormulaVarsAgentBeatsRig(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{{
+			Name: "mo",
+			Path: "/mo",
+			FormulaVars: map[string]string{
+				"setup_command": "go mod download",
+				"lint_command":  "golangci-lint run",
+				"test_command":  "go test ./...",
+			},
+		}},
+	}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	agent := config.Agent{
+		Name: "polecat-view",
+		Dir:  "mo",
+		FormulaVars: map[string]string{
+			"lint_command":  "npm run lint",
+			"test_command":  "npm test",
+			"build_command": "npm run build",
+		},
+	}
+
+	vars := BuildSlingFormulaVars("mol-polecat-work", "MO-42", []string{
+		"test_command=make test-explicit",
+	}, agent, deps)
+
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{"explicit --var beats agent and rig", "test_command", "make test-explicit"},
+		{"agent beats rig", "lint_command", "npm run lint"},
+		{"rig applies for keys the agent omits", "setup_command", "go mod download"},
+		{"agent-only key applies", "build_command", "npm run build"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := vars[tt.key]; got != tt.want {
+				t.Errorf("vars[%s] = %q, want %q", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildSlingFormulaVarsAgentVarsApplyWithoutRig covers the agent-scoped
+// path for an agent whose Dir resolves to no rig at all. mergeRigFormulaVars
+// bails early in that case, so agent vars must not ride on the rig lookup.
+func TestBuildSlingFormulaVarsAgentVarsApplyWithoutRig(t *testing.T) {
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), newFakeRunner().run)
+
+	vars := BuildSlingFormulaVars("mol-deacon-patrol", "CITY-42", nil, config.Agent{
+		Name:        "deacon",
+		FormulaVars: map[string]string{"test_command": "make test-city"},
+	}, deps)
+
+	if got := vars["test_command"]; got != "make test-city" {
+		t.Errorf("vars[test_command] = %q, want %q", got, "make test-city")
+	}
+}
+
 func TestDoSlingCrossRigBlocks(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

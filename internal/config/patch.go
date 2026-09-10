@@ -160,6 +160,10 @@ type AgentPatch struct {
 	// (patch keys win over existing agent keys).
 	// Example: option_defaults = { model = "sonnet" }
 	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
+	// FormulaVars adds or overrides agent-scoped formula var defaults.
+	// Additive merge: patch keys win over existing agent keys, unspecified
+	// keys are preserved. Mirrors RigPatch.FormulaVars.
+	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
 }
 
 // NamedSessionPatch modifies an existing named session identified by canonical
@@ -607,6 +611,16 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 		}
 		for k, v := range p.OptionDefaults {
 			a.OptionDefaults[k] = v
+		}
+	}
+	// FormulaVars: additive merge (patch keys win). Key-by-key, not a
+	// whole-map replace: a lane that restates one gate must keep the rest.
+	if len(p.FormulaVars) > 0 {
+		if a.FormulaVars == nil {
+			a.FormulaVars = make(map[string]string, len(p.FormulaVars))
+		}
+		for k, v := range p.FormulaVars {
+			a.FormulaVars[k] = v
 		}
 	}
 	// Pool: sub-field patching.

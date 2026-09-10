@@ -217,6 +217,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		MinActiveSessions:       intVal(1),
 		ScaleCheck:              strVal("echo 3"),
 		OptionDefaults:          map[string]string{"model": "sonnet"},
+		FormulaVars:             map[string]string{"test_command": "make test-view"},
 	}
 
 	// Verify every AgentPatch field is set (non-zero).
@@ -285,6 +286,10 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 	// Verify OptionDefaults was merged.
 	if agent.OptionDefaults["model"] != "sonnet" {
 		t.Errorf("OptionDefaults[model] = %q, want %q", agent.OptionDefaults["model"], "sonnet")
+	}
+	// Verify FormulaVars was merged.
+	if agent.FormulaVars["test_command"] != "make test-view" {
+		t.Errorf("FormulaVars[test_command] = %q, want %q", agent.FormulaVars["test_command"], "make test-view")
 	}
 	// Verify EnvRemove worked.
 	if _, exists := agent.Env["REMOVE_ME"]; exists {
@@ -372,6 +377,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		MinActiveSessions:       intVal(1),
 		ScaleCheck:              strVal("echo 3"),
 		OptionDefaults:          map[string]string{"model": "sonnet"},
+		FormulaVars:             map[string]string{"test_command": "make test-view"},
 	}
 
 	// Verify every AgentOverride field is set (non-zero).
@@ -439,6 +445,10 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 	// Verify OptionDefaults was merged.
 	if agent.OptionDefaults["model"] != "sonnet" {
 		t.Errorf("OptionDefaults[model] = %q, want %q", agent.OptionDefaults["model"], "sonnet")
+	}
+	// Verify FormulaVars was merged (guards the toAgentPatch adapter).
+	if agent.FormulaVars["test_command"] != "make test-view" {
+		t.Errorf("FormulaVars[test_command] = %q, want %q", agent.FormulaVars["test_command"], "make test-view")
 	}
 	if agent.MinActiveSessions == nil || *agent.MinActiveSessions != 2 || agent.MaxActiveSessions == nil || *agent.MaxActiveSessions != 10 {
 		t.Errorf("Scaling not applied correctly: min=%v max=%v", agent.MinActiveSessions, agent.MaxActiveSessions)

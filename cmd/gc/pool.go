@@ -408,6 +408,16 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 			dst.OptionDefaults[k] = v
 		}
 	}
+	// FormulaVars must survive pool expansion: a lane's gate commands are
+	// exactly what each pool instance needs, and an instance that lost them
+	// would fall back to the rig's — the silent wrong-gate failure
+	// agent-scoped vars exist to prevent.
+	if len(src.FormulaVars) > 0 {
+		dst.FormulaVars = make(map[string]string, len(src.FormulaVars))
+		for k, v := range src.FormulaVars {
+			dst.FormulaVars[k] = v
+		}
+	}
 	if src.AssignedWorkDeferLimit != nil {
 		v := *src.AssignedWorkDeferLimit
 		dst.AssignedWorkDeferLimit = &v

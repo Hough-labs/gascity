@@ -69,6 +69,9 @@ export type AgentPatch = {
         [key: string]: string;
     };
     EnvRemove: Array<string> | null;
+    FormulaVars: {
+        [key: string]: string;
+    };
     HooksInstalled: boolean | null;
     IdleTimeout: string | null;
     InjectAssignedSkills: boolean | null;

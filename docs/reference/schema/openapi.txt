@@ -214,6 +214,12 @@
               "null"
             ]
           },
+          "FormulaVars": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
           "HooksInstalled": {
             "type": [
               "boolean",
@@ -556,7 +562,8 @@
           "MaxActiveSessions",
           "MinActiveSessions",
           "ScaleCheck",
-          "OptionDefaults"
+          "OptionDefaults",
+          "FormulaVars"
         ],
         "type": "object"
       },

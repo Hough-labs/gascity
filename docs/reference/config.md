@@ -103,6 +103,7 @@ Agent defines a configured agent in the city.
 | `emits_permission_warning` | boolean |  |  | EmitsPermissionWarning indicates whether the agent emits permission prompts that should be suppressed. |
 | `env` | map[string]string |  |  | Env sets additional environment variables for the agent process. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults overrides the provider's effective schema defaults for this agent. Keys are option keys, values are choice values. Applied on top of the provider's OptionDefaults (agent keys win). Example: option_defaults = &#123; permission_mode = "plan", model = "sonnet" &#125; |
+| `formula_vars` | map[string]string |  |  | FormulaVars provides agent-scoped defaults for formula vars, layered over the rig's. Keys match var names declared in formula `[vars.&lt;name&gt;]` blocks, the same keys as [rigs.formula_vars]. Values apply when a formula runs for this agent and the caller did not pass an explicit --var override.  This is what lets a multi-lane rig give each lane correct gates. Rig vars remain the fallback for every key the agent does not restate, so declaring one lane's test_command never blanks the rig's other gates.  Precedence: --var &gt; agent.formula_vars &gt; rig.formula_vars &gt; formula-level [vars.*].default. |
 | `max_active_sessions` | integer |  |  | MaxActiveSessions is the agent-level cap on concurrent sessions. Nil means inherit from rig, then workspace, then unlimited. Replaces pool.max. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions is the minimum number of sessions to keep alive. Agent-level only. Counts against rig/workspace caps. Replaces pool.min. This controls pool sessions independently of [[named_session]] mode="always"; both produce sessions, and gc doctor reports accidental combinations. |
 | `scale_check` | string |  |  | ScaleCheck is a shell command template whose output reports new unassigned session demand. In bead-backed reconciliation this is additive: assigned work is resumed separately, and ScaleCheck reports only how many new generic sessions to start, still bounded by all cap levels. Legacy no-store evaluation continues to treat the output as the desired session count. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running the command. |
@@ -209,6 +210,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
 | `scale_check` | string |  |  | ScaleCheck overrides the shell command whose output reports new unassigned session demand for bead-backed reconciliation. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (override keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
+| `formula_vars` | map[string]string |  |  | FormulaVars adds or overrides agent-scoped formula var defaults. Merges additively key-by-key (override keys win over existing agent keys), so a lane can restate one gate without blanking the rest. Example: formula_vars = &#123; test_command = "make test-view" &#125; |
 
 ## AgentPatch
 
@@ -267,6 +269,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
 | `scale_check` | string |  |  | ScaleCheck overrides the command template whose output reports new unassigned session demand for bead-backed reconciliation. Supports the same Go template placeholders as Agent.scale_check. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (patch keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
+| `formula_vars` | map[string]string |  |  | FormulaVars adds or overrides agent-scoped formula var defaults. Additive merge: patch keys win over existing agent keys, unspecified keys are preserved. Mirrors RigPatch.FormulaVars. |
 
 ## BeadPolicyConfig
 

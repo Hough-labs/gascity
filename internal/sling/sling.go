@@ -1070,8 +1070,9 @@ func rigStoredDefaultBranch(cfg *config.City, beadID string, a config.Agent) str
 }
 
 // BuildSlingFormulaVars builds the variable map for formula instantiation.
-// Precedence (highest wins): explicit --var > rig.formula_vars > routing-injected
-// defaults (issue/rig_name/base_branch/...) > formula-level [vars.*].default.
+// Precedence (highest wins): explicit --var > agent.formula_vars >
+// rig.formula_vars > routing-injected defaults (issue, rig_name, binding_name,
+// binding_prefix, base_branch, target_branch) > formula-level [vars.*].default.
 func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a config.Agent, deps SlingDeps) map[string]string {
 	return buildSlingFormulaVars(formulaName, beadID, userVars, a, deps, true)
 }
@@ -1088,6 +1089,7 @@ func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 			vars[key] = value
 		}
 	}
+	mergeAgentFormulaVars(vars, a)
 	mergeRigFormulaVars(vars, deps.Cfg, a)
 	addVar := func(key, value string) {
 		if value == "" {
@@ -1121,6 +1123,23 @@ func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 	}
 
 	return vars
+}
+
+// mergeAgentFormulaVars folds agent-scoped formula_vars defaults into vars.
+// Entries already in vars — explicit --var — are preserved, the same
+// earliest-writer-wins rule mergeRigFormulaVars uses. Callers merge this
+// BEFORE the rig layer, which is what makes an agent var beat its rig's while
+// leaving every key the agent omitted to fall through to the rig.
+//
+// Unlike the rig layer this needs no rig lookup, so an agent bound to no rig
+// (a city-scoped agent) still gets its own vars.
+func mergeAgentFormulaVars(vars map[string]string, a config.Agent) {
+	for k, v := range a.FormulaVars {
+		if _, explicit := vars[k]; explicit {
+			continue
+		}
+		vars[k] = v
+	}
 }
 
 // mergeRigFormulaVars folds rig-scoped formula_vars defaults into vars.

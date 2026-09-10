@@ -194,6 +194,13 @@
           "type": "object",
           "description": "OptionDefaults overrides the provider's effective schema defaults\nfor this agent. Keys are option keys, values are choice values.\nApplied on top of the provider's OptionDefaults (agent keys win).\nExample: option_defaults = { permission_mode = \"plan\", model = \"sonnet\" }"
         },
+        "formula_vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "FormulaVars provides agent-scoped defaults for formula vars, layered\nover the rig's. Keys match var names declared in formula `[vars.\u003cname\u003e]`\nblocks, the same keys as [rigs.formula_vars]. Values apply when a\nformula runs for this agent and the caller did not pass an explicit\n--var override.\n\nThis is what lets a multi-lane rig give each lane correct gates. Rig\nvars remain the fallback for every key the agent does not restate, so\ndeclaring one lane's test_command never blanks the rig's other gates.\n\nPrecedence: --var \u003e agent.formula_vars \u003e rig.formula_vars \u003e\nformula-level [vars.*].default."
+        },
         "max_active_sessions": {
           "type": "integer",
           "description": "MaxActiveSessions is the agent-level cap on concurrent sessions.\nNil means inherit from rig, then workspace, then unlimited.\nReplaces pool.max."
@@ -701,6 +708,13 @@
           },
           "type": "object",
           "description": "OptionDefaults adds or overrides provider option defaults for this agent.\nKeys are option keys, values are choice values. Merges additively\n(override keys win over existing agent keys).\nExample: option_defaults = { model = \"sonnet\" }"
+        },
+        "formula_vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "FormulaVars adds or overrides agent-scoped formula var defaults.\nMerges additively key-by-key (override keys win over existing agent\nkeys), so a lane can restate one gate without blanking the rest.\nExample: formula_vars = { test_command = \"make test-view\" }"
         }
       },
       "additionalProperties": false,
@@ -986,6 +1000,13 @@
           },
           "type": "object",
           "description": "OptionDefaults adds or overrides provider option defaults for this agent.\nKeys are option keys, values are choice values. Merges additively\n(patch keys win over existing agent keys).\nExample: option_defaults = { model = \"sonnet\" }"
+        },
+        "formula_vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "FormulaVars adds or overrides agent-scoped formula var defaults.\nAdditive merge: patch keys win over existing agent keys, unspecified\nkeys are preserved. Mirrors RigPatch.FormulaVars."
         }
       },
       "additionalProperties": false,

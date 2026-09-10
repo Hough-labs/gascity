@@ -864,6 +864,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Namepool:                     "names.txt",
 		NamepoolNames:                []string{"alpha", "bravo"},
 		OptionDefaults:               map[string]string{"effort": "max"},
+		FormulaVars:                  map[string]string{"test_command": "make test-view"},
 		BindingName:                  "gastown",
 		PackName:                     "gastown",
 		AssignedWorkDeferLimit:       intPtr(3),
@@ -930,6 +931,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	// Verify deep independence: mutating src slices/maps should not affect dst.
 	src.PreStart[0] = "MUTATED"
 	src.Env["K"] = "MUTATED"
+	src.FormulaVars["test_command"] = "MUTATED"
 	src.SessionSetup[0] = "MUTATED"
 	src.Args[0] = "MUTATED"
 	src.ProcessNames[0] = "MUTATED"
@@ -945,6 +947,9 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	}
 	if dst.Env["K"] == "MUTATED" {
 		t.Error("Env is not a deep copy")
+	}
+	if dst.FormulaVars["test_command"] == "MUTATED" {
+		t.Error("FormulaVars is not a deep copy")
 	}
 	if dst.SessionSetup[0] == "MUTATED" {
 		t.Error("SessionSetup is not a deep copy")

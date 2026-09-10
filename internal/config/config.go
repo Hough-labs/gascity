@@ -795,6 +795,11 @@ type AgentOverride struct {
 	// (override keys win over existing agent keys).
 	// Example: option_defaults = { model = "sonnet" }
 	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
+	// FormulaVars adds or overrides agent-scoped formula var defaults.
+	// Merges additively key-by-key (override keys win over existing agent
+	// keys), so a lane can restate one gate without blanking the rest.
+	// Example: formula_vars = { test_command = "make test-view" }
+	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
 }
 
 // PackSource defines a legacy remote pack repository.
@@ -3170,6 +3175,19 @@ type Agent struct {
 	// Applied on top of the provider's OptionDefaults (agent keys win).
 	// Example: option_defaults = { permission_mode = "plan", model = "sonnet" }
 	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
+	// FormulaVars provides agent-scoped defaults for formula vars, layered
+	// over the rig's. Keys match var names declared in formula `[vars.<name>]`
+	// blocks, the same keys as [rigs.formula_vars]. Values apply when a
+	// formula runs for this agent and the caller did not pass an explicit
+	// --var override.
+	//
+	// This is what lets a multi-lane rig give each lane correct gates. Rig
+	// vars remain the fallback for every key the agent does not restate, so
+	// declaring one lane's test_command never blanks the rig's other gates.
+	//
+	// Precedence: --var > agent.formula_vars > rig.formula_vars >
+	// formula-level [vars.*].default.
+	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
 	// MaxActiveSessions is the agent-level cap on concurrent sessions.
 	// Nil means inherit from rig, then workspace, then unlimited.
 	// Replaces pool.max.
@@ -3467,6 +3485,7 @@ func (a Agent) Clone() Agent {
 	out.SharedMCP = append([]string(nil), a.SharedMCP...)
 	out.Env = deepCopyStringMap(a.Env)
 	out.OptionDefaults = deepCopyStringMap(a.OptionDefaults)
+	out.FormulaVars = deepCopyStringMap(a.FormulaVars)
 	out.ReadyDelayMs = copyIntPtr(a.ReadyDelayMs)
 	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
 	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)

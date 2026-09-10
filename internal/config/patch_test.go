@@ -465,6 +465,93 @@ func TestApplyRigPatchFormulaVars(t *testing.T) {
 	})
 }
 
+// TestApplyPatches_AgentFormulaVars locks the merge semantics of agent-scoped
+// formula_vars on the AgentPatch path. The merge is KEY-BY-KEY, mirroring the
+// rig path in TestApplyRigPatchFormulaVars: a whole-map replace would silently
+// drop keys the lane did not restate, which is the same class of silent
+// misconfiguration agent-scoped vars exist to fix.
+func TestApplyPatches_AgentFormulaVars(t *testing.T) {
+	t.Run("adds keys to an agent with no existing formula_vars", func(t *testing.T) {
+		cfg := &City{Agents: []Agent{{Name: "polecat", Dir: "mo"}}}
+		err := ApplyPatches(cfg, Patches{
+			Agents: []AgentPatch{{
+				Dir:         "mo",
+				Name:        "polecat",
+				FormulaVars: map[string]string{"test_command": "make test-view"},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("ApplyPatches: %v", err)
+		}
+		if got := cfg.Agents[0].FormulaVars["test_command"]; got != "make test-view" {
+			t.Errorf("FormulaVars[test_command] = %q, want %q", got, "make test-view")
+		}
+	})
+
+	t.Run("patch keys win and unspecified keys survive", func(t *testing.T) {
+		cfg := &City{Agents: []Agent{{
+			Name:        "polecat",
+			Dir:         "mo",
+			FormulaVars: map[string]string{"test_command": "go test ./...", "lint_command": "golangci-lint"},
+		}}}
+		err := ApplyPatches(cfg, Patches{
+			Agents: []AgentPatch{{
+				Dir:         "mo",
+				Name:        "polecat",
+				FormulaVars: map[string]string{"test_command": "make test-view"},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("ApplyPatches: %v", err)
+		}
+		if got := cfg.Agents[0].FormulaVars["test_command"]; got != "make test-view" {
+			t.Errorf("FormulaVars[test_command] = %q, want %q (patch overrides)", got, "make test-view")
+		}
+		if got := cfg.Agents[0].FormulaVars["lint_command"]; got != "golangci-lint" {
+			t.Errorf("FormulaVars[lint_command] = %q, want %q (key-by-key merge, not replace)", got, "golangci-lint")
+		}
+	})
+
+	t.Run("empty patch leaves existing formula_vars unchanged", func(t *testing.T) {
+		cfg := &City{Agents: []Agent{{
+			Name:        "polecat",
+			Dir:         "mo",
+			FormulaVars: map[string]string{"test_command": "go test ./..."},
+		}}}
+		err := ApplyPatches(cfg, Patches{
+			Agents: []AgentPatch{{Dir: "mo", Name: "polecat", Suspended: ptrBool(true)}},
+		})
+		if err != nil {
+			t.Fatalf("ApplyPatches: %v", err)
+		}
+		if got := cfg.Agents[0].FormulaVars["test_command"]; got != "go test ./..." {
+			t.Errorf("FormulaVars[test_command] = %q, want %q (untouched)", got, "go test ./...")
+		}
+	})
+}
+
+// TestApplyAgentOverrideFormulaVars is the [[rigs.patches]] half of the same
+// contract. Both override surfaces share applyAgentMutation, so this proves
+// toAgentPatch actually carries FormulaVars across the adapter rather than
+// dropping it silently.
+func TestApplyAgentOverrideFormulaVars(t *testing.T) {
+	agent := Agent{
+		Name:        "polecat",
+		Dir:         "mo",
+		FormulaVars: map[string]string{"test_command": "go test ./...", "lint_command": "golangci-lint"},
+	}
+	applyAgentOverride(&agent, &AgentOverride{
+		Agent:       "polecat",
+		FormulaVars: map[string]string{"test_command": "make test-view"},
+	})
+	if got := agent.FormulaVars["test_command"]; got != "make test-view" {
+		t.Errorf("FormulaVars[test_command] = %q, want %q (override wins)", got, "make test-view")
+	}
+	if got := agent.FormulaVars["lint_command"]; got != "golangci-lint" {
+		t.Errorf("FormulaVars[lint_command] = %q, want %q (key-by-key merge, not replace)", got, "golangci-lint")
+	}
+}
+
 func TestApplyPatches_RigNotFound(t *testing.T) {
 	cfg := &City{
 		Rigs: []Rig{{Name: "hw", Path: "/path"}},

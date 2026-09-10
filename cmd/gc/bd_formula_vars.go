@@ -29,8 +29,17 @@ import (
 //     output rendered with the same vars instead of emitting raw
 //     `{{placeholder}}` text.
 //
-// Precedence matches sling.BuildSlingFormulaVars: explicit --var beats rig
-// formula_vars, which beat formula-level defaults.
+// Precedence follows sling.BuildSlingFormulaVars for the layers this path can
+// see: explicit --var beats rig formula_vars, which beat formula-level
+// defaults.
+//
+// The agent layer sling applies between those two — `agent.formula_vars`, the
+// per-lane override — is deliberately absent here. A `gc bd` invocation
+// resolves a RIG (see rigFormulaVarsForBdTarget, which keys off
+// execStoreTarget.RigName) and never an agent, so there is no lane identity to
+// resolve agent-scoped vars against. A wisp poured through `gc bd` therefore
+// gets its rig's gates, not the pouring lane's. Agent-scoped vars reach
+// formulas through `gc sling` only.
 //
 // The read path substitutes rig formula_vars and NOTHING ELSE. Filling the
 // remaining placeholders from the formula's own `[vars.*].default` was tried
@@ -102,7 +111,8 @@ func bdMolPourFormulaIndex(args []string) (int, bool) {
 
 // explicitFormulaVarKeys returns the formula var names the caller supplied
 // explicitly via `--var name=value` or `--var=name=value`. Those always win
-// over rig defaults, mirroring sling.BuildSlingFormulaVars.
+// over the rig defaults injected below, mirroring sling.BuildSlingFormulaVars,
+// where an explicit --var outranks both the agent and rig layers.
 func explicitFormulaVarKeys(args []string) map[string]bool {
 	keys := make(map[string]bool)
 	for i := 0; i < len(args); i++ {
