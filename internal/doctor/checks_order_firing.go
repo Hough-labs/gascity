@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -20,10 +21,37 @@ import (
 const (
 	orderFiringCurrentName    = "order-firing-current"
 	orderFiringInspectHintFmt = "Inspect with: gc order check && gc order history %s"
+	// orderFiringHistoryTimeout bounds ONE order-history lookup, not the whole
+	// check. Wrapping the whole check made it a budget shared by every order in
+	// the loop — 15s divided by the order count — so a city with 52 orders
+	// allowed ~0.29s each and tripped the wall unconditionally (gascity-xx4k).
+	// Per-order history cost measured on a healthy city ranged 3.9s-6.4s; 15s
+	// is sized off that slow end.
 	orderFiringHistoryTimeout = 15 * time.Second
+	// The two lookup outcomes are distinct findings and get distinct hints. A
+	// lookup that merely ran out of budget says nothing about reachability;
+	// reporting it as a connectivity fault sends operators to diagnose a
+	// data-plane outage that is not there.
+	orderFiringSlowHistoryHintFmt = "order history reads are slow, which is not by itself a beads/Dolt outage — time one with: gc order history %s"
+	orderFiringHistoryErrorHint   = "order history read failed: check beads/Dolt connectivity, then rerun gc doctor"
 )
 
+// errOrderHistoryTimedOut marks one order-history lookup that exceeded its
+// budget. That order's freshness is unknown — not stale, and not evidence
+// about the data plane.
+var errOrderHistoryTimedOut = errors.New("order history lookup timed out")
+
+// errOrderHistoryAbandoned marks the orders skipped after a lookup was
+// abandoned. An abandoned lookup is still running inside the caller's resolver,
+// which the check promises never to enter twice at once, so the remaining
+// orders report unknown freshness instead of racing it.
+var errOrderHistoryAbandoned = errors.New("order history not consulted: an earlier lookup was abandoned and is still running")
+
 // OrderFiringCurrentLastRunFunc reports the newest persisted run time for an order.
+//
+// The check never invokes it concurrently: at most one lookup is in flight for
+// the lifetime of a run, so implementations may hold unsynchronized state (the
+// gc doctor wiring caches opened beads stores in a plain map).
 type OrderFiringCurrentLastRunFunc func(order orders.Order) (time.Time, error)
 
 // OrderFiringCurrentOption configures the scheduled-order freshness check.
@@ -44,6 +72,9 @@ type OrderFiringCurrentCheck struct {
 	clock          func() time.Time
 	lastRun        OrderFiringCurrentLastRunFunc
 	historyTimeout time.Duration
+	// historyAbandoned is set once a lookup exceeds its budget and is left
+	// running. It is per-run state on a check that gc doctor runs once.
+	historyAbandoned bool
 }
 
 // NewOrderFiringCurrentCheck creates a check for cron and cooldown order freshness.
@@ -70,34 +101,26 @@ func (c *OrderFiringCurrentCheck) CanFix() bool { return false }
 func (c *OrderFiringCurrentCheck) Fix(_ *CheckContext) error { return nil }
 
 // Run compares each cron or cooldown order with its order.fired history.
+//
+// The check carries no wall of its own. The only potentially blocking I/O is
+// the per-order history lookup, and each of those carries its own budget
+// (lastRunWithin), so the check's cost scales with the number of orders whose
+// recorded events already look stale instead of every order competing for one
+// shared budget. gc doctor's --check-timeout remains the outer bound.
 func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
-	timeout := c.historyTimeout
-	if timeout <= 0 {
-		timeout = orderFiringHistoryTimeout
-	}
+	return c.run(ctx)
+}
 
-	// The order-history resolver opens the beads/Dolt store and does not accept
-	// a context. Keep that potentially blocking I/O from wedging the complete
-	// doctor run; the gc process exits after printing this failed check.
-	results := make(chan *CheckResult, 1)
-	go func() {
-		results <- c.run(ctx)
-	}()
-
-	select {
-	case result := <-results:
-		return result
-	case <-time.After(timeout):
-		return &CheckResult{
-			Name:    c.Name(),
-			Status:  StatusError,
-			Message: fmt.Sprintf("order history lookup timed out after %s", timeout),
-			FixHint: "check beads/Dolt connectivity, then rerun gc doctor",
-		}
+// effectiveHistoryTimeout is the budget for a single order-history lookup.
+func (c *OrderFiringCurrentCheck) effectiveHistoryTimeout() time.Duration {
+	if c.historyTimeout > 0 {
+		return c.historyTimeout
 	}
+	return orderFiringHistoryTimeout
 }
 
 func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
+	c.historyAbandoned = false
 	result := &CheckResult{Name: c.Name()}
 	if c.cfg == nil {
 		result.Status = StatusOK
@@ -147,6 +170,11 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	// Track severity contributions across error-level entries. Warnings should
 	// stay visible without converting an advisory error into a blocking gate.
 	var blockingErrors, advisoryErrors int
+	// Unconfirmed orders (lookup out of budget) and failed lookups are counted
+	// separately from the staleness verdicts so the message and the fix hint
+	// can name the finding that actually occurred.
+	var unconfirmed, historyErrors int
+	var firstSlowHistory string
 	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
 
 	for _, order := range allOrders {
@@ -170,10 +198,20 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		lastFired, err := c.latestOrderFiredAt(firedEvents, order, expected, now)
 		if err != nil {
 			worst = worseStatus(worst, StatusError)
-			result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
 			if firstNonOK == "" {
 				firstNonOK = orderHistoryHintTarget(order)
 			}
+			if errors.Is(err, errOrderHistoryTimedOut) || errors.Is(err, errOrderHistoryAbandoned) {
+				result.Details = append(result.Details, fmt.Sprintf("%s: %v (freshness unconfirmed)", orderDisplayName(order), err))
+				if firstSlowHistory == "" {
+					firstSlowHistory = orderHistoryHintTarget(order)
+				}
+				unconfirmed++
+				advisoryErrors++
+				continue
+			}
+			result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
+			historyErrors++
 			blockingErrors++
 			continue
 		}
@@ -207,12 +245,23 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	case StatusWarning:
 		result.Message = "scheduled orders are overdue"
 	case StatusError:
-		result.Message = "scheduled orders are stale"
+		// Say "unconfirmed" rather than "stale" when every error-level entry is
+		// a lookup that ran out of budget: nothing was observed to be stale.
+		if unconfirmed > 0 && blockingErrors == 0 && advisoryErrors == unconfirmed {
+			result.Message = fmt.Sprintf("order history unconfirmed for %d order(s): lookup exceeded %s each", unconfirmed, c.effectiveHistoryTimeout())
+		} else {
+			result.Message = "scheduled orders are stale"
+		}
 	}
 	if blockingErrors == 0 && advisoryErrors > 0 {
 		result.Severity = SeverityAdvisory
 	}
-	if firstNonOK != "" {
+	switch {
+	case historyErrors > 0:
+		result.FixHint = orderFiringHistoryErrorHint
+	case firstSlowHistory != "":
+		result.FixHint = fmt.Sprintf(orderFiringSlowHistoryHintFmt, firstSlowHistory)
+	case firstNonOK != "":
 		result.FixHint = fmt.Sprintf(orderFiringInspectHintFmt, firstNonOK)
 	}
 	return result
@@ -597,7 +646,7 @@ func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order 
 	if !latest.IsZero() && now.Sub(latest) < expected+expected/2 {
 		return latest, nil
 	}
-	runAt, err := c.lastRun(order)
+	runAt, err := c.lastRunWithin(order)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -605,6 +654,39 @@ func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order 
 		return runAt, nil
 	}
 	return latest, nil
+}
+
+// lastRunWithin bounds ONE order-history lookup, so the budget is what a single
+// order is allowed rather than what all of them share.
+//
+// The resolver behind lastRun opens the beads/Dolt store and accepts no
+// context, so a lookup that runs past its budget can only be abandoned, not
+// canceled — and an abandoned lookup is still inside the resolver. Rather than
+// re-enter it concurrently (the gc doctor wiring caches opened stores in a
+// plain map), the check stops consulting history for the rest of the run and
+// reports the remaining orders as unconfirmed. gc doctor is a short-lived
+// process, so the abandoned lookup dies with it.
+func (c *OrderFiringCurrentCheck) lastRunWithin(order orders.Order) (time.Time, error) {
+	if c.historyAbandoned {
+		return time.Time{}, errOrderHistoryAbandoned
+	}
+	type lookup struct {
+		at  time.Time
+		err error
+	}
+	done := make(chan lookup, 1)
+	go func() {
+		at, err := c.lastRun(order)
+		done <- lookup{at: at, err: err}
+	}()
+	timeout := c.effectiveHistoryTimeout()
+	select {
+	case res := <-done:
+		return res.at, res.err
+	case <-time.After(timeout):
+		c.historyAbandoned = true
+		return time.Time{}, fmt.Errorf("%w after %s", errOrderHistoryTimedOut, timeout)
+	}
 }
 
 func latestOrderFiredAt(evts []events.Event, subject string) time.Time {

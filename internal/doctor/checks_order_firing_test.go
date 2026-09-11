@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -730,7 +731,63 @@ func TestLatestOrderFiredAt_StaleEventConsultsLastRun(t *testing.T) {
 	}
 }
 
-func TestOrderFiringCurrent_TimesOutStalledOrderHistory(t *testing.T) {
+// TestOrderFiringCurrent_HistoryBudgetIsPerOrderNotShared is the regression
+// guard for gascity-xx4k. The budget used to wall the whole check, so it was
+// really 15s divided by the order count and the run collapsed to one opaque
+// timeout with no per-order detail. It now belongs to a single lookup: the
+// wedged order is granted the WHOLE budget and is named on its own line, and
+// every other monitored order is still accounted for individually.
+func TestOrderFiringCurrent_HistoryBudgetIsPerOrderNotShared(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "aa-wedged-history", "cron", "0 */4 * * *")
+	writeOrderFiringTestOrder(t, cityPath, "zz-live-history", "cron", "0 */4 * * *")
+	// Both orders look stale in the event log, so both take the order-history
+	// path rather than the recent-event fast path.
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "aa-wedged-history", Ts: now.Add(-13 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "zz-live-history", Ts: now.Add(-13 * time.Hour)},
+	)
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	check := NewOrderFiringCurrentCheck(cfg, cityPath)
+	check.clock = func() time.Time { return now }
+	check.historyTimeout = 40 * time.Millisecond
+	var inFlight int32
+	check.lastRun = func(order orders.Order) (time.Time, error) {
+		// A second concurrent entry would race the caller's unsynchronized
+		// store cache, which is exactly what the abandonment guard prevents.
+		if atomic.AddInt32(&inFlight, 1) != 1 {
+			t.Errorf("order history resolver entered concurrently for %s", order.ScopedName())
+		}
+		defer atomic.AddInt32(&inFlight, -1)
+		if order.Name == "aa-wedged-history" {
+			<-release
+			return time.Time{}, nil
+		}
+		return now.Add(-1 * time.Hour), nil
+	}
+
+	result := check.Run(&CheckContext{CityPath: cityPath})
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "aa-wedged-history: order history lookup timed out after 40ms") {
+		t.Fatalf("details = %q, want the wedged order reported as a timed-out lookup", details)
+	}
+	// The abandoned lookup is still inside the caller's resolver, which the
+	// check promises never to enter twice at once, so the remaining orders are
+	// reported as unconfirmed rather than silently dropped from the run.
+	if !strings.Contains(details, "zz-live-history: order history not consulted") {
+		t.Fatalf("details = %q, want the second order accounted for after the first one wedged", details)
+	}
+}
+
+// TestOrderFiringCurrent_SlowHistoryIsAdvisoryAndDoesNotBlameDolt pins the
+// diagnosis half of gascity-xx4k. A lookup that ran out of budget says the
+// order's freshness is UNKNOWN; it says nothing about whether beads/Dolt is
+// reachable, so it must not be reported as a blocking connectivity fault.
+func TestOrderFiringCurrent_SlowHistoryIsAdvisoryAndDoesNotBlameDolt(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)
 	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stalled-history", "cron", "0 */4 * * *")
@@ -743,7 +800,7 @@ func TestOrderFiringCurrent_TimesOutStalledOrderHistory(t *testing.T) {
 	t.Cleanup(func() { close(release) })
 	check := NewOrderFiringCurrentCheck(cfg, cityPath)
 	check.clock = func() time.Time { return now }
-	check.historyTimeout = 20 * time.Millisecond
+	check.historyTimeout = 40 * time.Millisecond
 	check.lastRun = func(orders.Order) (time.Time, error) {
 		<-release
 		return time.Time{}, nil
@@ -753,7 +810,75 @@ func TestOrderFiringCurrent_TimesOutStalledOrderHistory(t *testing.T) {
 	if result.Status != StatusError {
 		t.Fatalf("status = %v, want error; msg = %s", result.Status, result.Message)
 	}
-	if !strings.Contains(result.Message, "order history lookup timed out after 20ms") {
-		t.Fatalf("message = %q, want timeout diagnostic", result.Message)
+	if result.Severity != SeverityAdvisory {
+		t.Fatalf("severity = %v, want SeverityAdvisory: an unconfirmed lookup is not a blocking finding", result.Severity)
+	}
+	if !strings.Contains(result.Message, "unconfirmed") {
+		t.Fatalf("message = %q, want it to report freshness as unconfirmed rather than stale", result.Message)
+	}
+	if strings.Contains(result.FixHint, "connectivity") {
+		t.Fatalf("fix hint = %q, want no connectivity claim for a lookup that merely ran slowly", result.FixHint)
+	}
+	if !strings.Contains(result.FixHint, "gc order history mol-dog-stalled-history") {
+		t.Fatalf("fix hint = %q, want it to name the order to time", result.FixHint)
+	}
+}
+
+// TestOrderFiringCurrent_HistoryErrorStaysBlockingAndNamesConnectivity is the
+// other side of the split: a lookup that actually FAILED is the one finding
+// that does implicate the data plane, and it keeps the connectivity hint.
+func TestOrderFiringCurrent_HistoryErrorStaysBlockingAndNamesConnectivity(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-broken-history", "cron", "0 */4 * * *")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "mol-dog-broken-history", Ts: now.Add(-13 * time.Hour)},
+	)
+
+	check := NewOrderFiringCurrentCheck(cfg, cityPath)
+	check.clock = func() time.Time { return now }
+	check.lastRun = func(orders.Order) (time.Time, error) {
+		return time.Time{}, fmt.Errorf("dial 127.0.0.1:51160: connection refused")
+	}
+
+	result := check.Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %s", result.Status, result.Message)
+	}
+	if result.Severity != SeverityBlocking {
+		t.Fatalf("severity = %v, want SeverityBlocking for a failed history read", result.Severity)
+	}
+	if !strings.Contains(result.FixHint, "beads/Dolt connectivity") {
+		t.Fatalf("fix hint = %q, want the connectivity hint for a failed history read", result.FixHint)
+	}
+}
+
+// TestOrderFiringCurrent_ManyOrdersOnHealthyCityPass encodes the acceptance
+// criterion from gascity-xx4k: order count alone must never trip the check.
+// The city that reported the bug had 52 orders; this one has more.
+func TestOrderFiringCurrent_ManyOrdersOnHealthyCityPass(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	evts := []events.Event{{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)}}
+	const orderCount = 60
+	for i := 0; i < orderCount; i++ {
+		name := fmt.Sprintf("mol-dog-healthy-%02d", i)
+		writeOrderFiringTestOrder(t, cityPath, name, "cron", "0 */4 * * *")
+		evts = append(evts, events.Event{Type: events.OrderFired, Subject: name, Ts: now.Add(-1 * time.Hour)})
+	}
+	writeOrderFiringTestEvents(t, cityPath, evts...)
+
+	check := NewOrderFiringCurrentCheck(cfg, cityPath)
+	check.clock = func() time.Time { return now }
+	check.lastRun = func(order orders.Order) (time.Time, error) {
+		t.Errorf("order history consulted for %s, which fired 1h ago: the recent-event fast path must cover it", order.ScopedName())
+		return time.Time{}, nil
+	}
+
+	result := check.Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v (%s), want ok for %d healthy orders; details:\n%s",
+			result.Status, result.Message, orderCount, strings.Join(result.Details, "\n"))
 	}
 }
