@@ -200,6 +200,20 @@ func resetPendingCommittedAtInfo(info sessionpkg.Info) (string, time.Time, bool)
 	return raw, committedAt, true
 }
 
+// recordResetStallIfDue diagnoses a reset that committed but never started, and
+// returns the remediation the caller should persist (nil when there is nothing
+// to do).
+//
+// Diagnosing alone is not enough. The reset route kills the runtime and then
+// depends on a controller-side wake it never verified, so a stalled reset leaves
+// the seat asleep indefinitely — in the recorded incident, until a human ran
+// `gc session wake`, the one verb that clears every wake blocker. An unattended
+// session has nobody to do that. The returned patch clears those blockers so the
+// already-pending reset can be granted on the next tick.
+//
+// The drainTracker dedup bounds it to one remediation per reset_committed_at, so
+// a session that is genuinely unstartable is healed once rather than respawned
+// forever.
 func recordResetStallIfDue(
 	info sessionpkg.Info,
 	template string,
@@ -211,23 +225,23 @@ func recordResetStallIfDue(
 	rec events.Recorder,
 	stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
-) {
+) sessionpkg.MetadataPatch {
 	resetCommittedAt, committedAt, pending := resetPendingCommittedAtInfo(info)
 	if !pending {
 		if dt != nil {
 			dt.clearResetStall(info.ID)
 		}
-		return
+		return nil
 	}
 	if alive || startupTimeout <= 0 {
-		return
+		return nil
 	}
 	elapsed := now.Sub(committedAt)
 	if elapsed <= startupTimeout {
-		return
+		return nil
 	}
-	if dt != nil && !dt.markResetStall(info.ID) {
-		return
+	if dt != nil && !dt.markResetStall(info.ID, resetCommittedAt) {
+		return nil
 	}
 	if stderr == nil {
 		stderr = io.Discard
@@ -264,6 +278,12 @@ func recordResetStallIfDue(
 			},
 		)
 	}
+
+	// Clear what the reset route itself never cleared. continuation_reset_pending
+	// is deliberately left standing: the reset is still the thing that wants to
+	// happen, and with the blockers gone ComputeAwakeSet grants it as
+	// "reset-pending" on the next tick.
+	return sessionpkg.ClearWakeBlockersPatch(info.State, info.SleepReason)
 }
 
 func drainAckAsyncStopKey(sessionID, name string) string {
@@ -2159,7 +2179,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			shadowTick.captureRuntime(id, "observeRuntimeProviderLiveness", name, triFromBool(running), triFromBool(alive))
 		}
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, id, tp.Hints.ProcessNames)
-		recordResetStallIfDue(infoByID[id], tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace)
+		if heal := recordResetStallIfDue(infoByID[id], tp.TemplateName, name, alive, startupTimeout, clk.Now().UTC(), dt, rec, stderr, trace); len(heal) > 0 {
+			if err := sessFront.ApplyPatch(id, heal); err != nil {
+				fmt.Fprintf(stderr, "session reconciler: healing stalled reset for %s: %v\n", name, err) //nolint:errcheck
+			} else {
+				tick.apply(id, heal)
+			}
+		}
 
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.
 		// markProviderTerminalError persists + folds its write onto the snapshot in one
@@ -2557,7 +2583,19 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// intentional death from crash and churn trackers (both
 				// check last_woke_at first).
 				newSessionKey, hasCapability := freshRestartSessionKeyInfo(tp, infoByID[id])
-				batch := sessionpkg.RestartRequestPatch(newSessionKey, clk.Now())
+				// An explicit reset (gc session reset -> SessionHandle.Reset) also
+				// clears the wake blockers. Without that, wait_hold / held_until /
+				// quarantined_until outrank the reset-pending wake this handoff is
+				// arranging, and the session is killed and never restarted. A
+				// reconciler-raised restart keeps its blockers: quarantine is what
+				// bounds a crash loop on those paths.
+				var batch sessionpkg.MetadataPatch
+				if strings.TrimSpace(infoByID[id].ResetOrigin) == sessionpkg.ResetOriginExplicit {
+					batch = sessionpkg.ExplicitRestartRequestPatch(
+						newSessionKey, clk.Now(), infoByID[id].State, infoByID[id].SleepReason)
+				} else {
+					batch = sessionpkg.RestartRequestPatch(newSessionKey, clk.Now())
+				}
 				if hasCapability && newSessionKey == "" {
 					batch["session_key"] = ""
 				}

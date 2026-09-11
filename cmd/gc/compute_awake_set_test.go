@@ -2314,3 +2314,52 @@ func TestAssignedWork_NoRecordedCurrent_FirstMatchAnchors(t *testing.T) {
 		t.Fatal("RequiresFreshCycle = true, want false — no recorded current means no divergence")
 	}
 }
+
+// TestNamedOnDemand_ResetPendingBlockedStaysAsleep is a characterisation test
+// for gascity-ksa. Every other reset-pending fixture in this file leaves the
+// wake blockers unset, so the blocked case had no coverage at all — which is
+// exactly why the reset stall went unnoticed: a granted "reset-pending" wake is
+// silently outranked by any of these three, and the seat then sits asleep
+// forever with its flags degraded to `config` alone.
+//
+// This pins the suppression as correct and deliberate. ComputeAwakeSet is NOT
+// what the fix changes: a blocker that reaches the awake set must keep winning
+// here. The fix clears the blockers upstream, on the explicit-reset handoff, so
+// they never reach this function in the first place.
+func TestNamedOnDemand_ResetPendingBlockedStaysAsleep(t *testing.T) {
+	template := "fixture/build-agent"
+	identity := "fixture/reset-target"
+	sessionName := "fixture--reset-target"
+
+	for _, tc := range []struct {
+		name    string
+		blocker func(*AwakeSessionBead)
+	}{
+		{"wait_hold", func(b *AwakeSessionBead) { b.WaitHold = true }},
+		{"held_until in the future", func(b *AwakeSessionBead) { b.HeldUntil = now.Add(time.Hour) }},
+		{"quarantined_until in the future", func(b *AwakeSessionBead) { b.QuarantinedUntil = now.Add(time.Hour) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bead := AwakeSessionBead{
+				ID:                       "mc-reset",
+				SessionName:              sessionName,
+				Template:                 template,
+				State:                    "asleep",
+				NamedIdentity:            identity,
+				ContinuationResetPending: true,
+				RestartRequested:         false,
+			}
+			tc.blocker(&bead)
+
+			result := ComputeAwakeSet(AwakeInput{
+				Agents:           []AwakeAgent{{QualifiedName: template}},
+				NamedSessions:    []AwakeNamedSession{{Identity: identity, Template: template, Mode: "on_demand"}},
+				SessionBeads:     []AwakeSessionBead{bead},
+				ScaleCheckCounts: map[string]int{template: 0},
+				Now:              now,
+			})
+
+			assertAsleep(t, result, sessionName)
+		})
+	}
+}

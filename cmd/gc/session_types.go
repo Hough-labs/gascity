@@ -73,7 +73,7 @@ type drainTracker struct {
 	mu               sync.Mutex
 	drains           map[string]*drainState     // session bead ID -> drain state
 	idleProbes       map[string]*idleProbeState // session bead ID -> async idle probe
-	resetStalls      map[string]bool            // session bead ID -> reset stall event emitted
+	resetStalls      map[string]string          // session bead ID -> reset_committed_at already diagnosed and healed
 	suspendDeferrals map[string]int             // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
 	idleProbeCursor  int
 }
@@ -82,7 +82,7 @@ func newDrainTracker() *drainTracker {
 	return &drainTracker{
 		drains:           make(map[string]*drainState),
 		idleProbes:       make(map[string]*idleProbeState),
-		resetStalls:      make(map[string]bool),
+		resetStalls:      make(map[string]string),
 		suspendDeferrals: make(map[string]int),
 	}
 }
@@ -216,16 +216,24 @@ func (dt *drainTracker) clearIdleProbe(beadID string) {
 	delete(dt.idleProbes, beadID)
 }
 
-func (dt *drainTracker) markResetStall(beadID string) bool {
+// markResetStall reports whether this stalled reset still needs diagnosing and
+// healing, and records it as handled.
+//
+// Keyed on reset_committed_at, not on the bead ID alone: the stall handler now
+// remediates rather than only logging, so the bound has to be per committed
+// reset. One remediation per reset keeps a genuinely unstartable session from
+// becoming a spawn loop, while a NEW reset_committed_at — an actually new reset
+// request — re-arms both the diagnostic and the heal.
+func (dt *drainTracker) markResetStall(beadID, resetCommittedAt string) bool {
 	if dt == nil || strings.TrimSpace(beadID) == "" {
 		return true
 	}
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
-	if dt.resetStalls[beadID] {
+	if seen, ok := dt.resetStalls[beadID]; ok && seen == resetCommittedAt {
 		return false
 	}
-	dt.resetStalls[beadID] = true
+	dt.resetStalls[beadID] = resetCommittedAt
 	return true
 }
 

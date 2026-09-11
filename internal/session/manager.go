@@ -310,6 +310,12 @@ type Info struct {
 	// the durable marker for when a restart handoff committed. resetPendingCommittedAtInfo
 	// parses it; the Info mirror keeps the raw value.
 	ResetCommittedAt string // reset_committed_at (raw)
+	// ResetOrigin is the RAW reset_origin metadata: who asked for the pending
+	// fresh restart. ResetOriginExplicit means an operator/model ran
+	// gc session reset; empty means the reconciler raised the restart itself
+	// (progress-stall / claim-holder-stall). The restart handoff reads it to
+	// decide whether clearing wake blockers is authorized.
+	ResetOrigin string // reset_origin (raw)
 	// Generation is the RAW generation metadata, verbatim. The drain/wake
 	// staleness checks read it BOTH as strconv.Atoi (numeric compare against the
 	// in-memory drain generation) AND strings.TrimSpace (string compare against
@@ -1294,6 +1300,10 @@ func (m *Manager) RequestFreshRestart(id string) error {
 		return m.store.SetMetadataBatch(id, map[string]string{
 			"restart_requested":          "true",
 			"continuation_reset_pending": "true",
+			// Stamp the origin so the controller's restart handoff can clear
+			// this session's wake blockers. A reconciler-raised restart leaves
+			// this unset and keeps its quarantine/hold timers intact.
+			ResetOriginKey: ResetOriginExplicit,
 		})
 	})
 }

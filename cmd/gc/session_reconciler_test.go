@@ -10538,13 +10538,25 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 		committedAt,
 		session.ID,
 	)
-	if got := strings.TrimSpace(env.stderr.String()); got != wantMessage {
-		t.Fatalf("stderr = %q, want %q", got, wantMessage)
+	// First line only: the reconciler now HEALS the stall it diagnoses
+	// (gascity-ksa part 2), so the wake and start it unblocks log after this
+	// line. Before that fix the diagnostic was the entire output, and asserting
+	// whole-stderr equality here is what encoded "diagnose and do nothing".
+	// The diagnostic itself is still asserted verbatim.
+	if got, _, _ := strings.Cut(strings.TrimSpace(env.stderr.String()), "\n"); got != wantMessage {
+		t.Fatalf("first stderr line = %q, want %q", got, wantMessage)
 	}
-	if len(rec.Events) != 1 {
-		t.Fatalf("recorded events = %d, want 1: %#v", len(rec.Events), rec.Events)
+	var gotEvent events.Event
+	stallEvents := 0
+	for _, ev := range rec.Events {
+		if ev.Type == events.SessionResetStalled {
+			stallEvents++
+			gotEvent = ev
+		}
 	}
-	gotEvent := rec.Events[0]
+	if stallEvents != 1 {
+		t.Fatalf("recorded %s events = %d, want 1: %#v", events.SessionResetStalled, stallEvents, rec.Events)
+	}
 	if gotEvent.Type != events.SessionResetStalled {
 		t.Fatalf("event type = %q, want %q", gotEvent.Type, events.SessionResetStalled)
 	}
@@ -10581,8 +10593,8 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 	if got := strings.TrimSpace(env.stderr.String()); got != "" {
 		t.Fatalf("second stalled pass stderr = %q, want debounce silence", got)
 	}
-	if len(rec.Events) != 1 {
-		t.Fatalf("recorded events after duplicate pass = %d, want 1", len(rec.Events))
+	if got := countEventsOfType(rec, events.SessionResetStalled); got != 1 {
+		t.Fatalf("recorded stall events after duplicate pass = %d, want 1", got)
 	}
 
 	env.setSessionMetadata(&session, map[string]string{
@@ -10599,9 +10611,19 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 	if got := strings.TrimSpace(env.stderr.String()); got != wantMessage {
 		t.Fatalf("re-stalled pass stderr = %q, want %q", got, wantMessage)
 	}
-	if len(rec.Events) != 2 {
-		t.Fatalf("recorded events after reset clear = %d, want 2", len(rec.Events))
+	if got := countEventsOfType(rec, events.SessionResetStalled); got != 2 {
+		t.Fatalf("recorded stall events after reset clear = %d, want 2", got)
 	}
+}
+
+func countEventsOfType(rec *events.Fake, eventType string) int {
+	count := 0
+	for _, ev := range rec.Events {
+		if ev.Type == eventType {
+			count++
+		}
+	}
+	return count
 }
 
 // TestReconcileSessionBeads_ClosedOnDemandBeadReopensWhenInDesiredState
@@ -11704,3 +11726,287 @@ func TestReconcileSessionBeads_ClosesOrphanedFailedCreateAndFreesSlot(t *testing
 // Regression: poolDesired derived from desiredState counts ALL session beads
 // (including discovered ones), inflating the desired count. This test verifies
 // that derivePoolDesired only counts pool sessions, not all discovered beads.
+
+// blockedResetSessionMetadata is the shared fixture for the gascity-ksa
+// blocker-clearing tests: a named session whose restart has been requested
+// while all five wake blockers are standing. Each test differs only in
+// reset_origin, which is the whole point — the same blocked bead must be
+// treated differently depending on who asked for the restart.
+func blockedResetSessionMetadata(now time.Time) map[string]string {
+	return map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"restart_requested":          "true",
+		"held_until":                 now.Add(time.Hour).UTC().Format(time.RFC3339),
+		"quarantined_until":          now.Add(time.Hour).UTC().Format(time.RFC3339),
+		"wait_hold":                  "true",
+		"wake_attempts":              "3",
+		"churn_count":                "2",
+	}
+}
+
+// TestReconcileSessionBeads_ExplicitResetClearsWakeBlockers is the acceptance
+// test for part 1 of gascity-ksa.
+//
+// `gc session wake` clears six wake blockers via ClearWakeBlockersPatch; the
+// reset route historically cleared none of them. Three of the six
+// (wait_hold, held_until, quarantined_until) outrank a granted "reset-pending"
+// wake, so a reset issued over any of them committed the kill and then never
+// restarted — the seat sat asleep indefinitely with its flags degraded to
+// `config` alone, which is the incident this bead records.
+//
+// An explicit reset is a deliberate "start this again" and must not be silently
+// outranked by a stale timer. Assert on all five keys by name: the contract is
+// that reset and wake clear the same set, not merely that this one session woke.
+func TestReconcileSessionBeads_ExplicitResetClearsWakeBlockers(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	meta := blockedResetSessionMetadata(env.clk.Now())
+	meta[sessionpkg.ResetOriginKey] = sessionpkg.ResetOriginExplicit
+	env.setSessionMetadata(&session, meta)
+
+	env.reconcile([]beads.Bead{session})
+
+	got, _ := env.store.Get(session.ID)
+	for _, key := range []string{"held_until", "quarantined_until", "wait_hold"} {
+		if got.Metadata[key] != "" {
+			t.Fatalf("%s = %q, want cleared by an explicit reset", key, got.Metadata[key])
+		}
+	}
+	for _, key := range []string{"wake_attempts", "churn_count"} {
+		if v := got.Metadata[key]; v != "0" && v != "" {
+			t.Fatalf("%s = %q, want reset to 0 by an explicit reset", key, v)
+		}
+	}
+	if got.Metadata[sessionpkg.ResetOriginKey] != "" {
+		t.Fatalf("reset_origin = %q, want consumed with the restart handoff", got.Metadata[sessionpkg.ResetOriginKey])
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true", got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want consumed", got.Metadata["restart_requested"])
+	}
+
+	// The five keys above are exactly what ComputeAwakeSet consults, so feed the
+	// post-handoff bead back through it: with the blockers gone the reset-pending
+	// grant survives. TestNamedOnDemand_ResetPendingBlockedStaysAsleep proves the
+	// same bead stays asleep while any one of them stands.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "worker"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "worker", Template: "worker", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:                       session.ID,
+			SessionName:              sessionName,
+			Template:                 "worker",
+			State:                    "asleep",
+			NamedIdentity:            "worker",
+			ContinuationResetPending: got.Metadata["continuation_reset_pending"] == "true",
+			RestartRequested:         got.Metadata["restart_requested"] == "true",
+			WaitHold:                 got.Metadata["wait_hold"] == "true",
+			HeldUntil:                parseAwakeTimeForTest(t, got.Metadata["held_until"]),
+			QuarantinedUntil:         parseAwakeTimeForTest(t, got.Metadata["quarantined_until"]),
+		}},
+		ScaleCheckCounts: map[string]int{"worker": 0},
+		Now:              env.clk.Now(),
+	})
+	if !result[sessionName].ShouldWake {
+		t.Fatalf("ShouldWake = false after explicit reset cleared the blockers; decision=%+v", result[sessionName])
+	}
+	if result[sessionName].Reason != "reset-pending" {
+		t.Fatalf("wake reason = %q, want %q", result[sessionName].Reason, "reset-pending")
+	}
+}
+
+// TestReconcileSessionBeads_ReconcilerRestartPreservesQuarantine is the guard
+// that bounds part 1 of gascity-ksa, and it is the acceptance gate on that fix.
+//
+// The reconciler raises restart_requested itself on progress-stall and
+// claim-holder-stall (session_reconciler.go). Quarantine is load-bearing on
+// exactly those paths: it is what stops a crash-looping session from being
+// restarted forever. A blocker-clearing fix that cannot tell an operator reset
+// apart from a reconciler-raised one converts that session into a spawn loop.
+//
+// Same blocked bead as the explicit test above; the only difference is the
+// absent reset_origin.
+func TestReconcileSessionBeads_ReconcilerRestartPreservesQuarantine(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	meta := blockedResetSessionMetadata(env.clk.Now())
+	// No reset_origin: this is the reconciler's own crash/stall-driven restart.
+	env.setSessionMetadata(&session, meta)
+	wantQuarantine := meta["quarantined_until"]
+	wantHeld := meta["held_until"]
+
+	env.reconcile([]beads.Bead{session})
+
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["quarantined_until"] != wantQuarantine {
+		t.Fatalf("quarantined_until = %q, want %q preserved on a reconciler-raised restart", got.Metadata["quarantined_until"], wantQuarantine)
+	}
+	if got.Metadata["held_until"] != wantHeld {
+		t.Fatalf("held_until = %q, want %q preserved on a reconciler-raised restart", got.Metadata["held_until"], wantHeld)
+	}
+	if got.Metadata["wait_hold"] != "true" {
+		t.Fatalf("wait_hold = %q, want preserved on a reconciler-raised restart", got.Metadata["wait_hold"])
+	}
+	if got.Metadata["wake_attempts"] != "3" {
+		t.Fatalf("wake_attempts = %q, want 3 preserved on a reconciler-raised restart", got.Metadata["wake_attempts"])
+	}
+	if got.Metadata["churn_count"] != "2" {
+		t.Fatalf("churn_count = %q, want 2 preserved on a reconciler-raised restart", got.Metadata["churn_count"])
+	}
+}
+
+func parseAwakeTimeForTest(t *testing.T, raw string) time.Time {
+	t.Helper()
+	if strings.TrimSpace(raw) == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		t.Fatalf("parsing %q: %v", raw, err)
+	}
+	return parsed
+}
+
+// TestReconcileSessionBeads_ResetStallSelfHeals is the acceptance test for
+// part 2 of gascity-ksa.
+//
+// recordResetStallIfDue used to emit session.reset_stalled and return. There
+// was no remediation branch anywhere in it or its caller, so a stalled reset
+// was diagnosed and then left standing: in the recorded incident the seat sat
+// asleep for ~4 minutes against a 92s threshold and only came back when a human
+// ran `gc session wake`. An unattended agent has nobody to do that, which is how
+// a context-pressure advisory turns into a lost seat overnight.
+//
+// The controller must clear the blockers itself once the stall is observed. The
+// assertion is that no operator wake stands between the stall event and the
+// session being wakeable again.
+func TestReconcileSessionBeads_ResetStallSelfHeals(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+		Session:       config.SessionConfig{StartupTimeout: "60s"},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	committedAt := env.clk.Now().Add(-75 * time.Second).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:        "true",
+		namedSessionIdentityMetadata:   "worker",
+		namedSessionModeMetadata:       "on_demand",
+		"continuation_reset_pending":   "true",
+		sessionpkg.ResetCommittedAtKey: committedAt,
+		"wait_hold":                    "true",
+		"held_until":                   env.clk.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		"quarantined_until":            env.clk.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		"wake_attempts":                "4",
+		"churn_count":                  "3",
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	// The events sequence is the assertion: the stall is diagnosed, and the
+	// session reaches a start off the back of it. Nothing in this test ever calls
+	// the wake command, so nothing stands between the two but the controller's own
+	// remediation — which is the whole property. Before the fix the stall event
+	// fired and the run ended there.
+	stallAt, startAt := -1, -1
+	for i, ev := range rec.Events {
+		switch {
+		case ev.Type == events.SessionResetStalled && stallAt < 0:
+			stallAt = i
+		case ev.Type == events.SessionWoke && stallAt >= 0 && startAt < 0:
+			startAt = i
+		}
+	}
+	if stallAt < 0 {
+		t.Fatalf("session.reset_stalled not recorded; events=%#v", rec.Events)
+	}
+	if startAt < 0 {
+		t.Fatalf("no %s after session.reset_stalled; the stall was diagnosed but never healed. events=%#v", events.SessionWoke, rec.Events)
+	}
+
+	got, _ := env.store.Get(session.ID)
+	for _, key := range []string{"held_until", "quarantined_until", "wait_hold"} {
+		if got.Metadata[key] != "" {
+			t.Fatalf("%s = %q, want cleared by reset-stall self-heal", key, got.Metadata[key])
+		}
+	}
+	for _, key := range []string{"wake_attempts", "churn_count"} {
+		if v := got.Metadata[key]; v != "0" && v != "" {
+			t.Fatalf("%s = %q, want reset to 0 by reset-stall self-heal", key, v)
+		}
+	}
+	// The heal leaves continuation_reset_pending standing; the start it unblocks
+	// is what consumes it. Either way the reset must not still be pending against
+	// a session that is now awake.
+	if got.Metadata["continuation_reset_pending"] == "true" && got.Metadata["state"] == "asleep" {
+		t.Fatalf("session still asleep with a pending reset after self-heal; metadata=%v", got.Metadata)
+	}
+}
+
+// TestRecordResetStallIfDue_SelfHealIsBounded pins the bound on part 2 of
+// gascity-ksa: a genuinely unstartable session must not become a spawn loop.
+//
+// The remediation rides the existing drainTracker dedup, which is now keyed on
+// reset_committed_at rather than on the bead ID alone — one remediation per
+// committed reset, and a NEW reset_committed_at (i.e. an actually new reset)
+// re-arms it.
+func TestRecordResetStallIfDue_SelfHealIsBounded(t *testing.T) {
+	env := newReconcilerTestEnv()
+	rec := events.NewFake()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		Session:   config.SessionConfig{StartupTimeout: "60s"},
+	}
+	session := env.createSessionBead("worker", "worker")
+	committedAt := env.clk.Now().Add(-75 * time.Second).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"continuation_reset_pending":   "true",
+		sessionpkg.ResetCommittedAtKey: committedAt,
+		"wait_hold":                    "true",
+	})
+	timeout := env.cfg.Session.StartupTimeoutDuration()
+
+	first := recordResetStallIfDue(sessiontest.SeedBead(t, session), "worker", "worker", false, timeout, env.clk.Now().UTC(), env.dt, rec, &env.stderr, nil)
+	if len(first) == 0 {
+		t.Fatalf("first stalled pass returned no remediation patch; want the wake blockers cleared")
+	}
+	if _, ok := first["quarantined_until"]; !ok {
+		t.Fatalf("remediation patch = %v, want it to clear quarantined_until", first)
+	}
+
+	second := recordResetStallIfDue(sessiontest.SeedBead(t, session), "worker", "worker", false, timeout, env.clk.Now().UTC(), env.dt, rec, &env.stderr, nil)
+	if len(second) != 0 {
+		t.Fatalf("second stalled pass on the same reset_committed_at returned %v, want no remediation (bounded)", second)
+	}
+
+	// A NEW reset_committed_at is a genuinely new reset and re-arms the heal.
+	env.setSessionMetadata(&session, map[string]string{
+		sessionpkg.ResetCommittedAtKey: env.clk.Now().Add(-80 * time.Second).UTC().Format(time.RFC3339),
+	})
+	third := recordResetStallIfDue(sessiontest.SeedBead(t, session), "worker", "worker", false, timeout, env.clk.Now().UTC(), env.dt, rec, &env.stderr, nil)
+	if len(third) == 0 {
+		t.Fatalf("a new reset_committed_at returned no remediation patch; want the heal re-armed")
+	}
+}

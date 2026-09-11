@@ -4021,6 +4021,7 @@ gc session reset <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+| `--wait` | duration | `0s` | how long to wait for the controller to commit the restart before reporting it unconfirmed (0 disables the check; default: the city's session startup timeout) |
 
 ## gc session submit
 

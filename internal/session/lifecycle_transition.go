@@ -88,6 +88,17 @@ var freshWakeConversationResetKeys = []string{
 // ResetCommittedAtKey records when a restart handoff durably committed.
 const ResetCommittedAtKey = "reset_committed_at"
 
+// ResetOriginKey records who asked for a pending fresh restart, so the
+// controller can tell an operator/model reset apart from one the reconciler
+// raised itself. Only the explicit route clears wake blockers; see
+// ExplicitRestartRequestPatch.
+const ResetOriginKey = "reset_origin"
+
+// ResetOriginExplicit marks a restart requested deliberately through
+// SessionHandle.Reset (gc session reset), as opposed to a reconciler-raised
+// progress-stall or claim-holder-stall restart.
+const ResetOriginExplicit = "explicit"
+
 // MetadataPatch is an atomic set of metadata key updates for one lifecycle
 // transition. Empty values intentionally clear metadata keys in existing store
 // implementations.
@@ -479,6 +490,33 @@ func RestartRequestPatch(sessionKey string, now time.Time) MetadataPatch {
 	if sessionKey != "" {
 		patch["session_key"] = sessionKey
 	}
+	return patch
+}
+
+// ExplicitRestartRequestPatch is RestartRequestPatch for a restart an operator
+// or model asked for deliberately (SessionHandle.Reset, i.e. gc session reset).
+// It additionally clears the wake blockers, because a granted "reset-pending"
+// wake is outranked by wait_hold, held_until and quarantined_until: a reset
+// committed over any of those kills the runtime and then never restarts it, and
+// the seat sits asleep indefinitely.
+//
+// The blocker set is taken from ClearWakeBlockersPatch rather than open-coded so
+// reset and wake cannot drift apart again — recovering a stalled seat by hand
+// took `gc session wake` precisely because wake clears all six and reset cleared
+// none.
+//
+// This is deliberately NOT the patch for a reconciler-raised restart
+// (progress-stall / claim-holder-stall). Quarantine is load-bearing there: it is
+// what stops a crash-looping session from restarting forever, so clearing it on
+// that path would turn a quarantined session into a spawn loop.
+func ExplicitRestartRequestPatch(sessionKey string, now time.Time, state State, sleepReason string) MetadataPatch {
+	patch := RestartRequestPatch(sessionKey, now)
+	for key, value := range ClearWakeBlockersPatch(state, sleepReason) {
+		patch[key] = value
+	}
+	// The origin marker is consumed with the handoff it authorized, so a later
+	// reconciler-raised restart on the same session does not inherit it.
+	patch[ResetOriginKey] = ""
 	return patch
 }
 

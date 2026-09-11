@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -92,8 +93,12 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 	defer lis.Close()                              //nolint:errcheck
 	defer os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
 
+	// This test predates the confirmation wait (gascity-ksa part 3) and its
+	// subject is the request path: the circuit breaker must be cleared before
+	// the restart is queued. wait=0 selects the fire-and-forget mode so no
+	// controller has to be simulated and every assertion below is unchanged.
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionReset([]string{identity}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionResetWithOptions([]string{identity}, &stdout, &stderr, sessionResetOptions{}); code != 0 {
 		t.Fatalf("cmdSessionReset = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -656,8 +661,13 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 		}
 	}()
 
+	// This test predates the confirmation wait (gascity-ksa part 3) and its
+	// subject is the request path: the ping/poke/poke sequence, and the
+	// reconcile-owned fields left untouched until the controller commits.
+	// wait=0 selects the fire-and-forget mode so that queued state is exactly
+	// what the assertions below still observe.
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionReset([]string{"sky"}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionResetWithOptions([]string{"sky"}, &stdout, &stderr, sessionResetOptions{}); code != 0 {
 		t.Fatalf("cmdSessionReset(controller) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -900,4 +910,196 @@ template = "session-a"
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
+}
+
+// simulateControllerConsumingReset stands in for the reconciler's restart
+// handoff: it waits for the explicit reset marker to land and then commits the
+// restart the way the controller does, by applying RestartRequestPatch.
+//
+// `gc session reset` now confirms the restart rather than reporting ok for one
+// it never observed (gascity-ksa part 3), so a test that wants the success path
+// has to supply the other half of that handshake.
+func simulateControllerConsumingReset(t *testing.T, store beads.Store, beadID string) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			bead, err := store.Get(beadID)
+			if err == nil && strings.TrimSpace(bead.Metadata["restart_requested"]) == "true" {
+				patch := session.RestartRequestPatch("", time.Now().UTC())
+				update := make(map[string]string, len(patch))
+				for key, value := range patch {
+					update[key] = value
+				}
+				_ = store.Update(beadID, beads.UpdateOpts{Metadata: update}) //nolint:errcheck
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	t.Cleanup(func() { <-done })
+}
+
+// TestCmdSessionReset_UnconfirmedRestartDoesNotReportOK is the acceptance test
+// for part 3 of gascity-ksa.
+//
+// The command used to be fire-and-forget by construction: a two-key metadata
+// write, a poke, and exit 0. Nothing observed whether the restart happened, so
+// the recorded incident — "returned ok (action=reset, session_id=gc-7rd0) but
+// the session never restarted" — was not a malfunction, it was the contract.
+// That contract is what this bead rejects: an operator or an agent resetting
+// itself cannot tell a completed restart from a stranded seat.
+func TestCmdSessionReset_UnconfirmedRestartDoesNotReportOK(t *testing.T) {
+	env := newSessionResetControllerEnv(t, "sky")
+
+	// No controller consumes the marker: this is the stall.
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionResetWithOptions([]string{"sky"}, &stdout, &stderr, sessionResetOptions{
+		json: true,
+		wait: 150 * time.Millisecond,
+	})
+	if code == 0 {
+		t.Fatalf("cmdSessionReset = 0 for an unconfirmed restart, want non-zero; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+
+	body := strings.TrimSpace(stdout.String())
+	if body == "" {
+		t.Fatalf("no JSON body emitted for an unconfirmed reset; stderr=%q", stderr.String())
+	}
+	var got struct {
+		OK        bool   `json:"ok"`
+		Action    string `json:"action"`
+		SessionID string `json:"session_id"`
+		Confirmed *bool  `json:"confirmed"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("decoding %q: %v", body, err)
+	}
+	if got.OK {
+		t.Fatalf("ok = true for an unconfirmed restart, want false; body=%s", body)
+	}
+	if got.Confirmed == nil || *got.Confirmed {
+		t.Fatalf("confirmed = %v, want an explicit false; body=%s", got.Confirmed, body)
+	}
+	if got.SessionID != env.beadID {
+		t.Fatalf("session_id = %q, want %q", got.SessionID, env.beadID)
+	}
+}
+
+// TestCmdSessionReset_ConfirmedRestartReportsOK pins the other half of part 3:
+// the ordinary success path is unchanged — exit 0, action=reset, session id.
+func TestCmdSessionReset_ConfirmedRestartReportsOK(t *testing.T) {
+	env := newSessionResetControllerEnv(t, "sky")
+	simulateControllerConsumingReset(t, env.store, env.beadID)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionResetWithOptions([]string{"sky"}, &stdout, &stderr, sessionResetOptions{
+		json: true,
+		wait: 10 * time.Second,
+	})
+	if code != 0 {
+		t.Fatalf("cmdSessionReset = %d for a confirmed restart, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	body := strings.TrimSpace(stdout.String())
+	var got struct {
+		OK        bool   `json:"ok"`
+		Action    string `json:"action"`
+		SessionID string `json:"session_id"`
+		Confirmed *bool  `json:"confirmed"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("decoding %q: %v", body, err)
+	}
+	if !got.OK {
+		t.Fatalf("ok = false for a confirmed restart; body=%s", body)
+	}
+	if got.Action != "reset" {
+		t.Fatalf("action = %q, want %q; body=%s", got.Action, "reset", body)
+	}
+	if got.SessionID != env.beadID {
+		t.Fatalf("session_id = %q, want %q; body=%s", got.SessionID, env.beadID, body)
+	}
+	if got.Confirmed == nil || !*got.Confirmed {
+		t.Fatalf("confirmed = %v, want an explicit true; body=%s", got.Confirmed, body)
+	}
+}
+
+type sessionResetControllerEnv struct {
+	cityDir string
+	store   beads.Store
+	beadID  string
+}
+
+// newSessionResetControllerEnv builds a city with one manual session bead and a
+// controller socket that answers ping/poke for the life of the test. It is the
+// shared fixture for the gascity-ksa exit-contract tests: what varies between
+// them is only whether anything ever consumes the reset marker.
+func newSessionResetControllerEnv(t *testing.T, alias string) sessionResetControllerEnv {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := shortSocketTempDir(t, "gc-session-reset-confirm-")
+	t.Setenv("GC_CITY", cityDir)
+	writeGenericNamedSessionCityTOML(t, cityDir)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:  "manual session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:worker"},
+		Metadata: map[string]string{
+			"alias":                      alias,
+			"template":                   "worker",
+			"session_name":               "s-gc-reset-confirm",
+			"state":                      "awake",
+			"session_key":                "original-key",
+			"started_config_hash":        "hash-before-reset",
+			"continuation_reset_pending": "",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+
+	sockPath := controllerSocketPath(cityDir)
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Listen(%q): %v", sockPath, err)
+	}
+	t.Cleanup(func() {
+		lis.Close()         //nolint:errcheck
+		os.Remove(sockPath) //nolint:errcheck
+	})
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 64)
+			n, err := conn.Read(buf)
+			if err != nil {
+				conn.Close() //nolint:errcheck
+				continue
+			}
+			reply := "ok\n"
+			if string(buf[:n]) == "ping\n" {
+				reply = "123\n"
+			}
+			_, _ = conn.Write([]byte(reply)) //nolint:errcheck
+			conn.Close()                     //nolint:errcheck
+		}
+	}()
+
+	return sessionResetControllerEnv{cityDir: cityDir, store: store, beadID: bead.ID}
 }

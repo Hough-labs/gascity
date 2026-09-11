@@ -158,6 +158,7 @@ var infoKeyCodec = []infoKeySpec{
 	{"continuation_reset_pending", func(i *Info, v string) { i.ContinuationResetPending = v }},
 	{SessionCircuitStateMetadataKey, func(i *Info, v string) { i.SessionCircuitState = v }},
 	{ResetCommittedAtKey, func(i *Info, v string) { i.ResetCommittedAt = v }},
+	{ResetOriginKey, func(i *Info, v string) { i.ResetOrigin = v }},
 	{"generation", func(i *Info, v string) { i.Generation = v }},
 	{"started_config_hash", func(i *Info, v string) { i.StartedConfigHash = v }},
 	{"pin_awake", func(i *Info, v string) { i.PinAwake = v }},
