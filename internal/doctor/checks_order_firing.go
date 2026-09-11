@@ -73,7 +73,10 @@ type OrderFiringCurrentCheck struct {
 	lastRun        OrderFiringCurrentLastRunFunc
 	historyTimeout time.Duration
 	// historyAbandoned is set once a lookup exceeds its budget and is left
-	// running. It is per-run state on a check that gc doctor runs once.
+	// running. It is per-run state, reset at the top of run. Concurrent runs of
+	// the same check would race it, but the doctor loop cannot produce one:
+	// checks run one at a time, and the only re-run (fixAndVerify) is gated on
+	// CanFix, which this check answers false.
 	historyAbandoned bool
 }
 
