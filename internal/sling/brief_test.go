@@ -273,6 +273,26 @@ func TestResolveBeadBriefCarryRigFormulaVarsWin(t *testing.T) {
 	}
 }
 
+// TestResolveBeadBriefCarryAgentFormulaVarsWin is the agent half of the same
+// contract. An agent-configured context_path reaches the formula through the
+// precedence chain too — above the rig layer — so the carry must treat it as
+// caller-supplied exactly as it treats the rig's. Missing this would let the
+// carry append context_path as an explicit --var and silently outrank the
+// lane's own setting.
+func TestResolveBeadBriefCarryAgentFormulaVarsWin(t *testing.T) {
+	env := newBriefTestEnv(t, map[string]string{"plan-context": briefFixtureContextOnly})
+	beadID := env.createBead(t, "Implement the widget.")
+	env.agent.FormulaVars = map[string]string{"context_path": "/agent/bundle"}
+
+	carry := env.resolve(t, beadID, "plan-context", nil)
+	if got := carriedContextPath(t, carry); got != "" {
+		t.Errorf("agent-configured context_path was overridden by the carry: %q", got)
+	}
+	if carry.Hint != "" {
+		t.Errorf("agent-configured context_path should also silence the note, got %q", carry.Hint)
+	}
+}
+
 // TestResolveBeadBriefCarryRewritesStaleBrief locks that a re-sling after the
 // bead's description changed carries the CURRENT text, not the first pour's.
 func TestResolveBeadBriefCarryRewritesStaleBrief(t *testing.T) {

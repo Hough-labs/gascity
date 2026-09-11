@@ -112,10 +112,11 @@ func resolveBeadBriefCarry(opts SlingOpts, deps SlingDeps, querier BeadQuerier, 
 
 // callerSuppliedBriefVar reports whether either context var already has a value
 // from the caller. It mirrors BuildSlingFormulaVars' precedence for exactly the
-// two keys it cares about — explicit --var first, then rig formula_vars — so a
-// rig that configures context_path counts as having supplied it, just as a --var
-// does. Presence is the test, not emptiness: `--var context_path=` is a
-// deliberate opt-out and has always suppressed the note.
+// two keys it cares about — explicit --var, then agent formula_vars, then rig
+// formula_vars — so an agent or rig that configures context_path counts as
+// having supplied it, just as a --var does. Presence is the test, not
+// emptiness: `--var context_path=` is a deliberate opt-out and has always
+// suppressed the note.
 func callerSuppliedBriefVar(opts SlingOpts, deps SlingDeps) bool {
 	vars := make(map[string]string, len(opts.Vars))
 	for _, v := range opts.Vars {
@@ -123,6 +124,7 @@ func callerSuppliedBriefVar(opts SlingOpts, deps SlingDeps) bool {
 			vars[key] = value
 		}
 	}
+	mergeAgentFormulaVars(vars, opts.Target)
 	mergeRigFormulaVars(vars, deps.Cfg, opts.Target)
 	if _, ok := vars[briefContextPathVar]; ok {
 		return true
