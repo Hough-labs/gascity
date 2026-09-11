@@ -630,6 +630,24 @@ func finalizeDrainAckStoppedSession(
 	// restart that rotates session_key and destroys resume continuity (#2574).
 	if info.RestartRequested == "true" {
 		batch["restart_requested"] = ""
+		// An EXPLICIT reset (gc session reset) on a live agent completes HERE, not
+		// in the restart-requested branch below — this branch consumes the marker
+		// and continues before that branch ever runs. So the explicit reset's
+		// blocker clearing has to happen here too, or the seat drains and then
+		// stays parked behind a stale wait_hold / held_until / quarantined_until.
+		// Only the blocker KEYS: the drain patch above owns state and sleep_reason.
+		//
+		// Consuming reset_origin is not optional. Left standing it would outlive
+		// this reset and authorize the NEXT restart — a reconciler-raised
+		// progress-stall or claim-holder-stall one — to clear that session's
+		// quarantine, which is the crash-loop-into-spawn-loop failure the origin
+		// split exists to prevent.
+		if strings.TrimSpace(info.ResetOrigin) == sessionpkg.ResetOriginExplicit {
+			for key, value := range sessionpkg.ClearWakeBlockerKeysPatch() {
+				batch[key] = value
+			}
+		}
+		batch[sessionpkg.ResetOriginKey] = ""
 	}
 	foldedInfo, err := sessionFrontDoor(store).ApplyPatchInfo(info, batch)
 	if err != nil {

@@ -234,10 +234,16 @@ func ContinuationResetWakePatch(now time.Time) MetadataPatch {
 	return patch
 }
 
-// ClearWakeBlockersPatch clears advisory blockers so a dormant session may be
-// selected by the normal wake path.
-func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
-	patch := MetadataPatch{
+// ClearWakeBlockerKeysPatch clears ONLY the advisory blocker keys, leaving state
+// and sleep_reason to the caller's own transition.
+//
+// Use it where the surrounding patch already owns the lifecycle state — the
+// drain-ack finalize, for instance, is mid-transition to drained and must not
+// have that overwritten by a blocker clear. Callers that want the full dormant
+// -> wakeable transition want ClearWakeBlockersPatch instead. Both read from
+// this one definition so the blocker SET cannot drift between them.
+func ClearWakeBlockerKeysPatch() MetadataPatch {
+	return MetadataPatch{
 		"held_until":        "",
 		"quarantined_until": "",
 		"wait_hold":         "",
@@ -245,6 +251,12 @@ func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
 		"wake_attempts":     "0",
 		"churn_count":       "0",
 	}
+}
+
+// ClearWakeBlockersPatch clears advisory blockers so a dormant session may be
+// selected by the normal wake path.
+func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
+	patch := ClearWakeBlockerKeysPatch()
 	switch state {
 	case StateSuspended, StateDrained:
 		patch["state"] = string(StateAsleep)

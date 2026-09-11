@@ -12010,3 +12010,151 @@ func TestRecordResetStallIfDue_SelfHealIsBounded(t *testing.T) {
 		t.Fatalf("a new reset_committed_at returned no remediation patch; want the heal re-armed")
 	}
 }
+
+// TestReconcileSessionBeads_DrainAckCompletesExplicitReset covers the OTHER
+// completion path for gascity-ksa part 1, found during self-review.
+//
+// `gc session reset` on a live agent completes through drain-ack, not through
+// the restart-requested branch: the drain-ack finalize consumes
+// restart_requested and continues before that branch ever runs (#2574). So the
+// blocker clearing has to happen here too, or an explicit reset on a live seat
+// still strands behind a stale wait_hold / held_until / quarantined_until — the
+// exact failure this bead exists to fix, just reached by the other door.
+//
+// The second assertion is the one that makes this a correctness bug rather than
+// an omission: reset_origin MUST be consumed here. If it survives, a later
+// reconciler-raised restart (progress-stall / claim-holder-stall) reads it as
+// authorization and clears that session's quarantine — turning a crash-looping
+// session into a spawn loop, which is precisely what
+// TestReconcileSessionBeads_ReconcilerRestartPreservesQuarantine forbids.
+func TestReconcileSessionBeads_DrainAckCompletesExplicitReset(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", SleepAfterIdle: config.SessionSleepOff}},
+	}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"restart_requested":       "true",
+		sessionpkg.ResetOriginKey: sessionpkg.ResetOriginExplicit,
+		"session_key":             "original-key",
+		"wait_hold":               "true",
+		"held_until":              env.clk.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		"quarantined_until":       env.clk.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		"wake_attempts":           "4",
+		"churn_count":             "3",
+	})
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	got := env.reconcileStopPendingToTerminal(t, env.sp, session, dops, map[string]bool{"worker": true})
+
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want consumed by drain-ack finalize", got.Metadata["restart_requested"])
+	}
+	if got.Metadata[sessionpkg.ResetOriginKey] != "" {
+		t.Fatalf("reset_origin = %q, want consumed with the restart marker; a stale explicit origin would later authorize clearing a reconciler-raised restart's quarantine", got.Metadata[sessionpkg.ResetOriginKey])
+	}
+	for _, key := range []string{"held_until", "quarantined_until", "wait_hold"} {
+		if got.Metadata[key] != "" {
+			t.Fatalf("%s = %q, want cleared — an explicit reset completing via drain-ack must not leave the seat blocked", key, got.Metadata[key])
+		}
+	}
+	for _, key := range []string{"wake_attempts", "churn_count"} {
+		if v := got.Metadata[key]; v != "0" && v != "" {
+			t.Fatalf("%s = %q, want reset to 0 by an explicit reset", key, v)
+		}
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckKeepsReconcilerRestartQuarantine is the
+// drain-ack twin of the guard: the same completion path, with no explicit
+// origin, must leave a reconciler-raised restart's blockers standing.
+func TestReconcileSessionBeads_DrainAckKeepsReconcilerRestartQuarantine(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", SleepAfterIdle: config.SessionSleepOff}},
+	}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	quarantine := env.clk.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"restart_requested": "true",
+		"session_key":       "original-key",
+		"quarantined_until": quarantine,
+		"churn_count":       "3",
+	})
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	got := env.reconcileStopPendingToTerminal(t, env.sp, session, dops, map[string]bool{"worker": true})
+
+	if got.Metadata["quarantined_until"] != quarantine {
+		t.Fatalf("quarantined_until = %q, want %q preserved without an explicit reset origin", got.Metadata["quarantined_until"], quarantine)
+	}
+	if got.Metadata["churn_count"] != "3" {
+		t.Fatalf("churn_count = %q, want 3 preserved without an explicit reset origin", got.Metadata["churn_count"])
+	}
+}
