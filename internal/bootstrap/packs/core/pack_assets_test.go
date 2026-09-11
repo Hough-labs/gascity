@@ -128,6 +128,11 @@ func TestCoreMaintenanceExecAssets(t *testing.T) {
 		"assets/scripts/escalate.sh",
 		"assets/scripts/jsonl-export.sh",
 		"assets/scripts/reaper.sh",
+		// retract.sh is escalate.sh's counterpart: emitters that can re-observe
+		// their condition hand the escalated bead id back here to withdraw it.
+		// If it goes missing every retraction fails silently and human-addressed
+		// alerts start accumulating again (gascity-9xr4).
+		"assets/scripts/retract.sh",
 		"orders/jsonl-export.toml",
 		"orders/reaper.toml",
 	}

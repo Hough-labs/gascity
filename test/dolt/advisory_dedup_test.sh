@@ -6,6 +6,10 @@
 # a changed condition set re-alerts, and a healthy server clears the state so the
 # next occurrence alerts again.
 #
+# Also proves the state file round-trips the id of the message bead the advisory
+# created (gascity-9xr4), which is what lets the emitter withdraw that bead once
+# the condition clears instead of leaving it open forever.
+#
 # Run: sh test/dolt/advisory_dedup_test.sh
 set -u
 HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
@@ -25,6 +29,7 @@ bad()  { echo "FAIL: $1"; fail=1; }
 command -v advisory_changed >/dev/null 2>&1 || { echo "FAIL: advisory_changed not defined"; exit 1; }
 command -v advisory_record  >/dev/null 2>&1 || { echo "FAIL: advisory_record not defined"; exit 1; }
 command -v advisory_clear   >/dev/null 2>&1 || { echo "FAIL: advisory_clear not defined"; exit 1; }
+command -v advisory_recorded_id >/dev/null 2>&1 || { echo "FAIL: advisory_recorded_id not defined"; exit 1; }
 
 # Reap work dirs left by a run of this script that was SIGKILLed or timed
 # out: SIGKILL cannot be trapped, so `trap ... EXIT` below never fires for
@@ -102,9 +107,42 @@ NESTED="$WORK/runtime/packs/dolt/doctor-advisory-state"
 advisory_record "orphan " "$NESTED"
 if [ -f "$NESTED" ]; then pass "record creates missing parent directories"; else bad "record did not create nested state path"; fi
 
-# The recorded signature round-trips exactly.
-got=$(cat "$NESTED" 2>/dev/null || true)
+# The recorded signature round-trips exactly, and still reads as line 1 now that
+# the bead id occupies line 2.
+got=$(sed -n '1p' "$NESTED" 2>/dev/null || true)
 if [ "$got" = "orphan " ]; then pass "recorded signature round-trips"; else bad "recorded signature mismatch: got '$got'"; fi
+
+# --- message bead id (gascity-9xr4) ---
+
+# A record carrying a bead id round-trips it, and does not disturb the signature.
+IDSTATE="$WORK/doctor-advisory-state-id"
+advisory_record "latency " "$IDSTATE" "gc-wisp-abc1"
+got=$(advisory_recorded_id "$IDSTATE")
+if [ "$got" = "gc-wisp-abc1" ]; then pass "recorded bead id round-trips"; else bad "recorded bead id mismatch: got '$got'"; fi
+if advisory_changed "latency " "$IDSTATE"; then bad "bead id broke signature dedup"; else pass "bead id does not disturb signature dedup"; fi
+
+# A record with no bead id (an escalation hook that reports none) yields an
+# empty id, which callers treat as "nothing to withdraw" rather than an error.
+advisory_record "latency " "$IDSTATE"
+got=$(advisory_recorded_id "$IDSTATE")
+if [ -z "$got" ]; then pass "absent bead id reads empty"; else bad "absent bead id returned '$got'"; fi
+
+# Backward compatibility: a state file written before bead ids were tracked is a
+# lone signature line. It must read as "no id" instead of failing, so an upgrade
+# in place degrades to the pre-fix behavior rather than erroring every tick.
+LEGACY="$WORK/doctor-advisory-state-legacy"
+printf '%s\n' "latency " > "$LEGACY"
+got=$(advisory_recorded_id "$LEGACY")
+if [ -z "$got" ]; then pass "legacy single-line state reads as no id"; else bad "legacy state returned '$got'"; fi
+if advisory_changed "latency " "$LEGACY"; then bad "legacy state lost its dedup signature"; else pass "legacy state keeps its dedup signature"; fi
+
+# No state file at all -> no id, no error.
+got=$(advisory_recorded_id "$WORK/does-not-exist")
+if [ -z "$got" ]; then pass "missing state file reads as no id"; else bad "missing state file returned '$got'"; fi
+
+# Empty state path -> no id, no error (mirrors advisory_changed fail-open).
+got=$(advisory_recorded_id "")
+if [ -z "$got" ]; then pass "empty state path reads as no id"; else bad "empty state path returned '$got'"; fi
 
 echo "----"
 if [ "$fail" -eq 0 ]; then echo "ALL PASS"; else echo "FAILURES PRESENT"; fi

@@ -30,6 +30,36 @@ dolt_resolve_escalate_script() {
 
 DOLT_ESCALATE_SCRIPT="${DOLT_ESCALATE_SCRIPT:-$(dolt_resolve_escalate_script)}"
 
+# Retraction resolves exactly like escalation — same pack search order, same
+# repo-relative fallback — so a pack that overrides where an escalation goes
+# also owns where it is withdrawn from.
+dolt_resolve_retract_script() {
+    local candidate
+    local pack
+    local city_path="${GC_CITY_PATH:-${GC_CITY:-.}}"
+    local system_packs="${GC_SYSTEM_PACKS_DIR:-$city_path/.gc/system/packs}"
+
+    if [ -n "${GC_RETRACT_SCRIPT:-}" ]; then
+        printf '%s\n' "$GC_RETRACT_SCRIPT"
+        return
+    fi
+    for pack in ${GC_ESCALATE_SEARCH_PACKS:-gastown maintenance bd core}; do
+        candidate="$system_packs/$pack/assets/scripts/retract.sh"
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+    candidate="$dolt_notify_script_dir/../../../../../internal/bootstrap/packs/core/assets/scripts/retract.sh"
+    if [ -x "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return
+    fi
+    printf '%s\n' ""
+}
+
+DOLT_RETRACT_SCRIPT="${DOLT_RETRACT_SCRIPT:-$(dolt_resolve_retract_script)}"
+
 dolt_escalate() {
     local subject="$1"
     local message="$2"
@@ -39,6 +69,36 @@ dolt_escalate() {
         return 1
     fi
     "$DOLT_ESCALATE_SCRIPT" --subject "$subject" --message "$message"
+}
+
+# dolt_escalation_message_id TEXT — extract the message bead id an escalation
+# reported, printing nothing when it reported none. escalate.sh passes the
+# `gc mail send` line through verbatim ("Sent message <id> to <recipient>"),
+# which is the only place the created bead id is exposed. A pack override that
+# prints something else yields an empty id, which callers must treat as "not
+# retractable" rather than an error — that is the pre-retraction behavior.
+#
+# sed quits on the first match rather than piping into `head -1`: callers run
+# under `set -o pipefail`, where a `head` that closes the pipe early can fail
+# the whole pipeline on SIGPIPE.
+dolt_escalation_message_id() {
+    printf '%s\n' "${1:-}" \
+        | sed -n '/^Sent message /{s/^Sent message \([^[:space:]][^[:space:]]*\) to .*$/\1/p;q;}'
+}
+
+# dolt_retract MESSAGE_ID — withdraw a previously-escalated message bead now
+# that the condition which raised it has cleared. An empty id is a no-op, so a
+# caller holding no recorded id degrades to the pre-retraction behavior instead
+# of failing.
+dolt_retract() {
+    local message_id="${1:-}"
+
+    [ -n "$message_id" ] || return 0
+    if [ -z "$DOLT_RETRACT_SCRIPT" ] || [ ! -x "$DOLT_RETRACT_SCRIPT" ]; then
+        echo "dolt notify: no executable retract.sh found" >&2
+        return 1
+    fi
+    "$DOLT_RETRACT_SCRIPT" --message-id "$message_id"
 }
 
 dolt_notify_done() {

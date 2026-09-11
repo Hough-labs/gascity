@@ -32,8 +32,10 @@ func runDogScriptCommand(t *testing.T, scriptName, binDir, cityPath, dataDir str
 		"GC_ESCALATE_SCRIPT",
 		"GC_ESCALATE_SEARCH_PACKS",
 		"GC_ESCALATION_RECIPIENT",
+		"GC_RETRACT_SCRIPT",
 		"GC_SYSTEM_PACKS_DIR",
 		"DOLT_ESCALATE_SCRIPT",
+		"DOLT_RETRACT_SCRIPT",
 		"GC_MAINTENANCE_DONE_TARGET",
 	),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
@@ -59,13 +61,25 @@ func runDogScript(t *testing.T, scriptName, binDir, cityPath, dataDir string, ex
 	return out
 }
 
+// dogFakeMailBeadID is the message bead id the fake gc reports for every
+// `gc mail send`. Tests assert against it to prove a retraction targets the
+// bead the advisory actually created.
+const dogFakeMailBeadID = "gc-wisp-fake1"
+
 func writeDogFakeGC(t *testing.T, binDir string) string {
 	t.Helper()
 	logPath := filepath.Join(binDir, "gc.log")
+	// Mirror the real CLI closely enough for the retraction path: `gc mail
+	// send` prints "Sent message <id> to <recipient>" on stdout, which is how
+	// mol-dog-doctor learns which bead to archive once the condition clears.
+	// Every other subcommand stays silent, as before.
 	writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
-printf 'gc %s\n' "$*" >> %s
+printf 'gc %[1]s\n' "$*" >> %[2]s
+if [ "${1:-}" = "mail" ] && [ "${2:-}" = "send" ]; then
+  printf 'Sent message %[1]s to %[1]s\n' %[3]s "${3:-}"
+fi
 exit 0
-`, "%s", shellQuote(logPath)))
+`, "%s", shellQuote(logPath), shellQuote(dogFakeMailBeadID)))
 	return logPath
 }
 
@@ -5038,6 +5052,225 @@ exit 0
 	}
 	if !strings.Contains(string(gcLog), "mail send human -s Dolt health advisory [MEDIUM]") {
 		t.Fatalf("advisory escalation must use the generic default recipient, log:\n%s", gcLog)
+	}
+}
+
+// writeDoctorProbeFakeDolt installs a `dolt` stub that answers every probe
+// mol-dog-doctor makes on its healthy path: the connectivity query, the
+// connection count, and an empty database list (so orphan detection and backup
+// freshness both stay silent). Which advisory conditions fire is then driven
+// purely by the doctor's own thresholds, which is what the retraction tests
+// need to toggle.
+func writeDoctorProbeFakeDolt(t *testing.T, binDir string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"SELECT active_branch()"*)
+    printf 'active_branch()\nmain\n'
+    exit 0
+    ;;
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\n'
+    exit 0
+    ;;
+esac
+exit 0
+`)
+}
+
+// doctorLatencyWarnEnv forces the latency check to fire: LATENCY_WARN_S=0 means
+// PROBE_END - PROBE_START >= 0, which always holds.
+const doctorLatencyWarnEnv = "GC_DOCTOR_LATENCY_WARN_S=0"
+
+// doctorLatencyHealthyEnv puts the latency threshold ten minutes out, which the
+// fake probe cannot exceed, so no condition is active.
+const doctorLatencyHealthyEnv = "GC_DOCTOR_LATENCY_WARN_MS=600000"
+
+// TestDoctorScriptRetractsAdvisoryWhenHealthy proves a [MEDIUM] dolt-health
+// advisory is withdrawn once the condition that raised it clears.
+//
+// Before this, a cleared condition only deleted the local dedup signature
+// (advisory_clear) while the advisory bead it had mailed stayed open forever.
+// That is the measured defect in gascity-9xr4: human-addressed advisories had a
+// 0% auto-close rate across the whole history of the queue, so every one of
+// them was eventually swept by hand. Age-based reaping was rejected as the fix
+// because a clock cannot tell a resolved advisory from a decision genuinely
+// waiting on a human; the emitter can, because the condition it re-checks every
+// tick IS the signal.
+//
+// Tick 1 forces a latency WARN so the advisory mails and its bead id is
+// recorded. Tick 2 runs healthy and must archive that exact bead, then clear
+// the state file so a future occurrence re-alerts.
+func TestDoctorScriptRetractsAdvisoryWhenHealthy(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDoctorProbeFakeDolt(t, binDir)
+
+	stateFile := filepath.Join(t.TempDir(), "doctor-advisory-state")
+	// CONN_MAX is pinned high so the connection check cannot warn on the fake's
+	// single reported connection, keeping tick 2 unambiguously healthy.
+	baseEnv := []string{
+		"GC_DOCTOR_ADVISORY_STATE_FILE=" + stateFile,
+		"GC_DOCTOR_CONN_MAX=256",
+	}
+
+	runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		append(append([]string{}, baseEnv...), doctorLatencyWarnEnv)...)
+
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "mail send human -s Dolt health advisory [MEDIUM]") {
+		t.Fatalf("tick 1 should have mailed the advisory, log:\n%s", gcLog)
+	}
+	if strings.Contains(string(gcLog), "mail archive") {
+		t.Fatalf("tick 1 must not retract while the condition is still active, log:\n%s", gcLog)
+	}
+	recorded, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("tick 1 should have recorded advisory state: %v", err)
+	}
+	// The bead id is what makes retraction possible at all; a state file that
+	// records only the signature is the pre-fix shape.
+	if !strings.Contains(string(recorded), dogFakeMailBeadID) {
+		t.Fatalf("tick 1 must record the advisory bead id, state file:\n%s", recorded)
+	}
+
+	// Tick 2: healthy. The advisory it raised must be withdrawn.
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		append(append([]string{}, baseEnv...), doctorLatencyHealthyEnv)...)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("tick 2 should report server ok, output:\n%s", out)
+	}
+
+	gcLog, err = os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	wantArchive := "gc mail archive " + dogFakeMailBeadID
+	if !strings.Contains(string(gcLog), wantArchive) {
+		t.Fatalf("healthy tick must retract the advisory it raised (want %q), log:\n%s", wantArchive, gcLog)
+	}
+	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
+		t.Fatalf("healthy tick must clear advisory state so a recurrence re-alerts, stat err = %v", err)
+	}
+}
+
+// TestDoctorScriptKeepsAdvisoryStateWhenRetractionFails proves a failed
+// withdrawal does NOT clear the state file.
+//
+// The state file holds the only handle on the advisory bead. Clearing it after
+// a failed archive would leave that bead open with nothing left pointing at it
+// — silently reproducing the original defect on exactly the runs where the data
+// plane is unhealthy. Keeping the state makes the next tick retry.
+func TestDoctorScriptKeepsAdvisoryStateWhenRetractionFails(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "gc.log")
+	// Same fake as writeDogFakeGC, except `mail archive` fails the way an
+	// unreachable store would.
+	writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
+printf 'gc %[1]s\n' "$*" >> %[2]s
+if [ "${1:-}" = "mail" ] && [ "${2:-}" = "send" ]; then
+  printf 'Sent message %[1]s to %[1]s\n' %[3]s "${3:-}"
+fi
+if [ "${1:-}" = "mail" ] && [ "${2:-}" = "archive" ]; then
+  echo 'archive dead' >&2
+  exit 1
+fi
+exit 0
+`, "%s", shellQuote(logPath), shellQuote(dogFakeMailBeadID)))
+	writeDoctorProbeFakeDolt(t, binDir)
+
+	stateFile := filepath.Join(t.TempDir(), "doctor-advisory-state")
+	baseEnv := []string{
+		"GC_DOCTOR_ADVISORY_STATE_FILE=" + stateFile,
+		"GC_DOCTOR_CONN_MAX=256",
+	}
+
+	runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		append(append([]string{}, baseEnv...), doctorLatencyWarnEnv)...)
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		append(append([]string{}, baseEnv...), doctorLatencyHealthyEnv)...)
+	if !strings.Contains(out, "advisory retraction failed for "+dogFakeMailBeadID) {
+		t.Fatalf("a failed retraction must be reported, output:\n%s", out)
+	}
+	if !strings.Contains(out, "archive dead") {
+		t.Fatalf("a failed retraction must surface the underlying error, output:\n%s", out)
+	}
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("a failed retraction must not abort the health report, output:\n%s", out)
+	}
+	recorded, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("failed retraction must keep the advisory state for the next tick: %v", err)
+	}
+	if !strings.Contains(string(recorded), dogFakeMailBeadID) {
+		t.Fatalf("kept state must still name the un-retracted bead, state file:\n%s", recorded)
+	}
+}
+
+// TestDoctorScriptRetractsSupersededAdvisory proves a changed condition set
+// withdraws the advisory it supersedes before raising the replacement.
+//
+// advisory_state.sh exists to collapse a persistent condition into ONE rolling
+// alert. Re-alerting on a changed condition set without withdrawing the
+// previous bead would quietly reinstate the accumulation it prevents — one open
+// advisory per condition change instead of one per tick.
+func TestDoctorScriptRetractsSupersededAdvisory(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDoctorProbeFakeDolt(t, binDir)
+
+	stateFile := filepath.Join(t.TempDir(), "doctor-advisory-state")
+
+	// Tick 1: latency only.
+	runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		"GC_DOCTOR_ADVISORY_STATE_FILE="+stateFile,
+		"GC_DOCTOR_CONN_MAX=256",
+		doctorLatencyWarnEnv)
+
+	// Tick 2: latency AND connections. CONN_MAX=1 puts the 80% warn line at 0,
+	// so the fake's single connection trips it and the signature changes.
+	runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		"GC_DOCTOR_ADVISORY_STATE_FILE="+stateFile,
+		"GC_DOCTOR_CONN_MAX=1",
+		doctorLatencyWarnEnv)
+
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if got := strings.Count(string(gcLog), "mail send human -s Dolt health advisory"); got != 2 {
+		t.Fatalf("a changed condition set must re-alert exactly once, got %d advisory sends, log:\n%s", got, gcLog)
+	}
+	wantArchive := "gc mail archive " + dogFakeMailBeadID
+	if !strings.Contains(string(gcLog), wantArchive) {
+		t.Fatalf("the superseded advisory must be withdrawn (want %q), log:\n%s", wantArchive, gcLog)
 	}
 }
 

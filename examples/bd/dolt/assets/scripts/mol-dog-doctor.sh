@@ -100,16 +100,37 @@ append_backup_stale() {
     fi
 }
 
+# send_escalation SUBJECT MESSAGE — escalate, and on success print the id of the
+# message bead the escalation created (empty when the escalation hook reports
+# none). Callers that can later re-observe the condition record that id so they
+# can withdraw the alert; callers that cannot simply ignore it.
 send_escalation() {
     local subject="$1"
     local message="$2"
-    local err
-    if ! err=$(dolt_escalate "$subject" "$message" 2>&1 >/dev/null); then
-        if [ -n "$err" ]; then
-            echo "doctor: escalation failed: $err" >&2
+    local out
+    if ! out=$(dolt_escalate "$subject" "$message" 2>&1); then
+        if [ -n "$out" ]; then
+            echo "doctor: escalation failed: $out" >&2
         else
             echo "doctor: escalation failed" >&2
         fi
+        return 1
+    fi
+    dolt_escalation_message_id "$out"
+}
+
+# retract_advisory STATE_FILE — withdraw the advisory bead recorded in
+# STATE_FILE. Returns non-zero when a recorded bead could not be withdrawn, so
+# the caller keeps the state (and therefore the bead id) for the next tick
+# rather than losing the only handle on an open advisory.
+retract_advisory() {
+    local state_file="$1"
+    local message_id
+    local err
+    message_id=$(advisory_recorded_id "$state_file")
+    [ -n "$message_id" ] || return 0
+    if ! err=$(dolt_retract "$message_id" 2>&1 >/dev/null); then
+        echo "doctor: advisory retraction failed for $message_id: ${err:-unknown error}" >&2
         return 1
     fi
 }
@@ -220,18 +241,30 @@ if [ -n "$WARNINGS" ]; then
     if [ -n "$ORPHAN_WARN" ]; then ADVISORY_SIG="${ADVISORY_SIG}orphan "; fi
     if [ -n "$BACKUP_STALE" ]; then ADVISORY_SIG="${ADVISORY_SIG}backup "; fi
     if advisory_changed "$ADVISORY_SIG" "$ADVISORY_STATE_FILE"; then
-        if send_escalation \
+        # A changed condition set supersedes the previous advisory, so withdraw
+        # it before raising the new one — otherwise the rolling alert this dedup
+        # exists to produce accumulates one open bead per condition change.
+        retract_advisory "$ADVISORY_STATE_FILE" || true
+        if ADVISORY_ID=$(send_escalation \
             "Dolt health advisory [MEDIUM]" \
             "Latency: ${LATENCY_MS}ms${LATENCY_WARN}
 Connections: ${CONN_COUNT}/${CONN_MAX}${CONN_WARN}
 Disk: ${DISK_USAGE}
-Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
-            advisory_record "$ADVISORY_SIG" "$ADVISORY_STATE_FILE"
+Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"); then
+            advisory_record "$ADVISORY_SIG" "$ADVISORY_STATE_FILE" "$ADVISORY_ID"
         fi
     fi
 else
-    # Healthy: forget the last advisory so a future condition re-alerts.
-    advisory_clear "$ADVISORY_STATE_FILE"
+    # Healthy: the condition that raised the last advisory is gone, so withdraw
+    # that advisory and only then forget it. Clearing first would strand the
+    # bead open with nothing left pointing at it, which is exactly how the
+    # human-addressed queue reached a 0% auto-close rate (gascity-9xr4). On a
+    # failed withdrawal the state stays put so the next tick retries; the stale
+    # signature it holds only suppresses a re-alert for the identical condition
+    # set, which is still correctly represented by the advisory left open.
+    if retract_advisory "$ADVISORY_STATE_FILE"; then
+        advisory_clear "$ADVISORY_STATE_FILE"
+    fi
 fi
 
 SUMMARY="doctor — server: ok, latency: ${LATENCY_MS}ms, conns: ${CONN_COUNT}/${CONN_MAX}, disk: ${DISK_USAGE}, orphans: ${ORPHAN_COUNT}"
