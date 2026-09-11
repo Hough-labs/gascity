@@ -36,7 +36,7 @@ var allProjectedMetadataKeys = []string{
 	"pending_create_claim", "pending_create_started_at", "quarantined_until",
 	aliasHistoryMetadataKey, "continuity_eligible", "last_woke_at", "awake_started_at", "usage_compute_emitted_at", "state_reason",
 	"creation_complete_at", "continuation_reset_pending", SessionCircuitStateMetadataKey,
-	ResetCommittedAtKey,
+	ResetCommittedAtKey, ResetOriginKey,
 	"generation", "started_config_hash", "pin_awake", "held_until", "wait_hold",
 	"churn_count", "wake_mode", "sleep_intent", "instance_token", "detached_at",
 	CurrentBeadIDKey, "core_hash_breakdown", "started_provision_hash",
