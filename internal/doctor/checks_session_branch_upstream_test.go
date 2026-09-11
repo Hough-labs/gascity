@@ -261,3 +261,89 @@ func TestSessionBranchUpstreamCheck_DetachedWorktreeSkipped(t *testing.T) {
 		t.Errorf("message = %q, want the detached worktree excluded from the scan", r.Message)
 	}
 }
+
+// pushOriginBranch creates <name> on origin from origin/<from> plus one commit,
+// using a scratch worktree outside the city root so the rig checkout and the
+// scanned agent worktrees are left alone. It leaves the rig's remote-tracking
+// refs up to date.
+func pushOriginBranch(t *testing.T, rigPath, from, name, content string) {
+	t.Helper()
+	scratch := filepath.Join(t.TempDir(), "scratch-"+name)
+	local := "scratch-" + name
+	doctorRunGit(t, rigPath, "worktree", "add", scratch, "-b", local, "refs/remotes/origin/"+from)
+	if err := os.WriteFile(filepath.Join(scratch, name+".txt"), []byte(content+"\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	doctorRunGit(t, scratch, "add", ".")
+	doctorRunGit(t, scratch, "commit", "-m", "work on "+name)
+	doctorRunGit(t, scratch, "push", "origin", local+":"+name)
+	doctorRunGit(t, rigPath, "fetch", "origin")
+	doctorRunGit(t, rigPath, "worktree", "remove", "--force", scratch)
+	doctorRunGit(t, rigPath, "branch", "-D", local)
+}
+
+// A machine-managed working branch legitimately tracks the queued agent branch
+// it was created from rather than the rig mainline (gascity-kwut). Its upstream
+// carries commits the default branch does not, so a `git pull --rebase` there
+// lands on a base that is ahead of the mainline, not behind it — the opposite
+// of the backwards replay this check hunts. Flagging it fired on every rig
+// whenever a merge was in flight, and the repoint hint would have pulled the
+// mainline into the queued branch mid-merge.
+func TestSessionBranchUpstreamCheck_UpstreamAheadOfDefault_NotAFinding(t *testing.T) {
+	rigPath, worktreesRoot := sessionBranchRepo(t)
+	pushOriginBranch(t, rigPath, "edge-integration", "queued", "queued work")
+	addSessionWorktree(t, rigPath, worktreesRoot, "workbench", "queued")
+
+	c := NewSessionBranchUpstreamCheck(
+		config.Rig{Name: "testrig", Path: rigPath, DefaultBranch: "edge-integration"},
+		worktreesRoot,
+	)
+	r := c.Run(&CheckContext{})
+
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d (%s), want StatusOK — an upstream ahead of the mainline is not a stale base", r.Status, r.Message)
+	}
+	if r.FixHint != "" {
+		t.Errorf("FixHint = %q, want empty — repointing a working branch mid-merge corrupts it", r.FixHint)
+	}
+}
+
+// Same shape, after the mainline has moved on: the upstream and the default
+// branch have now genuinely diverged. That is still not a backwards replay —
+// the queued branch carries work the mainline has never seen — so a divergent
+// upstream must not resurrect the false positive.
+func TestSessionBranchUpstreamCheck_UpstreamDivergedFromDefault_NotAFinding(t *testing.T) {
+	rigPath, worktreesRoot := sessionBranchRepo(t)
+	pushOriginBranch(t, rigPath, "edge-integration", "queued", "queued work")
+	addSessionWorktree(t, rigPath, worktreesRoot, "workbench", "queued")
+	pushOriginBranch(t, rigPath, "edge-integration", "edge-integration", "mainline moved on")
+
+	c := NewSessionBranchUpstreamCheck(
+		config.Rig{Name: "testrig", Path: rigPath, DefaultBranch: "edge-integration"},
+		worktreesRoot,
+	)
+	r := c.Run(&CheckContext{})
+
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d (%s), want StatusOK — a divergent upstream is not a stale base", r.Status, r.Message)
+	}
+}
+
+// An upstream that no longer resolves cannot be proven stale, and `git pull`
+// fails loudly on it rather than replaying onto the wrong base — same reasoning
+// as a branch with no upstream at all.
+func TestSessionBranchUpstreamCheck_UnresolvableUpstreamIsNotAFinding(t *testing.T) {
+	rigPath, worktreesRoot := sessionBranchRepo(t)
+	addSessionWorktree(t, rigPath, worktreesRoot, "gc-polecat-abc", "main")
+	doctorRunGit(t, rigPath, "config", "branch.gc-polecat-abc.merge", "refs/heads/never-pushed")
+
+	c := NewSessionBranchUpstreamCheck(
+		config.Rig{Name: "testrig", Path: rigPath, DefaultBranch: "edge-integration"},
+		worktreesRoot,
+	)
+	r := c.Run(&CheckContext{})
+
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d (%s), want StatusOK", r.Status, r.Message)
+	}
+}

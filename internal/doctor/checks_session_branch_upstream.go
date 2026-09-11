@@ -12,7 +12,8 @@ import (
 )
 
 // SessionBranchUpstreamCheck warns when an agent worktree's branch tracks a
-// remote branch other than the rig's configured default branch.
+// stale mainline — a remote branch the rig's configured default branch has
+// already absorbed entirely.
 //
 // The failure it hunts is silent in the worst way. A session branch whose
 // upstream points at a stale mainline looks entirely normal until something
@@ -22,6 +23,16 @@ import (
 // in git or gc says "your base is wrong" (gascity-rwu: two agents wedged, one
 // caught 15 commits into a 183-commit backwards replay). This check is the
 // thing that says it.
+//
+// Containment, not branch identity, is what makes an upstream wrong. A branch
+// may legitimately track something other than the mainline: a machine-managed
+// working branch created from a queued agent branch tracks that branch, and a
+// `git pull --rebase` there lands on a base that is ahead of the mainline
+// rather than behind it. Judging on the name alone reported every such branch,
+// on every rig, for as long as work was queued — and the repoint it advised
+// would have pulled the mainline into the queued branch mid-merge (gascity-kwut).
+// So an upstream is a finding only when it is fully contained in the default
+// branch: that is the one shape from which a replay can only go backwards.
 //
 // SeverityAdvisory; WarmupEligible, because `gc start` is the moment before
 // agents begin pulling.
@@ -53,9 +64,9 @@ func (c *SessionBranchUpstreamCheck) WarmupEligible() bool { return true }
 // configured to merge into.
 func (c *SessionBranchUpstreamCheck) CanFix() bool { return true }
 
-// Fix repoints every mistracked agent session branch at the rig's default
-// branch. It is the mechanical form of the repair an operator would otherwise
-// run by hand, one `git config branch.<name>.merge` at a time.
+// Fix repoints every agent session branch that tracks an absorbed branch at
+// the rig's default branch. It is the mechanical form of the repair an operator
+// would otherwise run by hand, one `git config branch.<name>.merge` at a time.
 func (c *SessionBranchUpstreamCheck) Fix(_ *CheckContext) error {
 	gitBin, err := c.gitPath("git")
 	if err != nil {
@@ -78,8 +89,8 @@ func (c *SessionBranchUpstreamCheck) Fix(_ *CheckContext) error {
 	return nil
 }
 
-// Run reports agent session branches whose upstream disagrees with the rig's
-// configured default branch.
+// Run reports agent session branches whose upstream is a branch the rig's
+// configured default branch has already absorbed.
 func (c *SessionBranchUpstreamCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name(), Severity: SeverityAdvisory}
 
@@ -113,21 +124,21 @@ func (c *SessionBranchUpstreamCheck) Run(_ *CheckContext) *CheckResult {
 	}
 
 	r.Status = StatusWarning
-	r.Message = fmt.Sprintf("rig %q: %d agent session branch(es) track a branch other than %s — one `git pull --rebase` replays that agent's work onto the wrong base",
+	r.Message = fmt.Sprintf("rig %q: %d agent session branch(es) track a branch %s has already absorbed — one `git pull --rebase` replays that agent's work onto the wrong base",
 		c.rig.Name, len(findings), defaultBranch)
 
 	want := "refs/heads/" + defaultBranch
 	hints := make([]string, 0, len(findings))
 	for _, f := range findings {
-		r.Details = append(r.Details, fmt.Sprintf("%s tracks %s (expected %s) — worktree %s", f.branch, f.merge, want, f.worktree))
+		r.Details = append(r.Details, fmt.Sprintf("%s tracks %s, which is already contained in %s (expected %s) — worktree %s", f.branch, f.merge, defaultBranch, want, f.worktree))
 		hints = append(hints, fmt.Sprintf("git -C %q config branch.%s.merge %s", c.rig.Path, f.branch, want))
 	}
 	r.FixHint = strings.Join(hints, "; ")
 	return r
 }
 
-// mistrackedFinding is one agent session branch whose upstream disagrees with
-// the rig's default branch.
+// mistrackedFinding is one agent session branch whose upstream is already
+// contained in the rig's default branch.
 type mistrackedFinding struct {
 	branch   string // local branch name
 	merge    string // configured branch.<name>.merge value
@@ -135,9 +146,9 @@ type mistrackedFinding struct {
 }
 
 // mistrackedBranches returns how many in-scope session branches were examined
-// and, of those, the ones whose configured upstream is not the rig's default
-// branch. Findings are sorted by branch name so results and fix hints are
-// stable across runs.
+// and, of those, the ones whose configured upstream the rig's default branch
+// has already absorbed. Findings are sorted by branch name so results and fix
+// hints are stable across runs.
 func (c *SessionBranchUpstreamCheck) mistrackedBranches(gitBin, defaultBranch string) (int, []mistrackedFinding, error) {
 	worktrees, err := c.agentWorktreeBranches(gitBin)
 	if err != nil {
@@ -150,6 +161,10 @@ func (c *SessionBranchUpstreamCheck) mistrackedBranches(gitBin, defaultBranch st
 	if err != nil {
 		return 0, nil, err
 	}
+	remotes, err := branchConfigValues(gitBin, c.rig.Path, "remote")
+	if err != nil {
+		return 0, nil, err
+	}
 
 	want := "refs/heads/" + defaultBranch
 	var findings []mistrackedFinding
@@ -158,6 +173,13 @@ func (c *SessionBranchUpstreamCheck) mistrackedBranches(gitBin, defaultBranch st
 		// An untracked branch is not this defect: `git pull` on it fails
 		// loudly instead of succeeding onto the wrong base.
 		if !tracked || merge == want {
+			continue
+		}
+		stale, err := c.upstreamIsAbsorbed(gitBin, remotes[branch], merge, defaultBranch)
+		if err != nil {
+			return 0, nil, err
+		}
+		if !stale {
 			continue
 		}
 		findings = append(findings, mistrackedFinding{branch: branch, merge: merge, worktree: worktree})
@@ -226,32 +248,84 @@ func resolvePathForCompare(path string) string {
 	return abs
 }
 
+// upstreamIsAbsorbed reports whether the ref a `git pull --rebase` on this
+// branch would replay onto is fully contained in the rig's default branch —
+// the only shape from which the replay can move the agent's work backwards.
+//
+// An upstream that cannot be resolved is not a finding: `git pull` fails loudly
+// on it rather than succeeding onto the wrong base, which is the same reason an
+// untracked branch is left alone.
+func (c *SessionBranchUpstreamCheck) upstreamIsAbsorbed(gitBin, remote, merge, defaultBranch string) (bool, error) {
+	upstreamRef := pullTargetRef(remote, merge)
+	defaultRef := pullTargetRef(remote, "refs/heads/"+defaultBranch)
+	if !refResolves(gitBin, c.rig.Path, upstreamRef) || !refResolves(gitBin, c.rig.Path, defaultRef) {
+		return false, nil
+	}
+	return isAncestorRef(gitBin, c.rig.Path, upstreamRef, defaultRef)
+}
+
+// pullTargetRef returns the ref `git pull` on a branch configured with this
+// remote and branch.<name>.merge value actually lands on: the remote-tracking
+// copy when the branch pulls from a remote, and the local ref when it pulls
+// from the repository itself.
+func pullTargetRef(remote, merge string) string {
+	if remote == "" || remote == "." {
+		return merge
+	}
+	return "refs/remotes/" + remote + "/" + strings.TrimPrefix(merge, "refs/heads/")
+}
+
+// refResolves reports whether ref names a commit in dir.
+func refResolves(gitBin, dir, ref string) bool {
+	_, err := runGitCommand(gitBin, dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	return err == nil
+}
+
+// isAncestorRef reports whether ancestor is reachable from descendant.
+// `git merge-base --is-ancestor` answers with its exit status: 0 for yes, 1 for
+// no, anything else a real failure.
+func isAncestorRef(gitBin, dir, ancestor, descendant string) (bool, error) {
+	if _, err := runGitCommand(gitBin, dir, "merge-base", "--is-ancestor", ancestor, descendant); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("comparing %s with %s: %w", ancestor, descendant, err)
+	}
+	return true, nil
+}
+
 // branchMergeRefs reads every configured branch.<name>.merge value in dir.
-// Branch names may themselves contain dots (gc-gastown.rictus-54e7a1c9cabd),
-// so the name is recovered by trimming the fixed prefix and suffix rather than
-// by splitting on ".".
 func branchMergeRefs(gitBin, dir string) (map[string]string, error) {
-	out, err := runGitCommand(gitBin, dir, "config", "--get-regexp", `^branch\..*\.merge$`)
+	return branchConfigValues(gitBin, dir, "merge")
+}
+
+// branchConfigValues reads every configured branch.<name>.<key> value in dir,
+// keyed by branch name. Branch names may themselves contain dots
+// (gc-gastown.rictus-54e7a1c9cabd), so the name is recovered by trimming the
+// fixed prefix and suffix rather than by splitting on ".".
+func branchConfigValues(gitBin, dir, key string) (map[string]string, error) {
+	out, err := runGitCommand(gitBin, dir, "config", "--get-regexp", `^branch\..*\.`+key+`$`)
 	if err != nil {
 		// git config exits 1 when nothing matches, which is a legitimate
-		// "no branch has an upstream" state, not a failure.
+		// "no branch carries this setting" state, not a failure.
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
 			return map[string]string{}, nil
 		}
-		return nil, fmt.Errorf("reading branch upstreams: %w", err)
+		return nil, fmt.Errorf("reading branch.*.%s config: %w", key, err)
 	}
 
-	merges := make(map[string]string)
+	values := make(map[string]string)
 	for _, line := range strings.Split(out, "\n") {
-		key, value, ok := strings.Cut(strings.TrimSpace(line), " ")
+		configKey, value, ok := strings.Cut(strings.TrimSpace(line), " ")
 		if !ok {
 			continue
 		}
-		name := strings.TrimSuffix(strings.TrimPrefix(key, "branch."), ".merge")
-		if name != "" && name != key {
-			merges[name] = strings.TrimSpace(value)
+		name := strings.TrimSuffix(strings.TrimPrefix(configKey, "branch."), "."+key)
+		if name != "" && name != configKey {
+			values[name] = strings.TrimSpace(value)
 		}
 	}
-	return merges, nil
+	return values, nil
 }
