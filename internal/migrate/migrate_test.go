@@ -1129,6 +1129,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		EmitsPermissionWarning: &trueVal,
 		Env:                    map[string]string{"K": "V"},
 		OptionDefaults:         map[string]string{"effort": "max"},
+		FormulaVars:            map[string]string{"test_command": "make test-view"},
 		MaxActiveSessions:      intPtr(5),
 		MinActiveSessions:      intPtr(1),
 		ScaleCheck:             "echo 3",

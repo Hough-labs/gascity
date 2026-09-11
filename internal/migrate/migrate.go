@@ -78,6 +78,7 @@ type agentFile struct {
 	EmitsPermissionWarning *bool             `toml:"emits_permission_warning,omitempty"`
 	Env                    map[string]string `toml:"env,omitempty"`
 	OptionDefaults         map[string]string `toml:"option_defaults,omitempty"`
+	FormulaVars            map[string]string `toml:"formula_vars,omitempty"`
 	MaxActiveSessions      *int              `toml:"max_active_sessions,omitempty"`
 	MinActiveSessions      *int              `toml:"min_active_sessions,omitempty"`
 	ScaleCheck             string            `toml:"scale_check,omitempty"`
@@ -934,6 +935,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		EmitsPermissionWarning: agent.EmitsPermissionWarning,
 		Env:                    agent.Env,
 		OptionDefaults:         agent.OptionDefaults,
+		FormulaVars:            agent.FormulaVars,
 		MaxActiveSessions:      agent.MaxActiveSessions,
 		MinActiveSessions:      agent.MinActiveSessions,
 		ScaleCheck:             agent.ScaleCheck,
@@ -987,6 +989,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.EmitsPermissionWarning == nil &&
 		len(cfg.Env) == 0 &&
 		len(cfg.OptionDefaults) == 0 &&
+		len(cfg.FormulaVars) == 0 &&
 		cfg.MaxActiveSessions == nil &&
 		cfg.MinActiveSessions == nil &&
 		cfg.ScaleCheck == "" &&
