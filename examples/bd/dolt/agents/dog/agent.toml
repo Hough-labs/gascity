@@ -4,3 +4,15 @@ nudge = "Check your hook for Dolt maintenance work."
 idle_timeout = "2h"
 min_active_sessions = 0
 max_active_sessions = 2
+
+# The dog re-derives everything it needs from beads on every start: its prompt
+# claims a bead, reads the formula, follows the steps and exits. Nothing it
+# needs is carried in the conversation, so a fresh one costs nothing.
+#
+# Stated explicitly because the alternative is silent: an agent that omits
+# wake_mode inherits Agent.EffectiveWakeMode's "resume" default, which
+# reattaches the previous provider conversation on every wake so the transcript
+# only ever grows. Every sibling dog already declares "fresh"; this one differed
+# by omission alone, and that ambiguity is what gascity-xd9a spent its
+# investigation resolving.
+wake_mode = "fresh"

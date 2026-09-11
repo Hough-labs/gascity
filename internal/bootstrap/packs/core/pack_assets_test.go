@@ -158,6 +158,8 @@ func TestCoreControlDispatcherAgent(t *testing.T) {
 		ProcessNames      []string `toml:"process_names"`
 		MaxActiveSessions *int     `toml:"max_active_sessions"`
 		Scope             string   `toml:"scope"`
+		Provider          string   `toml:"provider"`
+		WakeMode          string   `toml:"wake_mode"`
 	}
 
 	data, err := fs.ReadFile(PackFS, "agents/control-dispatcher/agent.toml")
@@ -186,6 +188,21 @@ func TestCoreControlDispatcherAgent(t *testing.T) {
 	}
 	if agent.MaxActiveSessions == nil || *agent.MaxActiveSessions != 1 {
 		t.Fatalf("control-dispatcher max_active_sessions = %v, want 1", agent.MaxActiveSessions)
+	}
+	// The dispatcher session IS the `gc convoy control` process, not a coding
+	// agent driving one. start_command is ResolveProvider's escape hatch
+	// (internal/config/resolve.go), which binds no provider and hands back no
+	// ResumeCommand, so there is no provider conversation for a wake mode to
+	// resume or reset. Declaring one here would read as a bound on conversation
+	// growth that does not exist; the serve loop's state lives in beads.
+	// See gascity-xd9a, where the absent wake_mode was misread as the cause of
+	// an unbounded conversation this agent cannot hold.
+	if agent.Provider != "" {
+		t.Fatalf("control-dispatcher provider = %q, want empty so start_command stays the escape hatch", agent.Provider)
+	}
+	if agent.WakeMode != "" {
+		t.Fatalf("control-dispatcher wake_mode = %q, want empty: a start_command agent binds no provider "+
+			"and has no conversation to resume, so a wake mode here is inert", agent.WakeMode)
 	}
 }
 

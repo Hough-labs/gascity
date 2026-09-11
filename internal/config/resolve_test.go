@@ -2119,6 +2119,39 @@ func TestResolveProviderCustomPermissionModes(t *testing.T) {
 
 // --- ResumeCommand ---
 
+// TestResolveProviderStartCommandWithoutResumeCommandCannotResume pins the
+// fact that makes wake_mode inert for a start_command agent: the escape hatch
+// returns before the provider catalog is consulted, so nothing supplies a
+// ResumeCommand and the session has no provider conversation to reattach.
+// The core pack's control-dispatcher is exactly this shape, which is why it
+// cannot accumulate a conversation regardless of its wake mode (gascity-xd9a).
+func TestResolveProviderStartCommandWithoutResumeCommandCannotResume(t *testing.T) {
+	agent := &Agent{
+		Name:         "dispatcher",
+		StartCommand: "sh -c 'exec gc convoy control --serve --follow {{.Agent}}'",
+		PromptMode:   "none",
+	}
+	// A populated catalog proves the escape hatch never reaches it: a provider
+	// lookup would have supplied claude's resume command.
+	catalog := map[string]ProviderSpec{
+		"claude": {Command: "claude", ResumeCommand: "claude --resume {{.SessionKey}}"},
+	}
+
+	rp, err := ResolveProvider(agent, &Workspace{Provider: "claude"}, catalog, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Command != agent.StartCommand {
+		t.Errorf("Command = %q, want the agent start_command", rp.Command)
+	}
+	if rp.ResumeCommand != "" {
+		t.Errorf("ResumeCommand = %q, want empty: a start_command agent has no provider conversation to resume", rp.ResumeCommand)
+	}
+	if rp.Name != "" {
+		t.Errorf("Name = %q, want empty: the escape hatch must not bind a provider", rp.Name)
+	}
+}
+
 func TestResolveProviderResumeCommandFromSpec(t *testing.T) {
 	agent := &Agent{Name: "worker", Provider: "custom"}
 	providers := map[string]ProviderSpec{

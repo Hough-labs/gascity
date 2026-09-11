@@ -1,3 +1,14 @@
+# wake_mode is deliberately absent, and must stay absent.
+#
+# start_command is ResolveProvider's escape hatch (internal/config/resolve.go):
+# it binds no provider and is handed no ResumeCommand, so the session IS the
+# `gc convoy control` process rather than a coding agent driving one. There is
+# no provider conversation here for a wake mode to resume or reset — the serve
+# loop's state lives in beads — so declaring one would read as a bound on
+# conversation growth that does not exist.
+#
+# The absence was read as an oversight once (gascity-xd9a), and this agent as
+# the source of an unbounded conversation it cannot hold. It is neither.
 description = "Deterministic compiler-v2 workflow control worker"
 start_command = "sh -c 'export GC_WORKFLOW_TRACE=\"${GC_WORKFLOW_TRACE:-${GC_CONTROL_DISPATCHER_TRACE_DEFAULT:-${GC_CITY}/.gc/runtime/control-dispatcher-trace.log}}\"; trace_dir=\"${GC_WORKFLOW_TRACE%/*}\"; if [ \"$trace_dir\" = \"$GC_WORKFLOW_TRACE\" ]; then trace_dir=\".\"; elif [ -z \"$trace_dir\" ]; then trace_dir=\"/\"; fi; mkdir -p \"$trace_dir\"; exec \"${GC_BIN:-gc}\" convoy control --serve --follow {{.Agent}}'"
 prompt_mode = "none"
