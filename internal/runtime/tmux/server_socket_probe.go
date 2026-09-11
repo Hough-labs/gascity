@@ -63,7 +63,31 @@ func observeNamedSocketUsing(
 		return fmt.Errorf("path=%s inode=unknown peer_pid=unknown lstat=%w", path, contextErr)
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		// The socket FILE is absent, which is NOT proof the server is gone: a
+		// tmux server survives having its socket unlinked and keeps every
+		// session bound to it. Cold-starting here binds a second server on the
+		// path and orphans the whole fleet — the exact outcome this file
+		// exists to prevent, reached through the one branch that never asked
+		// who holds the socket. An unlinked-but-live socket is precisely the
+		// residue a partial clobber leaves behind, so this branch is what
+		// turns a single clobber into a repeating one (gascity-3z7d).
+		//
+		// The holder observation keys on the socket NAME in the process table,
+		// so it still answers with the file gone. Absence is claimed only from
+		// a listing that was read successfully and did not contain it.
+		switch holder(ctx, path) {
+		case socketHolderAbsent:
+			return nil
+		case socketHolderPresent:
+			// Deliberately NOT errSocketHolderLive: that maps to
+			// ErrServerSaturated, which advertises "transient, retry" — but no
+			// amount of retrying re-links a socket. This is a stuck state an
+			// operator must see, so it becomes ErrServerDegraded and is
+			// refused loudly instead of quietly costing the fleet.
+			return fmt.Errorf("path=%s inode=absent peer_pid=unknown reason=unlinked-socket-live-holder", path)
+		default:
+			return fmt.Errorf("path=%s inode=absent peer_pid=unknown reason=socket-holder-unknown-on-absent-path", path)
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("path=%s inode=unknown peer_pid=unknown lstat=%w", path, err)
