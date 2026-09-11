@@ -10386,6 +10386,14 @@ func TestInFlightTrackingFollowsDispatchLifecycle(t *testing.T) {
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		ad.drain(context.Background())
+	})
 
 	if got := ad.inFlightTracking(); len(got) != 0 {
 		t.Fatalf("inFlightTracking() before dispatch = %v, want empty", got)
@@ -10445,6 +10453,14 @@ func TestWatchdogSweepKeepsSingleFlightClosedForLongExec(t *testing.T) {
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		ad.drain(context.Background())
+	})
 	mad, ok := ad.(*memoryOrderDispatcher)
 	if !ok {
 		t.Fatalf("dispatcher type = %T, want *memoryOrderDispatcher", ad)
