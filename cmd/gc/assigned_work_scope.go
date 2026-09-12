@@ -88,7 +88,33 @@ func openSessionReachableStoreRefInfo(cityPath string, cfg *config.City, info se
 	if agentIsCrossStoreEligible(agentCfg) {
 		return crossStoreOpenSessionStoreRef
 	}
-	return assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
+	storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
+	if storeRef == "" && strings.TrimSpace(agentCfg.Dir) != "" {
+		// workdir.ConfiguredRigName collapses two different situations to "",
+		// and they must not be treated alike:
+		//
+		//   Dir == ""            a deliberate city-level agent. "" is a REAL
+		//                        store-ref here (the city store), and such a
+		//                        session genuinely does not own rig-store work
+		//                        routed to a rig-level agent. Preserved below.
+		//
+		//   Dir set, maps to no  the rig could not be resolved: Dir matched no
+		//   rig name or path     rig NAME and resolved to no rig PATH. Nothing
+		//                        was learned about which store the session owns.
+		//
+		// Only the second case reaches here. Returning "" for it asserts the
+		// session owns ONLY city-store work, which for a live holder of
+		// rig-routed work is false — and that false verdict is what authorizes
+		// the release path to take an in-flight bead away from an awake owner
+		// (gascity-jrlv, winnow-iaroy 2026-09-07).
+		//
+		// Missing information is not evidence of non-ownership, so it fails OPEN
+		// onto the same keep-on-match wildcard the unresolvable-agent case above
+		// uses. Only OPEN sessions are indexed here, so failing open keeps a live
+		// session's work and cannot strand a dead one's.
+		return unresolvedOpenSessionStoreRef
+	}
+	return storeRef
 }
 
 func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agentCfg *config.Agent, storeRefs []string, index int) bool {

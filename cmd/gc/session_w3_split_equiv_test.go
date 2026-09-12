@@ -27,7 +27,14 @@ func rawOpenSessionReachableStoreRefRef(cityPath string, cfg *config.City, sb be
 	if agentIsCrossStoreEligible(agentCfg) {
 		return crossStoreOpenSessionStoreRef
 	}
-	return assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
+	storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
+	if storeRef == "" && strings.TrimSpace(agentCfg.Dir) != "" {
+		// Mirrors the unresolvable-rig fail-open arm in the production form
+		// (gascity-jrlv). Kept in lockstep deliberately: this oracle is only
+		// meaningful while it is a faithful mirror.
+		return unresolvedOpenSessionStoreRef
+	}
+	return storeRef
 }
 
 // TestOpenSessionReachableStoreRefInfoMatchesRaw pins the §4 split site the
