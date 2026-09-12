@@ -6,7 +6,55 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/dispatch"
 )
+
+// hookWorkQueryRetryAttempts bounds the total number of work-query attempts per
+// store (1 = the original behavior, no retry). A transient data-plane blip —
+// notably Dolt briefly holding the schema-migration lock — otherwise converts a
+// sub-minute stall into a total claim failure that burns the session: the field
+// report (gascity-3dz7) measured the very next attempt succeeding as soon as the
+// lock cleared. Two attempts covers that case while keeping the worst case
+// bounded and predictable.
+var hookWorkQueryRetryAttempts = 2
+
+// hookWorkQueryRetryBackoff is the pause between work-query attempts. It is a
+// courtesy gap for the lock holder, not a congestion control: the observed
+// contention clears in well under a second.
+var hookWorkQueryRetryBackoff = 500 * time.Millisecond
+
+// hookWorkQuerySleep is the retry backoff sleep, injectable so tests can assert
+// the retry budget without paying real wall time.
+var hookWorkQuerySleep = time.Sleep
+
+// retryTransientWorkQuery decorates a hookStoreRunner so a transient work-query
+// failure is retried instead of failing the whole claim. It wraps the runner
+// rather than either call site because both the discovery pass
+// (firstStoreWithWork) and the claim-time re-validation (claimStoreWithFallback)
+// run the same query and are equally exposed to a data-plane blip.
+//
+// Only failures dispatch.IsTransientControllerError classifies as transient are
+// retried — the wrapped context.DeadlineExceeded sentinel shellWorkQueryWithEnv
+// emits on timeout, OOM/termination signals, and connection flaps. A genuinely
+// broken work query (bad command, non-zero exit) is returned on the first
+// attempt so the retry cannot mask real breakage.
+func retryTransientWorkQuery(run hookStoreRunner) hookStoreRunner {
+	if run == nil {
+		return nil
+	}
+	return func(command, dir string, env []string) (string, error) {
+		for attempt := 1; ; attempt++ {
+			out, err := run(command, dir, env)
+			if err == nil || !dispatch.IsTransientControllerError(err) {
+				return out, err
+			}
+			if attempt >= hookWorkQueryRetryAttempts {
+				return out, err
+			}
+			hookWorkQuerySleep(hookWorkQueryRetryBackoff)
+		}
+	}
+}
 
 // hookStore is one store the hook work_query runs against: a working dir and
 // the rig/city-scoped subprocess env that points bd at that store.

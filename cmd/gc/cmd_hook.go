@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -618,8 +619,18 @@ func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookSt
 // has been exhausted; the drain reason is claims_errored when any exhausted
 // store's eligible claims errored rather than merely lost the race, else no_work.
 // emitFailure surfaces a work-query timeout on the event bus when eligible.
+//
+// A transient work-query failure on the agent's own store is retried
+// (retryTransientWorkQuery) before it is treated as fatal, and if it still fails
+// it drains with reason query_timeout rather than exiting bare — see
+// hookClaimWorkQueryFailure.
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
+	// Retry a transient work-query failure before treating it as fatal. Applied
+	// here rather than at the two query sites so discovery and claim-time
+	// re-validation share one policy, and so the injected test runner exercises
+	// the same composition production uses.
+	run = retryTransientWorkQuery(run)
 	// primary is the agent's own store (the first entry). It is captured once
 	// here, before the loop shrinks remaining: only the primary may surface a
 	// work-query error as a fatal claim failure. Once the primary loses its
@@ -637,18 +648,14 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	for len(remaining) > 0 {
 		_, selected, err := firstStoreWithWork(workQuery, remaining, primary, run)
 		if err != nil {
-			emitFailure(workQuery, err)
-			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return hookClaimWorkQueryFailure(workQuery, err, claimOpts, ops, emitFailure, stdout, stderr)
 		}
 		if isZeroHookStore(selected) {
 			break // no remaining store has ready work
 		}
 		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, run)
 		if err != nil {
-			emitFailure(workQuery, err)
-			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return hookClaimWorkQueryFailure(workQuery, err, claimOpts, ops, emitFailure, stdout, stderr)
 		}
 		if isZeroHookStore(claimStore) {
 			break // selected store emptied and no later store has ready work
@@ -984,4 +991,24 @@ func normalizeWorkQueryOutput(output string) string {
 		return output
 	}
 	return string(normalized)
+}
+
+// hookClaimWorkQueryFailure is the shared terminal outcome for a work query that
+// failed on the agent's own store, for both the discovery pass and the
+// claim-time re-validation. The failure always reaches the event bus and stderr.
+//
+// A transient failure that survived its retries additionally emits the
+// structured drain contract with reason query_timeout, so a --json caller can
+// tell "the data plane was briefly unavailable" from "the pool is empty". This
+// mirrors claims_errored: an operational failure is reported as a drain with an
+// honest reason rather than laundered into an idle signal or collapsed into a
+// bare exit 1 that carries no JSON body at all. A non-transient failure stays a
+// hard exit 1 — a broken work query is not a drain.
+func hookClaimWorkQueryFailure(workQuery string, err error, claimOpts hookClaimOptions, ops hookClaimOps, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+	emitFailure(workQuery, err)
+	fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
+	if dispatch.IsTransientControllerError(err) {
+		return writeHookClaimDrain(hookClaimReasonQueryTimeout, claimOpts.JSON, claimOpts.DrainAck, ops.DrainAck, stdout, stderr)
+	}
+	return 1
 }

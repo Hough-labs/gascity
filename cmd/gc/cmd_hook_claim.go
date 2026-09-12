@@ -28,6 +28,13 @@ const (
 	hookClaimReasonNoWork        = "no_work"
 	hookClaimReasonClaimsErrored = "claims_errored"
 	hookClaimReasonStaleSession  = "stale_session"
+	// hookClaimReasonQueryTimeout marks a drain caused by the work query itself
+	// failing transiently (and surviving its retries) rather than by an idle
+	// store. Without a distinct reason an exhausted timeout is indistinguishable
+	// from an empty pool, so a startup wrapper drain-acks and the session exits
+	// having done nothing while the pool records a healthy idle worker — the
+	// silent false-idle gascity-3dz7 was filed for.
+	hookClaimReasonQueryTimeout = "query_timeout"
 )
 
 // Work-action reasons for the same result contract. Only hookClaimReasonClaimed
