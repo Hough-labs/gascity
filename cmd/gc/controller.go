@@ -916,7 +916,8 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if err := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, tomlPath, resolveLoadCityConfigWarningWriter()); err != nil {
 		return nil, err
 	}
-	newCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)
+	newCfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath,
+		config.LoadOptions{CaptureRevisionSnapshot: true}, extraConfigFiles...)
 	if err != nil {
 		return nil, fmt.Errorf("parsing city.toml: %w", err)
 	}

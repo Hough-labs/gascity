@@ -401,6 +401,20 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 			return nil
 		}
 	}
+	// The in-process memo above only ever helps a process that loads the config
+	// more than once. Every one-shot gc invocation loads it exactly once and so
+	// paid the flock plus two git execs per git-backed import, on every call,
+	// before the command did anything (gascity-7qmu). The on-disk marker carries
+	// the same answer across that boundary, keyed by the same stat fingerprint
+	// plus a stat-only fingerprint of the worktree standing in for the
+	// `git status --porcelain` tree walk. Bundled synthetic caches are excluded:
+	// they have their own fast path already, and their validator compares the
+	// materialized tree against the binary's embedded content, where a marker
+	// file gc dropped inside would read as drift.
+	if !IsBundledSourceAtCanonicalPin(source, commit) && remoteCacheValidationRecorded(cacheDir, commit, fp) {
+		remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: fp})
+		return nil
+	}
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
 		return validateInstalledRemoteCache(source, cacheDir, commit)
 	}); err != nil {
@@ -419,7 +433,11 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 		}
 		return err
 	}
-	remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: remoteCacheFingerprint(cacheDir)})
+	validatedFingerprint := remoteCacheFingerprint(cacheDir)
+	remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: validatedFingerprint})
+	if !IsBundledSourceAtCanonicalPin(source, commit) {
+		recordRemoteCacheValidation(cacheDir, commit, validatedFingerprint)
+	}
 	return nil
 }
 

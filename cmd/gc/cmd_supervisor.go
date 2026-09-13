@@ -2493,7 +2493,7 @@ func publishManagedCity(cr *cityRegistry, path string, mc *managedCity) bool {
 }
 
 func loadSupervisorCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
-	return loadCityConfigWithBuiltinPacks(cityPath)
+	return loadCityConfigWithBuiltinPacksOptions(cityPath, config.LoadOptions{CaptureRevisionSnapshot: true})
 }
 
 // prepareCityForSupervisor runs the critical city initialization steps

@@ -23,11 +23,20 @@ func loadConfigCommandCityConfig(cityPath string) (*config.City, *config.Provena
 // --config files); builtin packs themselves compose only through the explicit
 // city.toml includes written by gc init and repaired by gc doctor --fix.
 func loadCityConfigWithBuiltinPacks(cityPath string, includes ...string) (*config.City, *config.Provenance, error) {
+	return loadCityConfigWithBuiltinPacksOptions(cityPath, config.LoadOptions{}, includes...)
+}
+
+// loadCityConfigWithBuiltinPacksOptions is loadCityConfigWithBuiltinPacks with
+// explicit load options. Callers that later compute config.Revision and compare
+// it across reloads pass config.LoadOptions{CaptureRevisionSnapshot: true} so
+// the revision describes the config as loaded; every other caller leaves it off
+// and skips hashing every resolved pack tree (gascity-7qmu).
+func loadCityConfigWithBuiltinPacksOptions(cityPath string, opts config.LoadOptions, includes ...string) (*config.City, *config.Provenance, error) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	if err := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, tomlPath, resolveLoadCityConfigWarningWriter()); err != nil {
 		return nil, nil, err
 	}
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, includes...)
+	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath, opts, includes...)
 	if err != nil {
 		return nil, nil, err
 	}

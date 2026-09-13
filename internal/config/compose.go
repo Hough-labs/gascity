@@ -98,9 +98,21 @@ type LoadOptions struct {
 	// AllowMissingProviderReferences leaves provider-reference catalog errors
 	// non-fatal for repair tools that need to inspect broken configs.
 	AllowMissingProviderReferences bool
-	deferRigPatches                bool
-	deferredRigPatches             *[]deferredRigPatches
-	allowLegacyOrderLayouts        bool
+	// CaptureRevisionSnapshot records the revision inputs (a recursive content
+	// hash of every resolved pack directory, plus the resolved source files and
+	// packs.lock) while the config is being loaded, so a later Revision call
+	// describes the config as it was loaded rather than as disk reads at call
+	// time. Only the long-running paths that compare revisions across reloads —
+	// the controller, the supervisor, gc start's controller mode and the API
+	// control plane — need that, and they are the only callers that should set
+	// it. It is off by default because hashing every pack tree dominates the
+	// cost of a config load, and every one-shot CLI invocation loads the city
+	// config before it does anything else (gascity-7qmu). Revision stays
+	// correct without a snapshot; it re-reads the same inputs live.
+	CaptureRevisionSnapshot bool
+	deferRigPatches         bool
+	deferredRigPatches      *[]deferredRigPatches
+	allowLegacyOrderLayouts bool
 }
 
 // LoadWithIncludes loads a city.toml and merges all included fragments.
@@ -773,8 +785,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
-	// mutable files from disk.
-	prov.captureRevisionSnapshot(fs, root, cityRoot)
+	// mutable files from disk. Opt-in: the capture recursively hashes every
+	// resolved pack directory, which only the revision-comparing callers need.
+	if opts.CaptureRevisionSnapshot {
+		prov.captureRevisionSnapshot(fs, root, cityRoot)
+	}
 
 	return root, prov, nil
 }

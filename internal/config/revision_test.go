@@ -57,9 +57,9 @@ func TestRevision_UsesLoadedSourceSnapshot(t *testing.T) {
 name = "test"
 `)
 
-	cfg, prov, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	cfg, prov, err := LoadWithIncludesOptions(fsys.OSFS{}, cityPath, LoadOptions{CaptureRevisionSnapshot: true})
 	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
+		t.Fatalf("LoadWithIncludesOptions: %v", err)
 	}
 	loadedRevision := Revision(fsys.OSFS{}, prov, cfg, dir)
 
@@ -71,7 +71,7 @@ name = "changed"
 		t.Fatalf("revision changed after source file write; got %q, want loaded snapshot %q", afterWriteRevision, loadedRevision)
 	}
 
-	reloadedCfg, reloadedProv, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	reloadedCfg, reloadedProv, err := LoadWithIncludesOptions(fsys.OSFS{}, cityPath, LoadOptions{CaptureRevisionSnapshot: true})
 	if err != nil {
 		t.Fatalf("reloading config: %v", err)
 	}
@@ -301,9 +301,9 @@ name = "test"
 			cityPath := filepath.Join(dir, "city.toml")
 			tt.setup(t, dir)
 
-			cfg, prov, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+			cfg, prov, err := LoadWithIncludesOptions(fsys.OSFS{}, cityPath, LoadOptions{CaptureRevisionSnapshot: true})
 			if err != nil {
-				t.Fatalf("LoadWithIncludes: %v", err)
+				t.Fatalf("LoadWithIncludesOptions: %v", err)
 			}
 			loadedRevision := Revision(fsys.OSFS{}, prov, cfg, dir)
 
@@ -313,7 +313,7 @@ name = "test"
 				t.Fatalf("revision changed after post-load mutation; got %q, want loaded snapshot %q", afterWriteRevision, loadedRevision)
 			}
 
-			reloadedCfg, reloadedProv, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+			reloadedCfg, reloadedProv, err := LoadWithIncludesOptions(fsys.OSFS{}, cityPath, LoadOptions{CaptureRevisionSnapshot: true})
 			if err != nil {
 				t.Fatalf("reloading config: %v", err)
 			}
@@ -645,5 +645,88 @@ func TestWatchDirs_Deduplicates(t *testing.T) {
 	dirs := WatchDirs(prov, &City{}, dir)
 	if len(dirs) != 1 {
 		t.Errorf("got %d dirs, want 1 (deduplicated): %v", len(dirs), dirs)
+	}
+}
+
+// TestLoadWithIncludes_SkipsRevisionSnapshotByDefault pins the load-time cost
+// this option exists to remove: capturing the snapshot recursively hashes every
+// resolved pack directory, and every one-shot gc invocation loads the city
+// config before it does anything else (gascity-7qmu). Only a caller that asks
+// for it pays for it.
+func TestLoadWithIncludes_SkipsRevisionSnapshotByDefault(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	writeFile(t, dir, "city.toml", `[workspace]
+name = "test"
+`)
+
+	_, prov, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if prov.revisionSnapshot != nil {
+		t.Fatal("default load captured a revision snapshot; want it skipped")
+	}
+
+	_, optProv, err := LoadWithIncludesOptions(fsys.OSFS{}, cityPath, LoadOptions{CaptureRevisionSnapshot: true})
+	if err != nil {
+		t.Fatalf("LoadWithIncludesOptions: %v", err)
+	}
+	if optProv.revisionSnapshot == nil {
+		t.Fatal("CaptureRevisionSnapshot load captured no revision snapshot")
+	}
+}
+
+// TestRevision_MatchesWithAndWithoutSnapshot fixes the correctness half of the
+// option: skipping the snapshot only changes WHEN the revision inputs are read,
+// never the revision itself. Over an unchanged tree both routes must agree, or
+// a controller that opted in would disagree with one that did not about whether
+// the config changed.
+func TestRevision_MatchesWithAndWithoutSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	writeFile(t, dir, "city.toml", `
+include = ["agents.toml"]
+
+[workspace]
+name = "test"
+`)
+	writeFile(t, dir, "agents.toml", `[[agent]]
+name = "builder"
+`)
+	writeFile(t, dir, "pack.toml", `[pack]
+name = "citypack"
+schema = 1
+
+[[agent]]
+name = "packbuilder"
+`)
+
+	snapCfg, snapProv, err := LoadWithIncludesOptions(fsys.OSFS{}, cityPath, LoadOptions{CaptureRevisionSnapshot: true})
+	if err != nil {
+		t.Fatalf("LoadWithIncludesOptions: %v", err)
+	}
+	liveCfg, liveProv, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	withSnapshot := Revision(fsys.OSFS{}, snapProv, snapCfg, dir)
+	withoutSnapshot := Revision(fsys.OSFS{}, liveProv, liveCfg, dir)
+	if withSnapshot != withoutSnapshot {
+		t.Fatalf("revision differs by snapshot capture: with=%q without=%q", withSnapshot, withoutSnapshot)
+	}
+
+	// And a snapshot-less provenance still tracks real changes: that is what
+	// makes it safe for the callers that never compare across reloads.
+	writeFile(t, dir, "agents.toml", `[[agent]]
+name = "builder-renamed"
+`)
+	changedCfg, changedProv, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("reloading config: %v", err)
+	}
+	if changed := Revision(fsys.OSFS{}, changedProv, changedCfg, dir); changed == withoutSnapshot {
+		t.Fatal("revision did not change after an input changed")
 	}
 }

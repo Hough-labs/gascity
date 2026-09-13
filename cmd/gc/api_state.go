@@ -2606,7 +2606,7 @@ func (cs *controllerState) refreshConfigSnapshot() (string, error) {
 }
 
 func (cs *controllerState) loadCurrentConfigSnapshot() (*config.City, string, error) {
-	nextCfg, prov, err := loadCityConfigWithBuiltinPacks(cs.cityPath, extraConfigFiles...)
+	nextCfg, prov, err := loadCityConfigWithBuiltinPacksOptions(cs.cityPath, config.LoadOptions{CaptureRevisionSnapshot: true}, extraConfigFiles...)
 	if err != nil {
 		return nil, "", err
 	}

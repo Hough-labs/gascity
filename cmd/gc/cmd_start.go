@@ -1064,7 +1064,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 }
 
 func loadStartCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
-	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
+	return loadCityConfigWithBuiltinPacksOptions(cityPath, config.LoadOptions{CaptureRevisionSnapshot: true}, extraConfigFiles...)
 }
 
 // printDryRunPreview prints what agents would be started without starting them.
