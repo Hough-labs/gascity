@@ -175,6 +175,7 @@ func recordRemoteCacheValidation(cacheDir, commit, statFingerprint string) {
 	}); err != nil {
 		return
 	}
-	//nolint:errcheck // best-effort cache bookkeeping; a miss only costs a revalidation
+	// Best-effort: a marker that cannot be written just costs the next process
+	// a full revalidation, which is the behavior before this marker existed.
 	_ = fsys.WriteFileAtomic(fsys.OSFS{}, remoteCacheValidationMarkerPath(cacheDir), []byte(buf.String()), 0o644)
 }
