@@ -456,8 +456,14 @@ Before considering any task complete:
 - Broader process/integration coverage uses the sharded targets documented in
   `TESTING.md` instead of one monolithic `go test ./...` sweep
 - `go vet ./...` clean
-- `.githooks/pre-commit` is active locally (`git config core.hooksPath`
-  prints `.githooks`) and has run for the staged change
+- The tracked `.githooks/pre-commit` has actually run for the staged change.
+  git runs exactly one hooks directory, so resolve it rather than assume it:
+  `git rev-parse --git-path hooks`. When that is not `.githooks`, another tool
+  owns it (beads keeps its dolt-sync hooks in `.beads/hooks`) and the tracked
+  hooks only run if that directory holds a forwarder for each one —
+  `./scripts/install-git-hooks`, which `make setup` runs, installs them without
+  evicting the owner. `gc doctor`'s `rig:<name>:git-hooks` check reports a
+  directory whose hooks have drifted from the tracked ones
 - `make dashboard-ci` passes for any change touching `internal/api/`,
   `internal/api/openapi.json`, `docs/reference/schema/openapi.*`,
   `internal/api/dashboardspa/`, or generated dashboard types

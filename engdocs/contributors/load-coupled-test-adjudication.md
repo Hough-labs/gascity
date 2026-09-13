@@ -29,9 +29,12 @@ sweep's four-way divisor there would under-subscribe a single-binary lane 4x.
 
 Two facts do most of the adjudication work:
 
-1. **The active pre-push hook is not the in-tree one.** `core.hooksPath` points at
-   `.beads/hooks/pre-push`, which shadows `.githooks/pre-push`. It dispatches on
-   `uname -s`: Darwin runs `make test-mac`, everything else `make test-fast-parallel`.
+1. **The push gate runs the Mac lane, not the fast-parallel one.**
+   `.githooks/pre-push` dispatches on `uname -s`: Darwin runs `make test-mac`,
+   everything else `make test-fast-parallel`. gascity-jiao moved that dispatch
+   into the tracked hook; before it, the dispatch lived only in an untracked
+   copy under the bd-owned `core.hooksPath`, which shadowed `.githooks/pre-push`
+   entirely. Check `git rev-parse --git-path hooks` before reusing this.
    The rig additionally pins `test_command = "make test-mac"` in city.toml
    `[rigs.formula_vars]`. So on this host, **cmd/gc is not in the gate at all.**
    (gascity-vdhw and gascity-5y4h later added the `$(SHARDED_SWEEP_PKGS)` shard

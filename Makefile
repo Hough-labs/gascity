@@ -1008,8 +1008,8 @@ test-k8s:
 
 ## setup: install tools and git hooks
 setup: install-tools
-	git config core.hooksPath .githooks
-	@echo "Done. Tools installed, pre-commit hook active."
+	./scripts/install-git-hooks
+	@echo "Done. Tools installed, tracked .githooks wired up."
 
 ## diagrams-excalidraw: render docs/diagrams/excalidraw/*.excalidraw to excalidraw-rendered/*.svg (idempotent)
 diagrams-excalidraw:

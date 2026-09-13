@@ -725,9 +725,10 @@ test_fallback_cannot_detect_staleness_after_status_leaves_in_progress() {
 # tests catch a future edit to either file breaking the wiring. A trivial
 # Makefile stands in for the real one: pushing a brand-new branch makes the
 # hook's `go_changed` gate trip (no remote counterpart to diff against) and
-# fall through to `exec make test-fast-parallel`, which these tests don't
-# want to actually run — only the ownership guard's wiring is under test
-# here.
+# fall through to the suite the hook selects for this platform — `make
+# test-mac` on Darwin, `make test-fast-parallel` elsewhere — which these tests
+# don't want to actually run. Both lanes are stubbed so the wiring under test
+# is the ownership guard's, on either platform.
 # ---------------------------------------------------------------------------
 
 install_guard_hook() {
@@ -736,7 +737,7 @@ install_guard_hook() {
     cp "$LIB" "$repo/scripts/push-ownership-guard.sh"
     cp "$REPO_ROOT/.githooks/pre-push" "$repo/.githooks/pre-push"
     chmod +x "$repo/.githooks/pre-push"
-    printf 'test-fast-parallel:\n\t@true\n' > "$repo/Makefile"
+    printf 'test-fast-parallel:\n\t@true\n\ntest-mac:\n\t@true\n' > "$repo/Makefile"
     git -C "$repo" config core.hooksPath .githooks
 }
 

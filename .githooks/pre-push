@@ -52,4 +52,22 @@ fi
 
 # The Makefile and direct sharded runner share scripts/test-local-job-count as
 # their default policy. Do not shadow it here; an explicit override still wins.
-exec make test-fast-parallel
+#
+# Each platform runs the lane it is actually configured for. macOS is not
+# configured for the test-fast-parallel lane: CI gives each of its Mac cmd/gc
+# shards its own runner, whereas locally the whole fan-out lands on one box,
+# and Darwin's lsof-based port-holder discovery does not survive that
+# contention. Measured on an idle machine, 2026-08-18, same commit:
+# test-fast-parallel 61 failures, test-mac 2, 12 cmd/gc shards at
+# LOCAL_TEST_JOBS=3 zero. The Mac lane is `make test-mac` — the unit sweep with
+# cmd/gc excluded plus the sharded packages — and cmd/gc stays out of it
+# deliberately: at bounded concurrency it is green, so it costs ~24 minutes to
+# learn nothing that CI's shard matrix does not already cover.
+case "$(uname -s)" in
+  Darwin)
+    exec make test-mac
+    ;;
+  *)
+    exec make test-fast-parallel
+    ;;
+esac

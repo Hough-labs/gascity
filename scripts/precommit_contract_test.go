@@ -222,6 +222,45 @@ func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
 	}
 }
 
+// TestPrePushSelectsTheLaneItsPlatformIsConfiguredFor pins the pre-push hook
+// to the suite each platform is actually set up to run. macOS is not
+// configured for the test-fast-parallel lane: its cmd/gc fan-out gets one
+// runner per shard in CI but all land on one box locally, and the resulting
+// port-holder contention produces phantom failures rather than signal (61 vs 2
+// failures, measured on an idle machine 2026-08-18). The Mac lane is
+// `make test-mac`. This selection used to live only in an untracked copy of
+// the hook, which is how it drifted out of reach of the tracked gate
+// (gascity-jiao).
+func TestPrePushSelectsTheLaneItsPlatformIsConfiguredFor(t *testing.T) {
+	repoRoot := repoRoot(t)
+	script, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "pre-push"))
+	if err != nil {
+		t.Fatalf("read pre-push hook: %v", err)
+	}
+	content := string(script)
+
+	if !strings.Contains(content, `case "$(uname -s)" in`) {
+		t.Fatal("pre-push hook must select its suite from the platform it runs on")
+	}
+	darwinIdx := strings.Index(content, "Darwin)")
+	macIdx := strings.Index(content, "exec make test-mac")
+	fastIdx := strings.Index(content, "exec make test-fast-parallel")
+	if darwinIdx < 0 || macIdx < 0 || fastIdx < 0 {
+		t.Fatalf("pre-push hook must route Darwin to make test-mac and every other platform to make test-fast-parallel:\n%s", content)
+	}
+	if macIdx < darwinIdx || fastIdx < macIdx {
+		t.Fatalf("pre-push hook must run make test-mac in the Darwin branch and make test-fast-parallel in the default branch:\n%s", content)
+	}
+
+	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	if !strings.Contains(string(makefile), "\ntest-mac:") {
+		t.Fatal("Makefile must define the test-mac lane the pre-push hook selects on Darwin")
+	}
+}
+
 func TestPreCommitRegeneratesDashboardClientOnSpecChange(t *testing.T) {
 	repoRoot := repoRoot(t)
 	script, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "pre-commit"))
