@@ -228,16 +228,13 @@ func TestMakeSetupWiresHooksThroughTheInstaller(t *testing.T) {
 // record what they saw, so a forwarder's behavior is observable.
 func newHooksFixtureRepo(t *testing.T) string {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skipf("git unavailable: %v", err)
-	}
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatalf("resolve temp dir: %v", err)
 	}
-	runGitForHooksFixture(t, dir, "init")
-	runGitForHooksFixture(t, dir, "config", "user.name", "Install Git Hooks Test")
-	runGitForHooksFixture(t, dir, "config", "user.email", "install-git-hooks@example.invalid")
+	runGitInHooksFixture(t, dir, "", "init")
+	runGitInHooksFixture(t, dir, "", "config", "user.name", "Install Git Hooks Test")
+	runGitInHooksFixture(t, dir, "", "config", "user.email", "install-git-hooks@example.invalid")
 	for _, name := range []string{"pre-commit", "pre-push"} {
 		writeHookFixture(t, filepath.Join(dir, ".githooks", name), "#!/usr/bin/env bash\nset -euo pipefail\n"+
 			"echo \"tracked "+name+" args=$*\" >> \"$HOOK_LOG\"\n"+
@@ -253,16 +250,14 @@ func ownHooksPath(t *testing.T, repo string) string {
 	if err := os.MkdirAll(owned, 0o755); err != nil {
 		t.Fatalf("create owned hooks dir: %v", err)
 	}
-	runGitForHooksFixture(t, repo, "config", "core.hooksPath", owned)
+	runGitInHooksFixture(t, repo, "", "config", "core.hooksPath", owned)
 	return owned
 }
 
 func runInstallGitHooks(t *testing.T, repo string) {
 	t.Helper()
-	cmd := exec.Command(filepath.Join(repoRoot(t), "scripts", "install-git-hooks"))
-	cmd.Dir = repo
-	cmd.Env = hooksFixtureEnv(t, "")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := runHooksFixtureCommand(t, repo, "", "",
+		filepath.Join(repoRoot(t), "scripts", "install-git-hooks")); err != nil {
 		t.Fatalf("install-git-hooks failed: %v\n%s", err, out)
 	}
 }
@@ -271,10 +266,21 @@ func runInstallGitHooks(t *testing.T, repo string) {
 // with the hook's arguments and its stdin.
 func runHook(t *testing.T, repo, hook, log, stdin string, args ...string) (string, error) {
 	t.Helper()
-	cmd := exec.Command(hook, args...)
-	cmd.Dir = repo
+	return runHooksFixtureCommand(t, repo, log, stdin, hook, args...)
+}
+
+// runHooksFixtureCommand is the ONLY subprocess call site in this file. git,
+// the installer and the installed hooks all route through it, so the file adds
+// one entry to test/test-resources.toml's subprocess ratchet rather than one
+// per helper — the consolidation that ratchet exists to produce.
+func runHooksFixtureCommand(t *testing.T, dir, log, stdin, name string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
 	cmd.Env = hooksFixtureEnv(t, log)
-	cmd.Stdin = strings.NewReader(stdin)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -360,33 +366,17 @@ func readHookLines(t *testing.T, path string) []string {
 
 func gitConfigValue(t *testing.T, repo, key string) string {
 	t.Helper()
-	cmd := exec.Command("git", "config", "--get", key)
-	cmd.Dir = repo
-	cmd.Env = hooksFixtureEnv(t, "")
-	out, err := cmd.Output()
+	out, err := runHooksFixtureCommand(t, repo, "", "", "git", "config", "--get", key)
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(out)
 }
 
 // runGitInHooksFixture runs git so that hooks it triggers write to log.
 func runGitInHooksFixture(t *testing.T, dir, log string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = hooksFixtureEnv(t, log)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-	}
-}
-
-func runGitForHooksFixture(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = hooksFixtureEnv(t, "")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := runHooksFixtureCommand(t, dir, log, "", "git", args...); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 }

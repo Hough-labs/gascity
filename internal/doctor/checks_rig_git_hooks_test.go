@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,7 +47,7 @@ func TestRigGitHooksCheck_NoTrackedHooksDir_OK(t *testing.T) {
 func TestRigGitHooksCheck_HooksPathIsTrackedDir_OK(t *testing.T) {
 	repo := initGitHooksTestRepo(t)
 	writeTrackedHook(t, repo, "pre-push", "#!/bin/sh\nexit 0\n")
-	runGitForGitHooksTest(t, repo, "config", "core.hooksPath", ".githooks")
+	runGitForRigRootBranchTest(t, repo, "config", "core.hooksPath", ".githooks")
 
 	r := NewRigGitHooksCheck(config.Rig{Name: "testrig", Path: repo}).Run(&CheckContext{})
 
@@ -182,27 +181,17 @@ func TestRigGitHooksCheck_NotAGitRepo_Warns(t *testing.T) {
 }
 
 // initGitHooksTestRepo creates a hermetic git repo with one commit. Global and
-// system git config are pinned away so an ambient core.hooksPath on the
-// developer's machine cannot decide the outcome of these tests.
+// system git config are pinned away first so an ambient core.hooksPath on the
+// developer's machine cannot decide the outcome of these tests; the repo itself
+// comes from the package's existing fixture rather than a second exec call site
+// of our own, which is what test/test-resources.toml's subprocess ratchet is
+// there to produce.
 func initGitHooksTestRepo(t *testing.T) string {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skipf("git unavailable: %v", err)
-	}
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-
-	dir := t.TempDir()
-	runGitForGitHooksTest(t, dir, "init")
-	runGitForGitHooksTest(t, dir, "config", "user.name", "Rig Git Hooks Test")
-	runGitForGitHooksTest(t, dir, "config", "user.email", "rig-git-hooks@example.invalid")
-	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("initial\n"), 0o600); err != nil {
-		t.Fatalf("write initial file: %v", err)
-	}
-	runGitForGitHooksTest(t, dir, "add", "README.md")
-	runGitForGitHooksTest(t, dir, "commit", "-m", "initial")
-	return dir
+	return initGitRepoOnBranch(t, "main")
 }
 
 // pointHooksPathAtOwnedDir simulates another tool (beads installs its dolt-sync
@@ -213,7 +202,7 @@ func pointHooksPathAtOwnedDir(t *testing.T, repo string) string {
 	if err := os.MkdirAll(owned, 0o755); err != nil {
 		t.Fatalf("create owned hooks dir: %v", err)
 	}
-	runGitForGitHooksTest(t, repo, "config", "core.hooksPath", owned)
+	runGitForRigRootBranchTest(t, repo, "config", "core.hooksPath", owned)
 	return owned
 }
 
@@ -230,14 +219,5 @@ func writeExecutableForGitHooksTest(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // hook scripts must be executable
 		t.Fatalf("write %s: %v", path, err)
-	}
-}
-
-func runGitForGitHooksTest(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 }
