@@ -2008,6 +2008,69 @@ func submitEnterAndConfirm(sendEnter func() error, wake func(), busy func() (boo
 	return false, lastErr
 }
 
+// resubmitParkedMessage resolves an unconfirmed submit against live pane state
+// and re-sends Enter when the message is demonstrably still sitting in the
+// input area.
+//
+// One remedial Enter is safe here: InputStateHoldingText means the pane is
+// idle, so there is no running turn to double-submit, and Enter adds no text of
+// its own. It is the mechanical form of the operator keystroke that has been
+// clearing these stalls by hand — and by hand it only ever cleared one cycle,
+// because the next wake parked the same way.
+//
+// submitted reports whether the message is no longer parked as far as gc can
+// tell. An unreadable pane counts as not-parked: it is not evidence of a
+// failure, and warning on it would cry wolf on every capture blip. err is set
+// only when the remedial Enter itself could not be delivered.
+//
+// All side effects are injected, like submitEnterAndConfirm above, so the
+// decision logic is unit-testable without a live tmux server.
+func resubmitParkedMessage(
+	observe func() (runtime.InputObservation, error),
+	sendEnter func() error,
+	wake func(),
+	sleep func(time.Duration),
+) (submitted bool, err error) {
+	obs, err := observe()
+	if err != nil || obs.State != runtime.InputStateHoldingText {
+		return true, nil
+	}
+	if err := sendEnter(); err != nil {
+		return false, err
+	}
+	wake()
+	for poll := 0; poll < submitConfirmPollsPerSend; poll++ {
+		sleep(submitConfirmPollInterval)
+		again, obsErr := observe()
+		if obsErr != nil || again.State != runtime.InputStateHoldingText {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// verifyAndResubmit runs resubmitParkedMessage against the live pane and
+// reports a message that is still parked afterwards.
+//
+// A parked message is a real delivery failure, and it is reported on stderr
+// rather than returned. The nil-means-handed-to-tmux contract is load-bearing:
+// the startup path treats a nudge error as fatal to session creation, and
+// callers above worker.Handle retry on error, which would re-paste text the
+// pane is already holding. The durable surface for the failure is the pane
+// itself — gc doctor's session-input-parked check reads this same
+// classification from any process, at any time.
+func (t *Tmux) verifyAndResubmit(session, target string, sendEnter func() error, wake func()) {
+	observe := func() (runtime.InputObservation, error) { return t.observeInputOn(session, target) }
+	submitted, err := resubmitParkedMessage(observe, sendEnter, wake, time.Sleep)
+	switch {
+	case err != nil:
+		log.Printf("tmux nudge: %s left the message unsubmitted in the pane and re-sending Enter failed: %v", target, err)
+	case !submitted:
+		log.Printf("tmux nudge: %s is still holding the message unsubmitted after %d Enter sends; `gc doctor` (session-input-parked) reports and submits it",
+			target, submitEnterMaxSends+1)
+	}
+}
+
 // paneBusy reports whether the target pane shows an active processing indicator
 // (Claude's live spinner / "esc to interrupt"). Used to confirm a submitted turn.
 func (t *Tmux) paneBusy(target string) (bool, error) {
@@ -2114,10 +2177,23 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	sendEnter := func() error { _, err := t.run("send-keys", "-t", target, "Enter"); return err }
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
-		if _, err := submitEnterAndConfirm(sendEnter, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep); err != nil {
+		confirmed, err := submitEnterAndConfirm(sendEnter, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
+		if err != nil {
 			return fmt.Errorf("failed to send Enter: %w", err)
 		}
+		// The keystrokes were written whatever the outcome, so the poke is
+		// committed before either return (see discountPokeActivity).
 		delivered = true
+		if confirmed {
+			return nil
+		}
+		// Busy was never observed inside the budget. That is not proof the
+		// submit failed — a short turn can start and finish inside it — and not
+		// proof it landed either. Discarding this bool is what let a message
+		// left drafted in the pane be reported to every caller as delivered and
+		// to every health surface as an active agent (gascity-jw44). Ask the
+		// pane what it is actually holding instead of assuming.
+		t.verifyAndResubmit(session, target, sendEnter, wake)
 		return nil
 	}
 	// Fallback: best-effort single delivery (unchanged historical behavior).
