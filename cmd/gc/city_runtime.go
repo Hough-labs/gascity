@@ -107,10 +107,15 @@ type CityRuntime struct {
 	// Bead-driven reconciler state (Phase 2f).
 	sessionDrains      *drainTracker       // in-memory drain tracker; nil when bead reconciler disabled
 	providerHealthGate *providerHealthGate // ADR-0013 A1 M3a; nil until bead reconciler initialized
-	asyncStartLimiter  *asyncStartLimiter
-	asyncStarts        asyncStartTracker
-	asyncStops         asyncStartTracker
-	demandSnapshot     *runtimeDemandSnapshot
+	// runtimeObsHold carries the constructive partial-observation episode across
+	// ticks (gascity-bjg2). A value, not a pointer: its zero value is a closed
+	// episode, so every CityRuntime gates without a lazily-allocated field that
+	// concurrent ticks would race to write. Its own mutex serializes them.
+	runtimeObsHold    runtimeObservationHold
+	asyncStartLimiter *asyncStartLimiter
+	asyncStarts       asyncStartTracker
+	asyncStops        asyncStartTracker
+	demandSnapshot    *runtimeDemandSnapshot
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
@@ -2418,6 +2423,13 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		// fan-out; the first steady-state tick performs them.
 		reconcileStartOptions = append(reconcileStartOptions, withDeferSessionClosesOnBoot())
 	}
+	// Constructive partial-observation hold (gascity-bjg2): refuse to turn a
+	// runtime listing we could not make into start decisions. holdPhaseStart is
+	// its own variable because phaseStart is already running for the
+	// bead_reconcile.reconcile_sessions phase recorded below.
+	holdPhaseStart := time.Now()
+	reconcileStartOptions, holdFields := cr.installRuntimeObservationHold(reconcileStartOptions, openInfos, time.Now())
+	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.runtime_observation_hold", holdPhaseStart, holdFields)
 	reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, cr.cityPath, sessionBeads.OpenForReconcile(), sessionBeads, desiredState, cfgNames, cr.cfg, cr.sp, sessStore,
 		cr.dops,

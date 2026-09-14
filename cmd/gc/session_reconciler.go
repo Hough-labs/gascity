@@ -3558,6 +3558,24 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 
 		if shouldWake && !target.alive {
+			// Partial runtime observation (gascity-bjg2). target.alive comes
+			// from a per-session liveness probe against a runtime whose
+			// whole-fleet listing this tick FAILED, so "not alive" here is an
+			// unread fact, not a dead session. Respawning on it rebuilds the
+			// entire fleet precisely because it could not be seen — the
+			// constructive twin of the partial-listing holds the destructive
+			// paths already have. The bounded episode in
+			// runtimeObservationHold decides when a sustained outage stops
+			// being a blip and the rebuild is the right answer after all.
+			if reconcileOpts.holdStartsOnPartialRuntimeObservation {
+				fmt.Fprintf(stderr, "session reconciler: holding respawn of %s under a partial runtime observation — an unobservable fleet is not an absent fleet\n", name) //nolint:errcheck // best-effort stderr
+				if trace != nil {
+					trace.RecordDecision(TraceSiteReconcilerPartialRuntimeObservation, TraceReasonPartialRuntimeObservation, TraceOutcomeRespawnSkipped, target.tp.TemplateName, name, traceRecordPayload{
+						"should_wake": shouldWake,
+					})
+				}
+				continue
+			}
 			// Session should be awake but isn't — wake it.
 			if isFailedCreateSessionInfo(info) {
 				if trace != nil {

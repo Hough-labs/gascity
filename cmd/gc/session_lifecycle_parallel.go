@@ -312,12 +312,30 @@ type startExecutionOptions struct {
 	// performs the closes. Safe to defer: the closes already fail closed and are
 	// deferred under storeQueryPartial today.
 	deferSessionClosesOnBoot bool
-	readyAssignedFlags       []bool
+	// holdStartsOnPartialRuntimeObservation suppresses every start decision this
+	// pass, because the runtime listing behind its per-session liveness
+	// readings was an observation that FAILED — not a fleet observed to be
+	// absent. Without it an unreachable tmux server reads as zero running and
+	// the reconciler rebuilds the entire fleet; see runtime_observation_hold.go
+	// for the episode ladder that decides when a sustained outage stops being a
+	// blip and becomes a real rebuild.
+	holdStartsOnPartialRuntimeObservation bool
+	readyAssignedFlags                    []bool
 }
 
 type startExecutionOption func(*startExecutionOptions)
 
 type taskWorkDirResolver func(startCandidate, *config.City) string
+
+// withPartialRuntimeObservationStartHold suppresses this pass's start
+// decisions because the tick's whole-fleet runtime listing was a failed
+// observation. The controller installs it from beadReconcileTick; see
+// runtime_observation_hold.go.
+func withPartialRuntimeObservationStartHold() startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.holdStartsOnPartialRuntimeObservation = true
+	}
+}
 
 func withAsyncStartExecution() startExecutionOption {
 	return func(opts *startExecutionOptions) {
