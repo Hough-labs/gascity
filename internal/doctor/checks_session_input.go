@@ -64,48 +64,48 @@ func (c *SessionInputCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	parked, unreadable := classifySessions(observer, running)
+	parked, unreadable := classifyParkedSessions(observer, running)
 	sort.Strings(parked)
 	sort.Strings(unreadable)
 
-	if len(parked) == 0 {
-		r.Status = StatusOK
-		switch {
-		case partial:
-			r.Status = StatusWarning
-			r.Severity = SeverityAdvisory
-			r.Message = fmt.Sprintf("listing sessions partially failed: %v", err)
-		case len(unreadable) > 0:
-			r.Message = fmt.Sprintf("no sessions holding unsubmitted text (%d unreadable)", len(unreadable))
-			r.Details = unreadable
-		default:
-			r.Message = "no sessions holding unsubmitted text"
-		}
-		return r
-	}
-
-	r.Status = StatusWarning
-	// Advisory: a parked pane stalls that one agent, and the remedy is a
-	// keystroke. It must not gate dispatch to every other agent in the city.
-	r.Severity = SeverityAdvisory
-	if partial {
-		r.Message = fmt.Sprintf("listing sessions partially failed: %v (%d visible session(s) idle holding unsubmitted text)", err, len(parked))
-	} else {
-		r.Message = fmt.Sprintf("%d session(s) idle holding unsubmitted text", len(parked))
-	}
+	// Both lists are reported either way: a pane gc could not read is part of
+	// how complete the answer is, whether or not anything was found parked.
 	details := make([]string, 0, len(parked)+len(unreadable))
 	details = append(details, parked...)
 	details = append(details, unreadable...)
 	r.Details = details
+
+	switch {
+	case len(parked) > 0:
+		r.Status = StatusWarning
+		// Advisory: a parked pane stalls that one agent, and the remedy is a
+		// keystroke. It must not gate dispatch to every other agent in the city.
+		r.Severity = SeverityAdvisory
+		if partial {
+			r.Message = fmt.Sprintf("listing sessions partially failed: %v (%d visible session(s) idle holding unsubmitted text)", err, len(parked))
+		} else {
+			r.Message = fmt.Sprintf("%d session(s) idle holding unsubmitted text", len(parked))
+		}
+	case partial:
+		r.Status = StatusWarning
+		r.Severity = SeverityAdvisory
+		r.Message = fmt.Sprintf("listing sessions partially failed: %v", err)
+	case len(unreadable) > 0:
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("no sessions holding unsubmitted text (%d unreadable)", len(unreadable))
+	default:
+		r.Status = StatusOK
+		r.Message = "no sessions holding unsubmitted text"
+	}
 	return r
 }
 
-// classifySessions splits running sessions into those idle holding
+// classifyParkedSessions splits running sessions into those idle holding
 // unsubmitted text and those whose pane could not be read. A session the
 // provider cannot classify is reported as unreadable, never as parked: this
 // check exists because a confident wrong answer about a pane is worse than no
 // answer.
-func classifySessions(observer runtime.InputObserver, running []string) (parked, unreadable []string) {
+func classifyParkedSessions(observer runtime.InputObserver, running []string) (parked, unreadable []string) {
 	for _, name := range running {
 		obs, err := observer.ObserveInput(name)
 		if err != nil {
