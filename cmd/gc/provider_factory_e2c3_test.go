@@ -261,7 +261,7 @@ func assertE2c3DoctorFailureCheck(t *testing.T, cityPath string) {
 		switch check.Name() {
 		case "session-provider":
 			providerCheck = check
-		case "agent-sessions", "zombie-sessions", "orphan-sessions":
+		case "agent-sessions", "zombie-sessions", "orphan-sessions", "session-input-parked":
 			t.Fatalf("provider-backed doctor check %q registered after provider construction failed", check.Name())
 		}
 	}

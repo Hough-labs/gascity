@@ -295,16 +295,26 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewControllerCheck(cityPath, controllerRunning))
 	register(doctor.NewSupervisorHTTPCheck(opts.SupervisorRunning))
 
-	if cfgErr == nil && cfg != nil && !controllerRunning {
-		cityName := loadedCityName(cfg, cityPath)
-		st := cfg.Workspace.SessionTemplate
+	if cfgErr == nil && cfg != nil {
 		sp, err := newSessionProvider()
 		if err != nil {
 			register(doctor.ErrorCheck("session-provider", err.Error()))
 		} else {
-			register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
-			register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
-			register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+			// Parked-input observation runs whatever the controller is doing.
+			// It only reads pane content, and its repair is a single Enter on
+			// an idle pane — neither competes with the controller for session
+			// lifecycle the way the checks below do. Gating it on a stopped
+			// controller would switch it off in exactly the situation it
+			// exists for: a live city whose agent is holding a prompt nobody
+			// submitted, reporting active the whole time (gascity-jw44).
+			register(doctor.NewSessionInputCheck(sp))
+			if !controllerRunning {
+				cityName := loadedCityName(cfg, cityPath)
+				st := cfg.Workspace.SessionTemplate
+				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
+				register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
+				register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+			}
 		}
 	}
 
