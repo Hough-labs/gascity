@@ -29,6 +29,10 @@
 //   - It expires. A runtime that is genuinely gone for good must be rebuilt, so
 //     one outage episode holds for a bounded window and then escalates loudly
 //     and releases rather than deadlocking the city forever.
+//
+// Both of those rest on a third: the hold protects what THIS controller saw
+// running, never what a previous one left behind. You cannot lose sight of
+// something you never saw.
 package main
 
 import (
@@ -74,6 +78,20 @@ type runtimeObservationHold struct {
 	// escalated records that this episode has already given up and released,
 	// so the loud line fires exactly once per outage.
 	escalated bool
+	// sawCleanListing records that this controller has read the runtime
+	// successfully at least once. It is a LIFETIME fact, not an episode one,
+	// and closeEpisode deliberately leaves it set.
+	//
+	// It is what keeps the hold off a city that is merely starting. A boot
+	// after a machine reboot finds session beads still marked "awake" from the
+	// previous boot while the tmux server is gone, so believedRunning alone
+	// would open an episode and stall the whole fleet for the hold window on
+	// the strength of a belief this process never verified. A controller that
+	// has never successfully read the runtime has no observation of its own to
+	// be contradicted, so it starts — and the start itself cold-starts the
+	// server, after which the next listing succeeds and the fleet is protected
+	// from then on.
+	sawCleanListing bool
 }
 
 // runtimeObservationDecision is one tick's verdict from a runtimeObservationHold.
@@ -107,15 +125,19 @@ func (h *runtimeObservationHold) observe(observationFailed bool, believedRunning
 	defer h.mu.Unlock()
 
 	if !observationFailed {
+		h.sawCleanListing = true
 		h.closeEpisode()
 		return runtimeObservationDecision{}
 	}
 	if !h.open {
-		// Nothing this failed observation could be hiding: a fleet the
-		// controller does not believe is running cannot be torn down by
-		// rebuilding it. Leave the episode closed so a first boot — where an
-		// absent tmux server is the normal reading — still starts.
-		if believedRunning <= 0 {
+		// Nothing this failed observation could be hiding. Either this
+		// controller has never successfully read the runtime — so the beads'
+		// belief is inherited from a previous process, not an observation of
+		// its own, and holding would stall a boot — or it does not believe any
+		// session is running, and a fleet nobody believes in cannot be torn
+		// down by rebuilding it. Either way, leave the episode closed and let
+		// the city start.
+		if !h.sawCleanListing || believedRunning <= 0 {
 			return runtimeObservationDecision{}
 		}
 		h.open = true
@@ -149,7 +171,9 @@ func (h *runtimeObservationHold) observe(observationFailed bool, believedRunning
 }
 
 // closeEpisode ends any episode in progress so the next outage gets a fresh
-// window. Callers hold h.mu.
+// window. It deliberately leaves sawCleanListing alone: that this controller
+// has seen the runtime is a fact about the controller, not about the episode.
+// Callers hold h.mu.
 func (h *runtimeObservationHold) closeEpisode() {
 	h.open = false
 	h.startedAt = time.Time{}

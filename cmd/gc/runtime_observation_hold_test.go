@@ -16,6 +16,17 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
+// seenRuntimeOnce marks cr as having successfully read its runtime at least
+// once, which is what every tick of a healthy city does. Tests that model an
+// OUTAGE need it: the hold deliberately does not fire for a controller that has
+// never seen the fleet it would be protecting, so that a boot after a reboot —
+// session beads still marked "awake", tmux server gone — starts instead of
+// stalling. It goes through the hold's own entry point, the same call the
+// controller makes on a clean tick.
+func seenRuntimeOnce(cr *CityRuntime, at time.Time) {
+	cr.runtimeObsHold.observe(false, 0, at)
+}
+
 // TestRuntimeObservationHoldOpensEpisodeOnlyWhenSessionsAreBelievedRunning pins
 // the first-boot exemption. A failed observation can only be hiding a fleet
 // that the controller already believes exists; on a genuinely empty city (or a
@@ -24,6 +35,7 @@ import (
 func TestRuntimeObservationHoldOpensEpisodeOnlyWhenSessionsAreBelievedRunning(t *testing.T) {
 	h := &runtimeObservationHold{}
 	now := time.Date(2026, 9, 14, 13, 57, 44, 0, time.UTC)
+	h.observe(false, 0, now.Add(-time.Minute)) // this controller has read the runtime before
 
 	got := h.observe(true, 0, now)
 	if got.Hold {
@@ -51,6 +63,7 @@ func TestRuntimeObservationHoldHoldsThenEscalatesOnSustainedOutage(t *testing.T)
 	h := &runtimeObservationHold{}
 	start := time.Date(2026, 9, 14, 13, 57, 44, 0, time.UTC)
 	window := partialRuntimeObservationHoldWindow
+	h.observe(false, 13, start.Add(-window)) // this controller has read the runtime before
 
 	first := h.observe(true, 13, start)
 	if !first.Hold {
@@ -100,6 +113,7 @@ func TestRuntimeObservationHoldResetsOnSuccessfulListing(t *testing.T) {
 	h := &runtimeObservationHold{}
 	start := time.Date(2026, 9, 14, 13, 57, 44, 0, time.UTC)
 	window := partialRuntimeObservationHoldWindow
+	h.observe(false, 13, start.Add(-window)) // this controller has read the runtime before
 
 	if got := h.observe(true, 13, start); !got.Hold {
 		t.Fatalf("first partial tick Hold = false, want true")
@@ -366,6 +380,7 @@ func TestCityRuntimeBeadReconcileTick_PartialRuntimeListingHoldsFleetRebuild(t *
 		cr, fake, stderr, result, snapshot := build(&runtime.PartialListError{
 			Err: errors.New("tmux server unreachable: no tmux server running"),
 		})
+		seenRuntimeOnce(cr, time.Now().Add(-time.Minute))
 		cr.beadReconcileTick(context.Background(), result, snapshot, nil, false)
 		if got := startCalls(cr, fake); len(got) != 0 {
 			t.Fatalf("Start calls = %v, want none: the reconciler rebuilt a fleet it could not observe; stderr=%s", got, stderr.String())
@@ -453,6 +468,7 @@ func TestCityRuntimeBeadReconcileTick_PartialRuntimeListingHoldsAcrossTicks(t *t
 		}
 	}
 
+	seenRuntimeOnce(cr, time.Now().Add(-time.Minute))
 	cr.beadReconcileTick(context.Background(), result(), newSessionBeadSnapshot([]beads.Bead{session}), nil, false)
 	assertNoStarts("tick 1")
 
@@ -490,6 +506,7 @@ func TestInstallRuntimeObservationHoldEscalatesAndReleases(t *testing.T) {
 	}
 	openInfos := []sessionpkg.Info{{ID: "s1", MetadataState: string(sessionpkg.StateAwake)}}
 	start := time.Date(2026, 9, 14, 13, 57, 44, 0, time.UTC)
+	seenRuntimeOnce(cr, start.Add(-time.Minute))
 
 	opts, fields := cr.installRuntimeObservationHold(nil, openInfos, start)
 	if len(opts) != 1 {
@@ -517,5 +534,112 @@ func TestInstallRuntimeObservationHoldEscalatesAndReleases(t *testing.T) {
 	}
 	if stderr.String() != before {
 		t.Errorf("escalation logged twice; second line = %q", strings.TrimPrefix(stderr.String(), before))
+	}
+}
+
+// TestRuntimeObservationHoldRequiresAPriorSuccessfulObservation pins the
+// precondition that keeps the hold off a booting city.
+//
+// Session beads survive the process that wrote them. A controller starting
+// after a machine reboot finds them still marked "awake" while the tmux server
+// is gone, so believedRunning alone would open an episode and stall the whole
+// fleet for the hold window on the strength of a belief this process never
+// verified. The hold protects what THIS controller saw running — you cannot
+// lose sight of something you never saw.
+func TestRuntimeObservationHoldRequiresAPriorSuccessfulObservation(t *testing.T) {
+	h := &runtimeObservationHold{}
+	start := time.Date(2026, 9, 14, 13, 57, 44, 0, time.UTC)
+
+	// Boot after a reboot: the beads claim 13 live sessions, but this
+	// controller has never once read the runtime. It must start them.
+	if got := h.observe(true, 13, start); got.Hold {
+		t.Fatalf("Hold = true before any successful listing; a booting city must still start its fleet")
+	}
+
+	// The fleet starts, which cold-starts the runtime; the next listing works.
+	if got := h.observe(false, 0, start.Add(30*time.Second)); got.Hold {
+		t.Fatalf("a successful listing must not hold, got %+v", got)
+	}
+
+	// From here on the controller has an observation of its own, so a later
+	// outage over a fleet it saw running is protected.
+	if got := h.observe(true, 13, start.Add(time.Minute)); !got.Hold {
+		t.Fatalf("Hold = false after the controller had successfully read the runtime, want true")
+	}
+}
+
+// TestCityRuntimeBeadReconcileTick_UnreadRuntimeStillStartsTheFleet is the
+// controller-level half of the same guard: the very first reconcile tick of a
+// city whose runtime is unreachable must still start, or `gc start` after a
+// reboot stalls for the hold window.
+func TestCityRuntimeBeadReconcileTick_UnreadRuntimeStillStartsTheFleet(t *testing.T) {
+	const sessionName = "worker-bd-123"
+
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         sessionName,
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			// Left behind by the PREVIOUS boot: the beads say awake, but this
+			// controller has never read the runtime.
+			"state":              "awake",
+			"continuation_epoch": "1",
+			"generation":         "1",
+			"last_woke_at":       time.Now().Add(-30 * time.Minute).UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	fake := runtime.NewFake()
+	stderr := &bytes.Buffer{}
+	cr := &CityRuntime{
+		cityPath:  t.TempDir(),
+		cityName:  "maintainer-city",
+		logPrefix: "gc supervisor",
+		cfg:       &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
+		sp: &partialListPoolProvider{
+			Fake:    fake,
+			listErr: &runtime.PartialListError{Err: errors.New("tmux server unreachable: no tmux server running")},
+		},
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              stderr,
+	}
+	result := DesiredStateResult{
+		State: map[string]TemplateParams{
+			sessionName: {Command: "test-cmd", SessionName: sessionName, TemplateName: "worker"},
+		},
+		ScaleCheckCounts: map[string]int{"worker": 1},
+		AssignedWorkBeads: []beads.Bead{
+			workBead("ga-live", "worker", sessionName, "in_progress", 5),
+		},
+	}
+
+	cr.beadReconcileTick(context.Background(), result, newSessionBeadSnapshot([]beads.Bead{session}), nil, true)
+	cr.waitForAsyncStarts()
+
+	started := false
+	for _, call := range fake.SnapshotCalls() {
+		if call.Method == "Start" {
+			started = true
+			break
+		}
+	}
+	if !started {
+		t.Fatalf("boot tick made no Start call; a city whose runtime this controller has never read must still start. stderr=%s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "holding start decisions this tick") {
+		t.Errorf("boot tick held the fleet on an inherited belief; stderr=%s", stderr.String())
 	}
 }
