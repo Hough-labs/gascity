@@ -622,6 +622,13 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 	return p.tm.CapturePane(name, lines)
 }
 
+// ObserveInput classifies what the named session's input area is holding,
+// distinguishing a working agent from one sitting idle on text nobody
+// submitted. Implements [runtime.InputObserver].
+func (p *Provider) ObserveInput(name string) (runtime.InputObservation, error) {
+	return p.tm.ObserveInput(name)
+}
+
 // ListRunning returns all tmux session names matching the given prefix.
 //
 // A totally unreachable tmux server (ErrNoServer) is reported as a

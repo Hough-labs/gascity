@@ -236,3 +236,14 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 	}
 	return runtime.SessionSleepCapabilityDisabled
 }
+
+// ObserveInput classifies the routed backend's input area. A backend that
+// cannot observe rendered input yields InputStateUnknown, which callers must
+// treat as "could not tell", never as healthy. Implements
+// [runtime.InputObserver].
+func (p *Provider) ObserveInput(name string) (runtime.InputObservation, error) {
+	if observer, ok := p.route(name).(runtime.InputObserver); ok {
+		return observer.ObserveInput(name)
+	}
+	return runtime.InputObservation{State: runtime.InputStateUnknown}, nil
+}
