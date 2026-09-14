@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -16,10 +17,16 @@ import (
 const holdLabelExternalValue = "external"
 
 // holdLabelRoutedToCheck detects beads carrying a hold:<value> label whose
-// gc.routed_to metadata is missing or does not match <value>. gc.routed_to is
-// the sole persisted routing key (ga-eld2x); a hold:<value> label with no
-// matching gc.routed_to has silently drifted from its intended route.
-// --fix backfills gc.routed_to from the label value.
+// gc.routed_to metadata is missing or names neither <value> nor a route that
+// <value> canonically resolves to. gc.routed_to is the sole persisted routing
+// key (ga-eld2x); a hold:<value> label with no matching gc.routed_to has
+// silently drifted from its intended route. --fix backfills gc.routed_to from
+// the label value, binding-qualified where that value names a bound agent.
+//
+// This check writes the same field as v2-routed-to-namespace
+// (doctor_routed_to_checks.go), which owns one question: the binding-qualified
+// canonical form of a bound agent's route. Deferring to it on that question is
+// what keeps the two satisfiable together — see holdRouteExpectation.
 type holdLabelRoutedToCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -53,17 +60,64 @@ func holdLabelValue(labels []string) (string, bool) {
 	return "", false
 }
 
+// holdRouteExpectation resolves what gc.routed_to may hold for a bead labeled
+// hold:<value>, given the short-form route aliases v2-routed-to-namespace
+// derives from the city's bindings.
+//
+// The hold label value alone cannot be the expectation. A hold label is
+// canonically bare ("hold:mayor" — engdocs/contributors/hold-label-conventions.md)
+// while a route must be binding-qualified to resolve to anything, so demanding
+// the raw suffix here while v2-routed-to-namespace demands the qualified form
+// made the two checks mutually unsatisfiable: each check's fix re-broke the
+// other, and the agents acting on those fix hints repaired the same field
+// against each other indefinitely while every patrol reported the finding
+// unresolved (gascity-enqx).
+//
+// accepted lists every value that satisfies the hold label: the label's own
+// value, plus every qualified route that value canonically means. want is the
+// single value Fix may write — the canonical form when the value names exactly
+// one bound agent, so this check never writes a route v2-routed-to-namespace
+// would immediately rewrite. want is empty when the value is ambiguous across
+// bindings and there is no single rewrite target; those are left for manual
+// resolution, exactly as v2-routed-to-namespace leaves them.
+func holdRouteExpectation(value string, aliases map[string][]string) (want string, accepted []string) {
+	canonicals := aliases[value]
+	accepted = make([]string, 0, len(canonicals)+1)
+	accepted = append(accepted, value)
+	accepted = append(accepted, canonicals...)
+	switch len(canonicals) {
+	case 0:
+		return value, accepted
+	case 1:
+		return canonicals[0], accepted
+	default:
+		return "", accepted
+	}
+}
+
 // holdRouteTarget is a single bead whose hold:<value> label and gc.routed_to
-// metadata have drifted apart.
+// metadata have drifted apart. canonicals holds every qualified route the hold
+// value can mean; when want is empty there is more than one and no unambiguous
+// backfill target exists.
 type holdRouteTarget struct {
-	label  string
-	store  beads.Store
-	beadID string
-	want   string
-	got    string
+	label      string
+	store      beads.Store
+	beadID     string
+	hold       string
+	want       string
+	canonicals []string
+	got        string
+}
+
+func (t holdRouteTarget) describe() string {
+	if t.want != "" {
+		return fmt.Sprintf("%s bead %s has hold:%s but gc.routed_to=%q; use %q", t.label, t.beadID, t.hold, t.got, t.want)
+	}
+	return fmt.Sprintf("%s bead %s has hold:%s but gc.routed_to=%q; use one of %s", t.label, t.beadID, t.hold, t.got, strings.Join(t.canonicals, ", "))
 }
 
 func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped []string) {
+	aliases := boundRoutedToAliases(c.cfg)
 	scopes := []struct{ label, path string }{{"city", c.cityPath}}
 	if c.cfg != nil {
 		for _, rig := range c.cfg.Rigs {
@@ -94,15 +148,24 @@ func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped [
 			continue
 		}
 		for _, b := range items {
-			want, ok := holdLabelValue(b.Labels)
+			hold, ok := holdLabelValue(b.Labels)
 			if !ok {
 				continue
 			}
+			want, accepted := holdRouteExpectation(hold, aliases)
 			got := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])
-			if got == want {
+			if slices.Contains(accepted, got) {
 				continue
 			}
-			targets = append(targets, holdRouteTarget{label: sc.label, store: store, beadID: b.ID, want: want, got: got})
+			targets = append(targets, holdRouteTarget{
+				label:      sc.label,
+				store:      store,
+				beadID:     b.ID,
+				hold:       hold,
+				want:       want,
+				canonicals: accepted[1:],
+				got:        got,
+			})
 		}
 	}
 	return targets, skipped
@@ -115,7 +178,7 @@ func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 	}
 	details := make([]string, 0, len(targets)+len(skipped))
 	for _, tgt := range targets {
-		details = append(details, fmt.Sprintf("%s bead %s has hold:%s but gc.routed_to=%q", tgt.label, tgt.beadID, tgt.want, tgt.got))
+		details = append(details, tgt.describe())
 	}
 	details = append(details, skipped...)
 	sort.Strings(details)
@@ -127,13 +190,19 @@ func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 	}
 	return warnCheck(c.Name(),
 		fmt.Sprintf("%d bead(s) carry a hold:<value> label without matching gc.routed_to", len(targets)),
-		"run gc doctor --fix to backfill gc.routed_to from the hold:<value> label",
+		"run gc doctor --fix to backfill gc.routed_to from the hold:<value> label, binding-qualified where that value names a bound agent",
 		details)
 }
 
 func (c *holdLabelRoutedToCheck) Fix(_ *doctor.CheckContext) error {
 	targets, skipped := c.collect()
 	for _, tgt := range targets {
+		if tgt.want == "" {
+			// The hold value names more than one bound agent, so there is no
+			// single route to backfill. Run keeps reporting it with the
+			// candidates; picking one here would be a guess.
+			continue
+		}
 		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, tgt.want); err != nil {
 			return fmt.Errorf("%s bead %s: backfill gc.routed_to: %w", tgt.label, tgt.beadID, err)
 		}
