@@ -23,9 +23,30 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
+	return rootsFromRecords(records, id), nil
+}
+
+// rootsFromRecords is the pure, IO-free core of ScanBySessionID, so the
+// which-processes-are-kill-targets decision can be unit-tested against a
+// synthetic process table instead of the host's live one.
+func rootsFromRecords(records map[int]psRecord, id string) []runtime.LiveRuntime {
 	var out []runtime.LiveRuntime
 	for _, record := range records {
 		if record.pid <= 1 {
+			continue
+		}
+		// A tmux server is infrastructure, never an agent runtime root — and
+		// must never be handed to a caller that kills what it gets back.
+		// `ps eww` emits argv and the environment block as one
+		// whitespace-separated stream, so parseInlineEnv cannot tell a real
+		// environment entry from an argv token shaped like one. The tmux
+		// server's argv is the `new-session -e KEY=VALUE ...` command that
+		// bootstrapped it, so the server reads as carrying the GC_SESSION_ID
+		// of whichever agent happened to start it. The pre-start orphan sweep
+		// then group-SIGTERMs it and every session on the socket dies with it,
+		// including agents nobody targeted (gc-eazs). Linux is immune: it
+		// reads /proc/<pid>/environ, the true environment.
+		if isInfrastructureCommand(record.command) {
 			continue
 		}
 		sessionID := record.env["GC_SESSION_ID"]
@@ -56,7 +77,7 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if out == nil {
 		out = []runtime.LiveRuntime{}
 	}
-	return out, nil
+	return out
 }
 
 // IsScanRoot reports whether pid is outside its GC_SESSION_ID parent's
@@ -78,8 +99,17 @@ func IsScanRoot(pid int) bool {
 	if err != nil {
 		return false
 	}
+	return isScanRootFromRecords(records, pid)
+}
+
+// isScanRootFromRecords is the pure, IO-free core of IsScanRoot.
+func isScanRootFromRecords(records map[int]psRecord, pid int) bool {
 	record, ok := records[pid]
 	if !ok {
+		return false
+	}
+	// Infrastructure is never an agent root — see rootsFromRecords.
+	if isInfrastructureCommand(record.command) {
 		return false
 	}
 	sessionID := record.env["GC_SESSION_ID"]
