@@ -5,10 +5,12 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // TestObserveNamedSocketRefusedConsultsHolder pins the observation at the
@@ -271,6 +273,105 @@ ffff9c0c: 00000002 00000000 00010000 0001 01 26317
 			t.Fatalf("holder = (%v, %v), want undecided so the fallback runs", state, decided)
 		}
 	})
+}
+
+// TestProcessTableHolderResamplesBeforeClaimingAbsence pins the defect that
+// defeated the guard in production on 2026-09-15 (gc-eazs).
+//
+// processTableHolder claimed socketHolderAbsent from ONE `ps` listing, on the
+// stated premise that "absence is claimed only from a listing that was read
+// successfully and did not contain the socket". That premise is false on macOS:
+// a successful listing can simply omit a live process.
+//
+// Measured, not theorized. A 200ms sampler watching the live tmux server logged
+// twelve intervals where the server vanished from `ps` and the SAME PID returned
+// 0.38-1.26s later, against one real server replacement in the same window. A
+// process cannot die and come back with its own pid, so those are ps omitting a
+// live process. Two of them landed ~2 minutes before the clobber.
+//
+// The cost is asymmetric and the file already says so: over-reporting a holder
+// costs a retry, under-reporting it costs the fleet. So a single sighting in ANY
+// sample means present, and absence requires every sample to agree.
+func TestProcessTableHolderResamplesBeforeClaimingAbsence(t *testing.T) {
+	const socketPath = "/tmp/tmux-501/gc"
+	holderRow := "88986 tmux -u -L gc new-session -d -s gastown__mayor -c /Users/hunter/gc\n"
+	otherRows := "412 /usr/sbin/cfprefsd daemon\n9931 /opt/homebrew/bin/fish\n"
+
+	for _, tc := range []struct {
+		name      string
+		listings  []string
+		want      socketHolderState
+		wantReads int
+	}{
+		{
+			// The regression: ps drops the live server from one sample.
+			name:      "holder missing from the first listing but present in a later one",
+			listings:  []string{otherRows, otherRows + holderRow, otherRows + holderRow},
+			want:      socketHolderPresent,
+			wantReads: 2,
+		},
+		{
+			name:      "holder present immediately: no extra listings are read",
+			listings:  []string{otherRows + holderRow},
+			want:      socketHolderPresent,
+			wantReads: 1,
+		},
+		{
+			// A genuinely stale socket must still be rebindable, or every real
+			// cold start stalls.
+			name:      "every listing agrees the socket is unheld",
+			listings:  []string{otherRows, otherRows, otherRows, otherRows, otherRows, otherRows},
+			want:      socketHolderAbsent,
+			wantReads: 0, // asserted as "all of them" below
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			socketHolderResampleGap = 0
+			t.Cleanup(func() { socketHolderResampleGap = 700 * time.Millisecond })
+
+			reads := 0
+			listings := tc.listings
+			processTableListing = func(context.Context) ([]byte, error) {
+				out := listings[min(reads, len(listings)-1)]
+				reads++
+				return []byte(out), nil
+			}
+			t.Cleanup(func() {
+				processTableListing = func(ctx context.Context) ([]byte, error) {
+					return exec.CommandContext(ctx, "ps", "-Awwo", "pid=,args=").Output()
+				}
+			})
+
+			got := processTableHolder(context.Background(), socketPath)
+			if got != tc.want {
+				t.Fatalf("processTableHolder = %v, want %v (reads=%d)", got, tc.want, reads)
+			}
+			if tc.wantReads > 0 && reads != tc.wantReads {
+				t.Fatalf("listings read = %d, want %d", reads, tc.wantReads)
+			}
+			if tc.want == socketHolderAbsent && reads < 2 {
+				t.Fatalf("listings read = %d, want more than one before claiming absence", reads)
+			}
+		})
+	}
+}
+
+// TestProcessTableHolderFailsClosedOnReadError keeps a listing that cannot be
+// read from being mistaken for a listing that does not contain the socket.
+func TestProcessTableHolderFailsClosedOnReadError(t *testing.T) {
+	socketHolderResampleGap = 0
+	t.Cleanup(func() { socketHolderResampleGap = 700 * time.Millisecond })
+	processTableListing = func(context.Context) ([]byte, error) {
+		return nil, errors.New("ps unavailable")
+	}
+	t.Cleanup(func() {
+		processTableListing = func(ctx context.Context) ([]byte, error) {
+			return exec.CommandContext(ctx, "ps", "-Awwo", "pid=,args=").Output()
+		}
+	})
+	if got := processTableHolder(context.Background(), "/tmp/tmux-501/gc"); got != socketHolderUnknown {
+		t.Fatalf("processTableHolder = %v, want unknown (fail closed)", got)
+	}
 }
 
 func TestFieldsReferenceTmuxSocket(t *testing.T) {
