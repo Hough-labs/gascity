@@ -5,12 +5,10 @@ import (
 	"errors"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 )
 
 // TestObserveNamedSocketRefusedConsultsHolder pins the observation at the
@@ -326,8 +324,16 @@ func TestProcessTableHolderResamplesBeforeClaimingAbsence(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// Capture and restore the real seams rather than reinstating a
+			// hand-copied duplicate of their production defaults: a copy silently
+			// goes stale the moment the production default changes, and the
+			// listing copy also put a second os/exec construction in this file.
+			origGap, origListing := socketHolderResampleGap, processTableListing
+			t.Cleanup(func() {
+				socketHolderResampleGap = origGap
+				processTableListing = origListing
+			})
 			socketHolderResampleGap = 0
-			t.Cleanup(func() { socketHolderResampleGap = 700 * time.Millisecond })
 
 			reads := 0
 			listings := tc.listings
@@ -336,11 +342,6 @@ func TestProcessTableHolderResamplesBeforeClaimingAbsence(t *testing.T) {
 				reads++
 				return []byte(out), nil
 			}
-			t.Cleanup(func() {
-				processTableListing = func(ctx context.Context) ([]byte, error) {
-					return exec.CommandContext(ctx, "ps", "-Awwo", "pid=,args=").Output()
-				}
-			})
 
 			got := processTableHolder(context.Background(), socketPath)
 			if got != tc.want {
@@ -359,16 +360,15 @@ func TestProcessTableHolderResamplesBeforeClaimingAbsence(t *testing.T) {
 // TestProcessTableHolderFailsClosedOnReadError keeps a listing that cannot be
 // read from being mistaken for a listing that does not contain the socket.
 func TestProcessTableHolderFailsClosedOnReadError(t *testing.T) {
+	origGap, origListing := socketHolderResampleGap, processTableListing
+	t.Cleanup(func() {
+		socketHolderResampleGap = origGap
+		processTableListing = origListing
+	})
 	socketHolderResampleGap = 0
-	t.Cleanup(func() { socketHolderResampleGap = 700 * time.Millisecond })
 	processTableListing = func(context.Context) ([]byte, error) {
 		return nil, errors.New("ps unavailable")
 	}
-	t.Cleanup(func() {
-		processTableListing = func(ctx context.Context) ([]byte, error) {
-			return exec.CommandContext(ctx, "ps", "-Awwo", "pid=,args=").Output()
-		}
-	})
 	if got := processTableHolder(context.Background(), "/tmp/tmux-501/gc"); got != socketHolderUnknown {
 		t.Fatalf("processTableHolder = %v, want unknown (fail closed)", got)
 	}
