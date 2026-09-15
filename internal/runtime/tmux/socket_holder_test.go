@@ -149,6 +149,98 @@ func TestObserveNamedSocketAbsentPathConsultsHolder(t *testing.T) {
 	}
 }
 
+// TestObserveNamedSocketRefusedThenUnlinkedConsultsHolder pins the branch the
+// other two tests in this file leave open.
+//
+// TestObserveNamedSocketRefusedConsultsHolder scopes itself to "a socket whose
+// file is STILL PRESENT", and TestObserveNamedSocketAbsentPathConsultsHolder
+// enters with the file already gone. Neither covers the race BETWEEN them: the
+// file is present at the first lstat, the dial is refused, and the file is
+// unlinked before the post-lstat reads it. That lands on
+//
+//	if errors.Is(err, syscall.ECONNREFUSED) && pathAbsent {
+//	    return nil
+//	}
+//
+// which returns "safe" without ever asking who holds the socket — the one
+// remaining route to the outcome this file exists to prevent, and reached with
+// BOTH of the signals that are supposed to trigger a holder check.
+//
+// The state it authorizes a cold start over is precisely
+// unlinked-socket-live-holder: a saturated live server refuses the connect,
+// and its socket has been unlinked by a partial clobber. Rebinding there binds
+// a second server and orphans every session on the first — measured
+// 2026-09-15, when a cold start took the tmux server out from under an agent
+// that nothing had targeted (gc-eazs).
+func TestObserveNamedSocketRefusedThenUnlinkedConsultsHolder(t *testing.T) {
+	// A real socket file for the FIRST lstat: the branch is only reached past
+	// the os.ModeSocket check, which a synthetic FileInfo cannot satisfy.
+	path := shortPathSocketFixture(t)
+	refuse := func(context.Context, string) (net.Conn, error) { return nil, syscall.ECONNREFUSED }
+
+	for _, tc := range []struct {
+		name       string
+		holder     socketHolderState
+		wantSafe   bool
+		wantReason string
+	}{
+		{
+			name:     "nothing holds the name: genuine stale socket, cold start still works",
+			holder:   socketHolderAbsent,
+			wantSafe: true,
+		},
+		{
+			name:       "live server whose socket was unlinked mid-probe: never safe to rebind",
+			holder:     socketHolderPresent,
+			wantReason: "reason=unlinked-socket-live-holder",
+		},
+		{
+			name:       "holder unknown: fail closed",
+			holder:     socketHolderUnknown,
+			wantReason: "reason=socket-holder-unknown-on-absent-path",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Present, then unlinked: the race this branch does not survive.
+			lstatCalls := 0
+			lstat := func(string) (os.FileInfo, error) {
+				lstatCalls++
+				if lstatCalls == 1 {
+					return os.Lstat(path)
+				}
+				return nil, os.ErrNotExist
+			}
+			holderCalls := 0
+			err := observeNamedSocketUsing(context.Background(), path, lstat, refuse,
+				func(context.Context, string) socketHolderState {
+					holderCalls++
+					return tc.holder
+				})
+			if holderCalls != 1 {
+				t.Fatalf("holder calls = %d, want 1 (a refusal plus a vanished path is the live-holder signature, not proof of absence)", holderCalls)
+			}
+			if tc.wantSafe {
+				if err != nil {
+					t.Fatalf("observe = %v, want nil (nothing holds the name, cold start must still work)", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("observe = nil, want a refusal: a live server still holds this socket")
+			}
+			// Same classification rule as the absent-path branch: retrying
+			// cannot re-link a socket, so this must not advertise itself as
+			// transient saturation.
+			if errors.Is(err, errSocketHolderLive) {
+				t.Fatalf("observe = %v, want a degraded (not saturated/retryable) classification", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantReason) {
+				t.Fatalf("observe = %q, want %q", err, tc.wantReason)
+			}
+		})
+	}
+}
+
 func TestProcNetUnixHolder(t *testing.T) {
 	const listing = `Num       RefCount Protocol Flags    Type St Inode Path
 ffff9c0a: 00000002 00000000 00010000 0001 01 26315 /tmp/tmux-1000/gc-city
