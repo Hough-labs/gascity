@@ -1,3 +1,18 @@
+# Go toolchain pin (gc-eazs). This CANNOT live in go.mod: with GOTOOLCHAIN=auto
+# (the default) Go always prefers a NEWER local toolchain than the `go` directive,
+# and a `toolchain` line equal to that directive is redundant -- `go build` then
+# answers "updates to go.mod needed; to update it: go mod tidy". So the pin has to
+# be an environment variable, and exporting it from the Makefile is what makes it
+# travel with the repo instead of living in one developer's shell.
+#
+# Go 1.27.1 does not build this module:
+#   google.golang.org/grpc@v1.82.1/internal/transport/handler_server.go:271:18:
+#     undefined: http2.TrailerPrefix
+# That is a dependency incompatibility, not our code. `go build ./...` is clean
+# under go1.26.5 and fails under go1.27.1, both measured 2026-09-18.
+# Lift this pin by bumping grpc/x-net, not by deleting the line.
+export GOTOOLCHAIN := go1.26.5
+
 GOLANGCI_LINT_VERSION := 2.12.0
 # Must stay equal to the gofumpt golangci-lint vendors, so the standalone
 # binary and `make fmt-check` cannot disagree about what is formatted
