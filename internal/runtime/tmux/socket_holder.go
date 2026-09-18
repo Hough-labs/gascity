@@ -43,10 +43,19 @@ const (
 // can point it at a fixture.
 const procNetUnixPath = "/proc/net/unix"
 
-// socketHolderPSTimeout bounds the process-table snapshot. The probe only runs
-// on a host that is already refusing connections, so it must not become a new
-// way to hang; a snapshot that overruns reports "unknown" and fails closed.
-const socketHolderPSTimeout = 5 * time.Second
+// socketHolderPSTimeout bounds the whole process-table observation, retries
+// included. The probe only runs on a host that is already refusing connections,
+// so it must not become a new way to hang; an observation that overruns reports
+// "unknown" and fails closed. It covers socketHolderPSSamples listings plus the
+// gaps between them, so it is wider than the single-snapshot budget it replaced.
+const socketHolderPSTimeout = 12 * time.Second
+
+// socketHolderPSSamples is how many listings must agree before absence is
+// claimed. Sized from measurement, not taste: a 200ms sampler watching a live
+// tmux server caught `ps` omitting it for 0.38-1.26s at a time (gc-eazs), so the
+// samples have to span meaningfully longer than the longest observed omission.
+// Four samples at socketHolderResampleGap cover ~2.1s of wall clock.
+const socketHolderPSSamples = 4
 
 // namedSocketHolder reports whether a live process holds the socket at path.
 //
@@ -105,16 +114,56 @@ func procNetUnixHolder(listingPath, socketPath string) (state socketHolderState,
 // The match is deliberately generous — a blocked client counts as a holder —
 // because over-reporting a holder only costs a retry, while under-reporting
 // one authorizes the clobber.
+// processTableListing reads the process table. It is a var so tests can supply
+// a scripted sequence of listings without spawning ps.
+var processTableListing = func(ctx context.Context) ([]byte, error) {
+	return exec.CommandContext(ctx, "ps", "-Awwo", "pid=,args=").Output()
+}
+
+// socketHolderResampleGap spaces the retries in processTableHolder. A var so
+// tests do not pay the real wall-clock cost.
+var socketHolderResampleGap = 700 * time.Millisecond
+
 func processTableHolder(ctx context.Context, socketPath string) socketHolderState {
 	ctx, cancel := context.WithTimeout(ctx, socketHolderPSTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ps", "-Awwo", "pid=,args=").Output()
-	if err != nil {
-		return socketHolderUnknown
-	}
 
 	socketName := filepath.Base(socketPath)
 	aliases := socketPathAliases(socketPath)
+
+	// One listing is not evidence of absence. A successful `ps` can omit a live
+	// process, so a single miss was enough to authorize a cold start over a live
+	// tmux server and orphan its whole fleet (gc-eazs). Any single sighting ends
+	// the observation as present; absence has to survive every sample.
+	for attempt := 0; attempt < socketHolderPSSamples; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				// Out of budget mid-observation. The samples so far did not see
+				// the holder, but an incomplete observation is not an absent
+				// one, so fail closed rather than authorize a rebind.
+				return socketHolderUnknown
+			case <-time.After(socketHolderResampleGap):
+			}
+		}
+		switch sampleProcessTableHolder(ctx, socketName, aliases) {
+		case socketHolderPresent:
+			return socketHolderPresent
+		case socketHolderUnknown:
+			return socketHolderUnknown
+		}
+	}
+	return socketHolderAbsent
+}
+
+// sampleProcessTableHolder reads the process table once and reports whether that
+// single listing names the socket. Only processTableHolder decides absence, and
+// only after every sample agrees.
+func sampleProcessTableHolder(ctx context.Context, socketName string, aliases map[string]struct{}) socketHolderState {
+	out, err := processTableListing(ctx)
+	if err != nil {
+		return socketHolderUnknown
+	}
 	scanner := bufio.NewScanner(bytes.NewReader(out))
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {

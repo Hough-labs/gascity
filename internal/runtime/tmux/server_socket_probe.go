@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -18,6 +19,21 @@ func namedSocketPath(socketName string) string {
 		tmpDir = "/tmp"
 	}
 	return filepath.Join(tmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
+}
+
+// authorizeColdStart records WHICH observation concluded the socket is safe to
+// rebind, and returns the nil that says so.
+//
+// Every safe verdict in this file is a bare `return nil`, and the only line the
+// operator ever sees is tmux.go's "COLD START authorized" — which names the
+// action but never the evidence. When a cold start took a live tmux server out
+// from under an agent nobody had touched (gc-eazs), the four paths that can
+// return nil were indistinguishable after the fact, and localizing it took a
+// session of process forensics against `ps` samples. The reason costs one log
+// line on a path that runs about once per city start.
+func authorizeColdStart(path string, reason string) error {
+	log.Printf("tmux socket observation: cold start authorized for %s (reason=%s)", path, reason)
+	return nil
 }
 
 // errSocketHolderLive marks the one observation that means "a live process is
@@ -77,7 +93,7 @@ func observeNamedSocketUsing(
 		// a listing that was read successfully and did not contain it.
 		switch holder(ctx, path) {
 		case socketHolderAbsent:
-			return nil
+			return authorizeColdStart(path, "absent-path-unheld")
 		case socketHolderPresent:
 			// Deliberately NOT errSocketHolderLive: that maps to
 			// ErrServerSaturated, which advertises "transient, retry" — but no
@@ -118,7 +134,31 @@ func observeNamedSocketUsing(
 	pathAbsent := errors.Is(afterErr, os.ErrNotExist)
 	stable := afterErr == nil && os.SameFile(before, after)
 	if errors.Is(err, syscall.ECONNREFUSED) && pathAbsent {
-		return nil
+		// The connect was refused AND the socket file vanished between the two
+		// lstats. That combination is not absence — it is the
+		// unlinked-socket-live-holder state observed mid-probe. Both halves are
+		// signals this file already treats as ambiguous on their own: a live
+		// server with a full accept backlog refuses identically (gascity-n17v),
+		// and a server survives having its socket unlinked with every session
+		// still bound to it (gascity-3z7d). Arriving with BOTH is the strongest
+		// available evidence of a live holder, yet this was the one branch that
+		// never asked. Returning nil here authorizes tmux to bind a second
+		// server on the path and orphan every session on the first (gc-eazs).
+		switch holder(ctx, path) {
+		case socketHolderAbsent:
+			return authorizeColdStart(path, "refused-path-vanished-unheld")
+		case socketHolderPresent:
+			// Deliberately NOT errSocketHolderLive, for the same reason as the
+			// absent-path branch: no amount of retrying re-links a socket, so
+			// advertising "transient, retry" would spin instead of surfacing a
+			// state an operator must resolve. The inode is the one observed
+			// before the path vanished, which keeps this route distinguishable
+			// in logs from the already-absent one (inode=absent) while both
+			// report the same reason and demand the same action.
+			return fmt.Errorf("path=%s inode=%s peer_pid=unknown reason=unlinked-socket-live-holder", path, inode)
+		default:
+			return fmt.Errorf("path=%s inode=%s peer_pid=unknown reason=socket-holder-unknown-on-absent-path", path, inode)
+		}
 	}
 	if errors.Is(err, syscall.ECONNREFUSED) && stable {
 		// The socket file is still here and refused the connection. That is
@@ -128,7 +168,7 @@ func observeNamedSocketUsing(
 		// let tmux unlink and rebind the path.
 		switch holder(ctx, path) {
 		case socketHolderAbsent:
-			return nil
+			return authorizeColdStart(path, "refused-stale-unheld")
 		case socketHolderPresent:
 			return fmt.Errorf("%w: path=%s inode=%s peer_pid=unknown reason=refused-by-live-holder", errSocketHolderLive, path, inode)
 		default:
@@ -136,7 +176,7 @@ func observeNamedSocketUsing(
 		}
 	}
 	if errors.Is(err, os.ErrNotExist) && pathAbsent {
-		return nil
+		return authorizeColdStart(path, "dial-and-path-absent")
 	}
 	if afterErr != nil {
 		return fmt.Errorf("path=%s inode=%s peer_pid=unknown dial=%w post_lstat=%w", path, inode, err, afterErr)

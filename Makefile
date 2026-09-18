@@ -1,3 +1,26 @@
+# Go toolchain pin (gc-eazs). This CANNOT live in go.mod: with GOTOOLCHAIN=auto
+# (the default) Go always prefers a NEWER local toolchain than the `go` directive,
+# and a `toolchain` line equal to that directive is redundant -- `go build` then
+# answers "updates to go.mod needed; to update it: go mod tidy". So the pin has to
+# be an environment variable, and exporting it from the Makefile is what makes it
+# travel with the repo instead of living in one developer's shell.
+#
+# Go 1.27.1 does not build this module:
+#   google.golang.org/grpc@v1.82.1/internal/transport/handler_server.go:271:18:
+#     undefined: http2.TrailerPrefix
+# That is a dependency incompatibility, not our code. `go build ./...` is clean
+# under go1.26.5 and fails under go1.27.1, both measured 2026-09-18.
+# Lift this pin by bumping grpc/x-net, not by deleting the line.
+GO_TOOLCHAIN_PIN := go1.26.5
+# `export` reaches recipes but NOT $(shell ...) — measured, not assumed:
+#   export GOTOOLCHAIN := go1.26.5
+#   V := $(shell go env GOROOT)   -> /opt/homebrew/Cellar/go/1.27.1/libexec
+#   recipe                        -> GOTOOLCHAIN=go1.26.5
+# So every `go` call in a $(shell ...) must name $(GO_TOOLCHAIN_PIN) itself, and
+# TEST_ENV must pass GOTOOLCHAIN through its env -i allowlist. Miss either and
+# the pin silently covers only half the build.
+export GOTOOLCHAIN := $(GO_TOOLCHAIN_PIN)
+
 GOLANGCI_LINT_VERSION := 2.12.0
 # Must stay equal to the gofumpt golangci-lint vendors, so the standalone
 # binary and `make fmt-check` cannot disagree about what is formatted
@@ -382,12 +405,13 @@ vet:
 ## city-wide (ga-w2kh1r). Do not add them. For a bare `go test` that bypasses
 ## this wrapper, internal/testenv scrubs these vars at test-binary init in every
 ## covered package (enforced by TestRequiresDedicatedTestenvImportFile).
-GOPATH_VAL    := $(shell go env GOPATH)
-GOCACHE_VAL   := $(shell go env GOCACHE)
-GOMODCACHE_VAL := $(shell go env GOMODCACHE)
-GOTMPDIR_VAL  := $(shell go env GOTMPDIR)
-GOROOT_VAL    := $(shell go env GOROOT)
+GOPATH_VAL    := $(shell GOTOOLCHAIN=$(GO_TOOLCHAIN_PIN) go env GOPATH)
+GOCACHE_VAL   := $(shell GOTOOLCHAIN=$(GO_TOOLCHAIN_PIN) go env GOCACHE)
+GOMODCACHE_VAL := $(shell GOTOOLCHAIN=$(GO_TOOLCHAIN_PIN) go env GOMODCACHE)
+GOTMPDIR_VAL  := $(shell GOTOOLCHAIN=$(GO_TOOLCHAIN_PIN) go env GOTMPDIR)
+GOROOT_VAL    := $(shell GOTOOLCHAIN=$(GO_TOOLCHAIN_PIN) go env GOROOT)
 TEST_ENV = env -i \
+	GOTOOLCHAIN="$(GO_TOOLCHAIN_PIN)" \
 	PATH="$$PATH" \
 	HOME="$$HOME" \
 	USER="$$USER" \
