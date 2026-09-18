@@ -11,7 +11,15 @@
 # That is a dependency incompatibility, not our code. `go build ./...` is clean
 # under go1.26.5 and fails under go1.27.1, both measured 2026-09-18.
 # Lift this pin by bumping grpc/x-net, not by deleting the line.
-export GOTOOLCHAIN := go1.26.5
+GO_TOOLCHAIN_PIN := go1.26.5
+# `export` reaches recipes but NOT $(shell ...) — measured, not assumed:
+#   export GOTOOLCHAIN := go1.26.5
+#   V := $(shell go env GOROOT)   -> /opt/homebrew/Cellar/go/1.27.1/libexec
+#   recipe                        -> GOTOOLCHAIN=go1.26.5
+# So every `go` call in a $(shell ...) must name $(GO_TOOLCHAIN_PIN) itself, and
+# TEST_ENV must pass GOTOOLCHAIN through its env -i allowlist. Miss either and
+# the pin silently covers only half the build.
+export GOTOOLCHAIN := $(GO_TOOLCHAIN_PIN)
 
 GOLANGCI_LINT_VERSION := 2.12.0
 # Must stay equal to the gofumpt golangci-lint vendors, so the standalone
@@ -397,12 +405,13 @@ vet:
 ## city-wide (ga-w2kh1r). Do not add them. For a bare `go test` that bypasses
 ## this wrapper, internal/testenv scrubs these vars at test-binary init in every
 ## covered package (enforced by TestRequiresDedicatedTestenvImportFile).
-GOPATH_VAL    := $(shell go env GOPATH)
-GOCACHE_VAL   := $(shell go env GOCACHE)
-GOMODCACHE_VAL := $(shell go env GOMODCACHE)
-GOTMPDIR_VAL  := $(shell go env GOTMPDIR)
-GOROOT_VAL    := $(shell go env GOROOT)
+GOPATH_VAL    := $(shell GOTOOLCHAIN=$(GO_TOOLCHAIN_PIN) go env GOPATH)
+GOCACHE_VAL   := $(shell GOTOOLCHAIN=$(GO_TOOLCHAIN_PIN) go env GOCACHE)
+GOMODCACHE_VAL := $(shell GOTOOLCHAIN=$(GO_TOOLCHAIN_PIN) go env GOMODCACHE)
+GOTMPDIR_VAL  := $(shell GOTOOLCHAIN=$(GO_TOOLCHAIN_PIN) go env GOTMPDIR)
+GOROOT_VAL    := $(shell GOTOOLCHAIN=$(GO_TOOLCHAIN_PIN) go env GOROOT)
 TEST_ENV = env -i \
+	GOTOOLCHAIN="$(GO_TOOLCHAIN_PIN)" \
 	PATH="$$PATH" \
 	HOME="$$HOME" \
 	USER="$$USER" \
