@@ -896,3 +896,141 @@ func TestProcessAliveWrappedPane(t *testing.T) {
 		t.Fatal("processAlive = false for systemd-run pane with claude child, want true (descendant fallback)")
 	}
 }
+
+// TestFetchDarwinProcessSnapshotRunsListingsConcurrently pins the fix for
+// gascity-hcg6. Darwin needs two full-OS `ps` listings (args and comm) where
+// Linux needs one, and they used to run back-to-back inside the single
+// fetchTimeout budget that also covers `tmux list-panes`. Under fleet load that
+// budget expired mid-scan, exec.CommandContext SIGKILLed the child, and the
+// snapshot degraded ("signal: killed") exactly when accurate liveness matters
+// most. The two listings are independent reads of the same process table, so
+// they must overlap rather than serialize.
+//
+// The fake releases each listing only once both have been entered: a sequential
+// implementation never releases the first, which the deadline below reports as
+// a serialization failure instead of hanging the package.
+func TestFetchDarwinProcessSnapshotRunsListingsConcurrently(t *testing.T) {
+	var entered sync.WaitGroup
+	entered.Add(2)
+
+	restore := processTableListingCommand
+	t.Cleanup(func() { processTableListingCommand = restore })
+
+	commArgs := strings.Join(darwinCommandSnapshotPSArgs(), " ")
+	processTableListingCommand = func(_ context.Context, args ...string) ([]byte, error) {
+		entered.Done()
+		entered.Wait() // released only once BOTH listings are in flight
+		if strings.Join(args, " ") == commArgs {
+			return []byte("100 1 claude\n"), nil
+		}
+		return []byte("100 1 claude --flag\n"), nil
+	}
+
+	type result struct {
+		snapshot processSnapshot
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		snapshot, err := fetchDarwinProcessSnapshot(context.Background())
+		done <- result{snapshot: snapshot, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("fetchDarwinProcessSnapshot returned error: %v", got.err)
+		}
+		process, ok := got.snapshot.byPID["100"]
+		if !ok {
+			t.Fatal("snapshot missing pid 100: concurrent listings must still join args onto comm")
+		}
+		if process.Command != "claude" {
+			t.Fatalf("Command = %q, want %q (the comm listing must still win over argv[0])", process.Command, "claude")
+		}
+		if process.Args != "claude --flag" {
+			t.Fatalf("Args = %q, want %q", process.Args, "claude --flag")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("fetchDarwinProcessSnapshot serialized its two ps listings: the second never started while the first was still in flight (gascity-hcg6)")
+	}
+}
+
+// degradingFetcher serves one live session whose process-snapshot availability
+// the test toggles, so a run of degraded refreshes needs no real ps scan, no
+// tmux, and no wall-clock wait.
+type degradingFetcher struct {
+	mu        sync.Mutex
+	available bool
+}
+
+func (f *degradingFetcher) setAvailable(available bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.available = available
+}
+
+func (f *degradingFetcher) FetchState(context.Context) (runtimeStateSnapshot, error) {
+	f.mu.Lock()
+	available := f.available
+	f.mu.Unlock()
+	return runtimeStateSnapshot{
+		Sessions: map[string]sessionRuntimeState{
+			"agent-1": {Running: true, Panes: []paneRuntimeState{{Command: "bash", PID: "101"}}},
+		},
+		ProcessesAvailable: available,
+	}, nil
+}
+
+// TestStateCache_SustainedProcessSnapshotDegradationIsReported pins the
+// observability half of gascity-hcg6. A single degraded snapshot is expected and
+// safe — the fallback holds tmux liveness — so it stays quiet. A RUN of them
+// means the supervisor has been making lifecycle decisions without an OS process
+// table for a sustained window, and that was previously indistinguishable from
+// the transient case in the log.
+func TestStateCache_SustainedProcessSnapshotDegradationIsReported(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+
+	f := &degradingFetcher{}
+	f.setAvailable(false)
+	// A zero TTL forces every read to refresh, so the run below is consecutive
+	// by construction and costs no wall clock.
+	cache := NewStateCache(f, 0)
+
+	for i := 1; i < processSnapshotDegradationThreshold; i++ {
+		cache.ProcessAlive("agent-1", []string{"claude"})
+	}
+	if got := buf.String(); strings.Contains(got, "sustained") {
+		t.Fatalf("reported sustained degradation after only %d refreshes, want silence before %d: %q",
+			processSnapshotDegradationThreshold-1, processSnapshotDegradationThreshold, got)
+	}
+
+	buf.Reset()
+	cache.ProcessAlive("agent-1", []string{"claude"})
+	got := buf.String()
+	if !strings.Contains(got, "sustained") {
+		t.Fatalf("no sustained-degradation report on the %dth consecutive degraded refresh, got %q",
+			processSnapshotDegradationThreshold, got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("%d consecutive", processSnapshotDegradationThreshold)) {
+		t.Fatalf("sustained-degradation report does not name the consecutive count, got %q", got)
+	}
+
+	// One healthy snapshot clears the run: the next miss is transient again.
+	buf.Reset()
+	f.setAvailable(true)
+	cache.ProcessAlive("agent-1", []string{"claude"})
+	f.setAvailable(false)
+	cache.ProcessAlive("agent-1", []string{"claude"})
+	if got := buf.String(); strings.Contains(got, "sustained") {
+		t.Fatalf("sustained report survived a healthy refresh, want the run reset: %q", got)
+	}
+}

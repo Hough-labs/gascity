@@ -29,6 +29,16 @@ const defaultStaleTTL = 30 * time.Second
 // fetchTimeout is the hard timeout for a single runtime-state fetch.
 const fetchTimeout = 3 * time.Second
 
+// processSnapshotDegradationThreshold is how many CONSECUTIVE refreshes must
+// return without an OS process table before the degradation is reported as
+// sustained rather than transient. One miss is expected and safe — the fallback
+// holds authoritative tmux liveness — so reporting every one would be noise that
+// trains readers to skip the line. At the default 2s TTL a run of 5 spans ~10s
+// of continuous blindness, well past any one-off scheduling loss. The report
+// repeats every Nth thereafter so a long outage stays visible without becoming a
+// log storm (gascity-hcg6).
+const processSnapshotDegradationThreshold = 5
+
 // StateFetcher abstracts tmux subprocess calls for testability.
 type StateFetcher interface {
 	// FetchState returns a runtime-state snapshot for live sessions.
@@ -82,10 +92,13 @@ type StateCache struct {
 	lastError  error
 	dirty      bool   // set by Invalidate(); cleared on successful refresh
 	generation uint64 // advanced by invalidation/eviction to reject stale refreshes
-	ttl        time.Duration
-	staleTTL   time.Duration
-	sf         singleflight.Group
-	fetcher    StateFetcher
+	// degradedRefreshes counts consecutive successful refreshes that came back
+	// without an OS process table. Reset by any refresh that carries one.
+	degradedRefreshes int
+	ttl               time.Duration
+	staleTTL          time.Duration
+	sf                singleflight.Group
+	fetcher           StateFetcher
 }
 
 // NewStateCache creates a new cache with the given fetcher and TTL.
@@ -236,7 +249,22 @@ func (c *StateCache) refresh() {
 		c.fetchedAt = time.Now()
 		c.lastError = nil
 		c.dirty = false
+		// A degraded snapshot is a successful refresh that lost only the OS
+		// process table, so it never reaches the error branch above. Track the
+		// run here — the count, not any single miss, is the finding.
+		degradedRun := 0
+		if state.ProcessesAvailable {
+			c.degradedRefreshes = 0
+		} else {
+			c.degradedRefreshes++
+			degradedRun = c.degradedRefreshes
+		}
 		c.mu.Unlock()
+
+		if degradedRun >= processSnapshotDegradationThreshold &&
+			degradedRun%processSnapshotDegradationThreshold == 0 {
+			log.Printf("tmux state cache: sustained process-snapshot degradation: %d consecutive refreshes with no OS process table; session liveness is being held on tmux alone and inner-process checks are degrading optimistically", degradedRun)
+		}
 		return nil, nil
 	})
 }
@@ -450,25 +478,59 @@ func newProcessSnapshot(processes []processRuntimeState) processSnapshot {
 	return snapshot
 }
 
+// processTableListingCommand runs one `ps` listing. It is a var so tests can
+// script the output and the timing without spawning ps, mirroring
+// processTableListing in socket_holder.go.
+var processTableListingCommand = func(ctx context.Context, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, "ps", args...).Output()
+}
+
 func fetchProcessSnapshot(ctx context.Context) (processSnapshot, error) {
 	if goruntime.GOOS == "darwin" {
 		return fetchDarwinProcessSnapshot(ctx)
 	}
-	out, err := exec.CommandContext(ctx, "ps", processSnapshotPSArgs()...).Output()
+	out, err := processTableListingCommand(ctx, processSnapshotPSArgs()...)
 	if err != nil {
 		return processSnapshot{}, fmt.Errorf("fetching process snapshot: %w", err)
 	}
 	return parseProcessSnapshot(string(out)), nil
 }
 
+// fetchDarwinProcessSnapshot joins a comm listing onto an args listing, because
+// macOS ps cannot emit both as safely-parseable trailing columns in one pass.
+//
+// The two listings run CONCURRENTLY. They are independent reads of the same
+// process table, and back-to-back they cost two full-OS scans inside the single
+// fetchTimeout budget that also covers `tmux list-panes` — so Darwin paid twice
+// what Linux pays for the same snapshot. Under fleet load that budget expired
+// mid-scan and exec.CommandContext SIGKILLed the child, which surfaced as
+// `signal: killed` and degraded the liveness cache precisely when accurate
+// liveness matters most (gascity-hcg6). Overlapping them costs the box no extra
+// work and returns the scan to roughly a single-listing wall time.
 func fetchDarwinProcessSnapshot(ctx context.Context) (processSnapshot, error) {
-	argsOut, err := exec.CommandContext(ctx, "ps", processSnapshotPSArgs()...).Output()
-	if err != nil {
-		return processSnapshot{}, fmt.Errorf("fetching Darwin process args snapshot: %w", err)
+	var (
+		wg      sync.WaitGroup
+		argsOut []byte
+		argsErr error
+		commOut []byte
+		commErr error
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		argsOut, argsErr = processTableListingCommand(ctx, processSnapshotPSArgs()...)
+	}()
+	go func() {
+		defer wg.Done()
+		commOut, commErr = processTableListingCommand(ctx, darwinCommandSnapshotPSArgs()...)
+	}()
+	wg.Wait()
+
+	if argsErr != nil {
+		return processSnapshot{}, fmt.Errorf("fetching Darwin process args snapshot: %w", argsErr)
 	}
-	commOut, err := exec.CommandContext(ctx, "ps", darwinCommandSnapshotPSArgs()...).Output()
-	if err != nil {
-		return processSnapshot{}, fmt.Errorf("fetching Darwin process command snapshot: %w", err)
+	if commErr != nil {
+		return processSnapshot{}, fmt.Errorf("fetching Darwin process command snapshot: %w", commErr)
 	}
 	return parseDarwinProcessSnapshot(string(argsOut), string(commOut)), nil
 }
