@@ -52,6 +52,22 @@ while IFS='=' read -r name _; do
   esac
 done < <(env)
 
+# run_in_test_env runs a command under a scrubbed, explicitly-allowlisted env.
+#
+# GOTOOLCHAIN must travel WITH GOROOT or not at all. goroot_val above is
+# `go env GOROOT` under the INHERITED env, so under the repo's toolchain pin
+# (Makefile GO_TOOLCHAIN_PIN) it resolves to the PINNED toolchain's module
+# directory. Forwarding that GOROOT through `env -i` while dropping GOTOOLCHAIN
+# left the child with a pinned GOROOT and an unpinned driver: the host `go`
+# never switched toolchains, so it ran its own driver against the pinned tools
+# in GOROOT and every compile died with
+#   compile: version "go1.26.5" does not match go tool version "go1.27.1"
+# which failed the whole Darwin lane in the shard loop while the main sweep --
+# which goes through the Makefile's TEST_ENV, and does carry GOTOOLCHAIN --
+# passed. gc-eazs pinned TEST_ENV and the $(shell) sites but not this script's
+# independent allowlist, so this was the one lane that still lost the pin.
+# Keep the two adjacent: they must derive from the same parent env or they
+# disagree.
 run_in_test_env() {
   local base_env=(
     PATH="${PATH}" \
@@ -66,6 +82,7 @@ run_in_test_env() {
     GOCACHE="${gocache_val}" \
     GOMODCACHE="${gomodcache_val}" \
     GOTMPDIR="${gotmpdir_val}" \
+    GOTOOLCHAIN="${GOTOOLCHAIN-}" \
     GOROOT="${GOROOT:-$goroot_val}" \
     GOENV="${GOENV-}" \
     GOFLAGS="${GOFLAGS-}" \
