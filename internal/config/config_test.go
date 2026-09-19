@@ -4035,6 +4035,67 @@ func TestDoltConfigDoltLockReleaseTimeoutInvalid(t *testing.T) {
 	}
 }
 
+// --- managed dolt log rotation bounds ---
+
+func TestDoltConfigEffectiveLogMaxBytesDefault(t *testing.T) {
+	d := DoltConfig{}
+	if got := d.EffectiveLogMaxBytes(); got != DefaultDoltLogMaxBytes {
+		t.Errorf("EffectiveLogMaxBytes() = %d, want %d", got, DefaultDoltLogMaxBytes)
+	}
+}
+
+func TestDoltConfigEffectiveLogMaxBytesCustom(t *testing.T) {
+	d := DoltConfig{LogMaxBytes: 4096}
+	if got := d.EffectiveLogMaxBytes(); got != 4096 {
+		t.Errorf("EffectiveLogMaxBytes() = %d, want 4096", got)
+	}
+}
+
+func TestDoltConfigEffectiveLogRetainedGenerationsDefault(t *testing.T) {
+	d := DoltConfig{}
+	if got := d.EffectiveLogRetainedGenerations(); got != DefaultDoltLogRetainedGenerations {
+		t.Errorf("EffectiveLogRetainedGenerations() = %d, want %d", got, DefaultDoltLogRetainedGenerations)
+	}
+}
+
+func TestDoltConfigEffectiveLogRetainedGenerationsCustom(t *testing.T) {
+	d := DoltConfig{LogRetainedGenerations: 2}
+	if got := d.EffectiveLogRetainedGenerations(); got != 2 {
+		t.Errorf("EffectiveLogRetainedGenerations() = %d, want 2", got)
+	}
+}
+
+func TestValidateDoltConfigRejectsNegativeLogBounds(t *testing.T) {
+	cases := []struct {
+		name  string
+		cfg   City
+		field string
+	}{
+		{"negative log_max_bytes", City{Dolt: DoltConfig{LogMaxBytes: -1}}, "log_max_bytes"},
+		{"negative log_retained_generations", City{Dolt: DoltConfig{LogRetainedGenerations: -1}}, "log_retained_generations"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateDoltConfig(&tc.cfg, "city.toml")
+			if err == nil {
+				t.Fatalf("ValidateDoltConfig() = nil, want an error naming %s", tc.field)
+			}
+			if !strings.Contains(err.Error(), tc.field) || !strings.Contains(err.Error(), "must not be negative") {
+				t.Errorf("ValidateDoltConfig() error = %q, want it to name the field and the constraint", err)
+			}
+		})
+	}
+}
+
+func TestValidateDoltConfigAcceptsZeroLogBounds(t *testing.T) {
+	// Zero means "use the managed default" for every sibling [dolt] int, so
+	// an omitted bound must not be mistaken for an invalid one.
+	cfg := City{Dolt: DoltConfig{}}
+	if err := ValidateDoltConfig(&cfg, "city.toml"); err != nil {
+		t.Errorf("ValidateDoltConfig() = %v, want nil for omitted log bounds", err)
+	}
+}
+
 func TestParseDoltLockReleaseTimeout(t *testing.T) {
 	data := []byte(`
 [workspace]
