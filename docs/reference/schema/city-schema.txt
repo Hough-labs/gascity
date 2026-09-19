@@ -1498,6 +1498,16 @@
           "type": "string",
           "description": "DoltLockReleaseTimeout is how long managed-dolt lifecycle operations\nwait for dolt's on-disk exclusive store locks (the root-level\n`\u003cdata_dir\u003e/.dolt/noms/LOCK` and per-database\n`\u003cdata_dir\u003e/\u003cdb\u003e/.dolt/noms/LOCK` forms) to be released by a prior\nserver process before failing closed. The start path refuses to launch a\nsecond `dolt sql-server` against a data_dir whose lock is still held —\na prior instance that is shutting down holds the lock until its chunk\njournal is flushed, and binding before release corrupts the journal\n(see gastownhall/gascity#3174). The stop path uses the same window to\nwait for lock release after process exit before reporting success.\nDuration string (e.g., \"1m\", \"90s\"). Defaults to \"1m\", which covers\nthe flush window of multi-GB journals on commodity SSDs. Set to \"0s\"\nto probe once with no wait (still fail-closed when held). Negative\nvalues are rejected at config load. The managed lifecycle also\nprojects this value into the gc-beads-bd.sh shell fallback as\nGC_DOLT_LOCK_RELEASE_TIMEOUT_MS (milliseconds), so both paths honor\nthe configured window.",
           "default": "1m"
+        },
+        "log_max_bytes": {
+          "type": "integer",
+          "description": "LogMaxBytes is the size at which the managed Dolt server log\n(\u003cpack state dir\u003e/dolt.log) is rotated aside, in bytes. The managed\nserver's stdout and stderr are that one file, held open for the\nserver's whole life by the supervising watchdog and inherited by the\ndolt child, so it is rotated at server start — the one point where no\nlive writer holds it — rather than continuously. A server that never\nrestarts therefore never rotates. 0 means use the managed default.",
+          "default": 8388608
+        },
+        "log_retained_generations": {
+          "type": "integer",
+          "description": "LogRetainedGenerations is how many rotated dolt.log generations are\nkept beside the live file (dolt.log.1 is the most recent). Older\ngenerations are pruned at the next rotation, including ones stranded\nby a previously larger setting. 0 means use the managed default.",
+          "default": 5
         }
       },
       "additionalProperties": false,

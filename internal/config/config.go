@@ -1928,6 +1928,17 @@ const (
 	DefaultDoltReadTimeoutMillis = 15000
 	// DefaultDoltWriteTimeoutMillis is the managed Dolt listener write timeout.
 	DefaultDoltWriteTimeoutMillis = 300000
+	// DefaultDoltLogMaxBytes is the size at which the managed Dolt server
+	// log (dolt.log) is rotated aside at the next server start. 8 MiB is
+	// roughly a week of a busy city's output — the log grew ~1.15 MB/day on
+	// the city this was measured on — which keeps each generation small
+	// enough to grep quickly while still spanning more than one incident.
+	DefaultDoltLogMaxBytes = 8 << 20
+	// DefaultDoltLogRetainedGenerations is how many rotated dolt.log
+	// generations are kept beside the live file. Five bounds the managed
+	// log's total on-disk footprint at roughly six times
+	// DefaultDoltLogMaxBytes while retaining well over a month of history.
+	DefaultDoltLogRetainedGenerations = 5
 )
 
 // DoltConfig holds optional dolt server overrides.
@@ -1975,6 +1986,19 @@ type DoltConfig struct {
 	// GC_DOLT_LOCK_RELEASE_TIMEOUT_MS (milliseconds), so both paths honor
 	// the configured window.
 	DoltLockReleaseTimeout string `toml:"dolt_lock_release_timeout,omitempty" jsonschema:"default=1m"`
+	// LogMaxBytes is the size at which the managed Dolt server log
+	// (<pack state dir>/dolt.log) is rotated aside, in bytes. The managed
+	// server's stdout and stderr are that one file, held open for the
+	// server's whole life by the supervising watchdog and inherited by the
+	// dolt child, so it is rotated at server start — the one point where no
+	// live writer holds it — rather than continuously. A server that never
+	// restarts therefore never rotates. 0 means use the managed default.
+	LogMaxBytes int `toml:"log_max_bytes,omitempty" jsonschema:"default=8388608"`
+	// LogRetainedGenerations is how many rotated dolt.log generations are
+	// kept beside the live file (dolt.log.1 is the most recent). Older
+	// generations are pruned at the next rotation, including ones stranded
+	// by a previously larger setting. 0 means use the managed default.
+	LogRetainedGenerations int `toml:"log_retained_generations,omitempty" jsonschema:"default=5"`
 }
 
 // EffectiveArchiveLevel returns the configured Dolt archive level, defaulting
@@ -2027,6 +2051,24 @@ func (d DoltConfig) EffectiveWriteTimeoutMillis() int {
 		return d.WriteTimeoutMillis
 	}
 	return DefaultDoltWriteTimeoutMillis
+}
+
+// EffectiveLogMaxBytes returns the size at which the managed Dolt server log
+// is rotated aside, in bytes.
+func (d DoltConfig) EffectiveLogMaxBytes() int {
+	if d.LogMaxBytes > 0 {
+		return d.LogMaxBytes
+	}
+	return DefaultDoltLogMaxBytes
+}
+
+// EffectiveLogRetainedGenerations returns how many rotated generations of the
+// managed Dolt server log are kept beside the live file.
+func (d DoltConfig) EffectiveLogRetainedGenerations() int {
+	if d.LogRetainedGenerations > 0 {
+		return d.LogRetainedGenerations
+	}
+	return DefaultDoltLogRetainedGenerations
 }
 
 // DefaultDoltLockReleaseTimeout is the wait window for dolt's on-disk

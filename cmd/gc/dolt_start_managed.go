@@ -209,6 +209,24 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 			return report, err
 		}
 
+		// Bound dolt.log before anything opens a handle to it. This is the
+		// one point in a server's life where no live writer holds the log —
+		// waitForManagedDoltDataDirLockFree above has already proven the
+		// previous server released its store lock, so its process is gone —
+		// and rotating here means the parent's handle below, the watchdog's
+		// own handle, and the dolt child's inherited descriptor all land on
+		// the post-rotation file. Rotation is by rename, so it is idempotent
+		// across this loop's retries: the fresh log starts under the bound.
+		//
+		// A log that cannot be rotated does not block the data plane. The
+		// bound is a diagnosability aid, and a start that refused on it
+		// would turn one unwritable old generation into a city that can
+		// never start again; the open below still fails closed if the log
+		// itself cannot be written.
+		if err := rotateManagedDoltLog(layout.LogFile, int64(doltConfig.EffectiveLogMaxBytes()), doltConfig.EffectiveLogRetainedGenerations()); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err) //nolint:errcheck
+		}
+
 		logOffset, err := managedDoltLogSize(layout.LogFile)
 		if err != nil {
 			return report, err

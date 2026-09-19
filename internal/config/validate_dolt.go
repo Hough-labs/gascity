@@ -23,5 +23,11 @@ func ValidateDoltConfig(cfg *City, source string) error {
 	if err := checkNonNegative("write_timeout_millis", cfg.Dolt.WriteTimeoutMillis); err != nil {
 		return err
 	}
+	if err := checkNonNegative("log_max_bytes", cfg.Dolt.LogMaxBytes); err != nil {
+		return err
+	}
+	if err := checkNonNegative("log_retained_generations", cfg.Dolt.LogRetainedGenerations); err != nil {
+		return err
+	}
 	return nil
 }
