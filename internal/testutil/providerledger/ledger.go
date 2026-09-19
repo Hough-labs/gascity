@@ -332,9 +332,8 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 }
 
 // runtimeWaiverExpiry dates every remaining runtime.Provider waiver owned by
-// runtimeContractWaiverOwner. This is renewal #3 — the third value this expiry
-// has ever held — and the renewal the previous comment asked to account for
-// itself.
+// runtimeContractWaiverOwner. This is the fourth value this expiry has ever
+// held, and the first this fork did not choose for itself.
 //
 // The record, so the next renewal does not have to reconstruct it:
 //
@@ -344,15 +343,21 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 //	            extended rather than re-decided.
 //	2026-08-11  renewed to 2026-08-26 (450c2b5f2), landing the subprocess
 //	            default-dir contract in the same commit: 9 waived -> 8.
-//	2026-08-25  renewed to 2026-09-25. This one. 7 waived, 0 contracted here.
+//	2026-08-25  renewed to 2026-09-25 (gascity-82e), re-pointing the owner off
+//	            the retired gastown-era id. 7 waived, 0 contracted here.
+//	2026-09-19  moved to 2026-10-02. This one. Not a fork decision: upstream
+//	            v1.4.2 renewed the same waiver set to that date to qualify the
+//	            Beads 1.3 compatibility fix, and this is the merge adopting it.
+//	            7 waived, 0 contracted here.
 //
-// One contract has landed since the previous renewal: the acp default-directory
+// One contract has landed since 2026-08-11: the acp default-directory
 // composition on 2026-08-18 (f84568925, gascity-0wp), taking 8 waived to 7.
 // Nothing has moved since. The migration is running at roughly one contracted
 // constructor per renewal against seven remaining gaps, so this renewal buys
 // time it has not yet earned.
 //
-// The owner changed with this renewal. Every prior grant named a gastown-era id
+// The owner changed at the 2026-08-25 renewal. Every grant before it named a
+// gastown-era id
 // that resolves in no rig registered in this city (the commit introducing this
 // renewal names the retired id), so the "put the question back in front of the
 // owner" step that the deliberately-short horizon exists to force had nobody to
@@ -371,15 +376,21 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 // escalated to Hunter; the resolution belongs on gascity-82e. That this
 // deadline can redden an unrelated push at all is gascity-8v7.
 //
+// The 2026-10-02 date is upstream's, taken so this fork's ledger does not
+// re-conflict on every 1.4.x merge. Adopting a date is not re-deciding the
+// waiver: seven gaps remain, none contracted since 2026-08-18, and the
+// obligation above is due on the merits regardless of which branch set the
+// expiry.
+//
 // Each gap was re-checked against cmd/gc/runtime_registry.go at renewal: all
 // seven constructors are still live registrations, and none has gained a
 // runnable full contract, so none was retired as stale.
 //
-// Thirty days, deliberately, and not the 90-day maxWaiverHorizon the validator
-// permits, and not an extension taken to avoid revisiting this. A long horizon
-// hides a stalled track behind a green run; a short one puts the question back
-// in front of an owner who now actually exists.
-var runtimeWaiverExpiry = time.Date(2026, time.September, 25, 0, 0, 0, 0, time.UTC)
+// Two weeks from upstream's 2026-09-18 grant, and not the 90-day
+// maxWaiverHorizon the validator permits. A long horizon hides a stalled track
+// behind a green run; a short one puts the question back in front of an owner
+// who now actually exists.
+var runtimeWaiverExpiry = time.Date(2026, time.October, 2, 0, 0, 0, 0, time.UTC)
 
 func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
 	return ContractClaim{

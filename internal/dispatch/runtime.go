@@ -1393,29 +1393,17 @@ func loadDownDepsForScopeSkip(store beads.Store, ids []string) (map[string][]bea
 	return depsByID, nil
 }
 
-type scopeSkipBatchUpdater interface {
-	UpdateAll(ids []string, opts beads.UpdateOpts) (int, error)
-}
+const scopeAbortSkippedCloseReason = "scope member skipped: an earlier member of the same scope failed"
 
 func skipScopeMembers(store beads.Store, ids []string) (int, error) {
-	status := "closed"
-	opts := beads.UpdateOpts{
-		Status:   &status,
-		Metadata: map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped},
-	}
-	if batch, ok := store.(scopeSkipBatchUpdater); ok {
-		updated, err := batch.UpdateAll(ids, opts)
-		if err != nil {
-			return updated, fmt.Errorf("closing skipped scope beads %v: %w", ids, err)
-		}
-		return updated, nil
-	}
-	closed := 0
-	for _, id := range ids {
-		if err := store.Update(id, opts); err != nil {
-			return closed, fmt.Errorf("closing bead %q: %w", id, err)
-		}
-		closed++
+	// Skipped work can still have open blockers, including its abort control.
+	// CloseAll explicitly force-closes it without removing those dependencies.
+	closed, err := store.CloseAll(ids, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+		"close_reason":              scopeAbortSkippedCloseReason,
+	})
+	if err != nil {
+		return closed, fmt.Errorf("closing skipped scope beads %v: %w", ids, err)
 	}
 	return closed, nil
 }

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-727}"
+# Beads v1.3.0's reviewed transitive graph contains 737 modules.
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-737}"
 max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-270000000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"

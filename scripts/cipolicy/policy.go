@@ -20,9 +20,10 @@ const (
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
 	expectedCITriggersHash = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
-	// reviewed delta (merge of upstream v1.4.1 into edge-integration): upstream's
-	// BD_VERSION v1.1.0 -> v1.2.2 matrix bump, PLUS the three CI customizations this
-	// fork already carried on edge-integration and deliberately retains:
+	// reviewed delta (merge of upstream v1.4.2 into edge-integration): upstream's
+	// BD_VERSION v1.2.2 -> v1.3.0 matrix bump (Beads 1.3 compatibility), PLUS the
+	// three CI customizations this fork already carried on edge-integration and
+	// deliberately retains:
 	//   1. 'scripts/runtime-tmux-tests.manifest' in the integration path filter
 	//   2. golangci-lint cache restored on the exact key only (no restore-keys
 	//      fallback) — a broad prefix re-poisoned the cache with an SA5011
@@ -30,9 +31,9 @@ const (
 	//   3. the cmd-gc-productmetrics-testhook job
 	// Neither side's pre-merge hash is correct here: the guard covers the MERGED
 	// workflow, which is neither upstream's nor ours. Recomputed from it.
-	expectedCIExecutionHash      = "81a5e5802ff7656161f039aa088bb02f3fa80f1d7559846d6333034f82298b32"
+	expectedCIExecutionHash      = "b4cd6e81de6d0bdecea58d2f62ab68f8046b23dd5d46e5e7e7a84a234cae2f28"
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
-	expectedNightlyExecutionHash = "4b17e6d5c9c6c13c0935051aff0c50ddbbc6b6c5aa10947ed4447d25c29a2a23" // reviewed delta: BD_VERSION v1.1.0 -> v1.2.2 (beads pin hotfix)
+	expectedNightlyExecutionHash = "bb189242fe7f197de366d1b3a6a42227a8ee55f7a8b14c5f9cc3c9387830755f" // reviewed delta: BD_VERSION v1.2.2 -> v1.3.0 (beads pin hotfix)
 	expectedSetupActionHash      = "b7864038195cd054aee7fccfa903cab335b375bcab1a35239c17c5da7d32c07e"
 )
 

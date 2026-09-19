@@ -886,7 +886,7 @@ func TestBeadOutcomeFailedRetryAttemptExemptionAndOptInTrim(t *testing.T) {
 	}
 }
 
-func TestSkipOpenScopeMembersBatchesDependencyChecksAndUpdates(t *testing.T) {
+func TestSkipOpenScopeMembersBatchesDependencyChecksAndCloses(t *testing.T) {
 	t.Parallel()
 
 	store := &scopeSkipBatchStore{MemStore: beads.NewMemStore()}
@@ -974,13 +974,13 @@ func TestSkipOpenScopeMembersBatchesDependencyChecksAndUpdates(t *testing.T) {
 		t.Fatalf("DepListBatch calls = %d, want 2 dependency waves", store.depListBatchCalls)
 	}
 	if store.updateCalls != 0 {
-		t.Fatalf("Update calls = %d, want 0 when batch update is available", store.updateCalls)
+		t.Fatalf("Update calls = %d, want 0 when batch close is available", store.updateCalls)
 	}
-	if store.updateAllCalls != 2 {
-		t.Fatalf("UpdateAll calls = %d, want 2 dependency waves", store.updateAllCalls)
+	if store.closeAllCalls != 2 {
+		t.Fatalf("CloseAll calls = %d, want 2 dependency waves", store.closeAllCalls)
 	}
-	if got := []int{len(store.updateAllIDs[0]), len(store.updateAllIDs[1])}; !slices.Equal(got, []int{2, 1}) {
-		t.Fatalf("UpdateAll wave sizes = %v, want [2 1]", got)
+	if got := []int{len(store.closeAllIDs[0]), len(store.closeAllIDs[1])}; !slices.Equal(got, []int{2, 1}) {
+		t.Fatalf("CloseAll wave sizes = %v, want [2 1]", got)
 	}
 	for _, beadID := range []string{futureMember.ID, futureControl.ID, independent.ID} {
 		member := mustGetBead(t, store, beadID)
@@ -2066,8 +2066,8 @@ type scopeSkipBatchStore struct {
 	depListCalls      int
 	depListBatchCalls int
 	updateCalls       int
-	updateAllCalls    int
-	updateAllIDs      [][]string
+	closeAllCalls     int
+	closeAllIDs       [][]string
 }
 
 type scopeBodyVanishAfterFirstResolveStore struct {
@@ -2129,17 +2129,10 @@ func (s *scopeSkipBatchStore) Update(id string, opts beads.UpdateOpts) error {
 	return s.MemStore.Update(id, opts)
 }
 
-func (s *scopeSkipBatchStore) UpdateAll(ids []string, opts beads.UpdateOpts) (int, error) {
-	s.updateAllCalls++
-	s.updateAllIDs = append(s.updateAllIDs, slices.Clone(ids))
-	updated := 0
-	for _, id := range ids {
-		if err := s.MemStore.Update(id, opts); err != nil {
-			return updated, err
-		}
-		updated++
-	}
-	return updated, nil
+func (s *scopeSkipBatchStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	s.closeAllCalls++
+	s.closeAllIDs = append(s.closeAllIDs, slices.Clone(ids))
+	return s.MemStore.CloseAll(ids, metadata)
 }
 
 func (s *scopeBodyVanishAfterFirstResolveStore) List(query beads.ListQuery) ([]beads.Bead, error) {

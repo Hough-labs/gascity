@@ -39,14 +39,23 @@ func TestBDVersionPins(t *testing.T) {
 		t.Fatal("deps.env missing BD_CURRENT_VERSION (the bleeding-edge contract-matrix cell)")
 	}
 
-	// The current cell has no release tarball, so it is built from a pinned beads
-	// commit. A non-deterministic ref (branch name, short SHA) would make the cell
+	// The current cell is built from a pinned beads commit independently of the
+	// release archive. A non-deterministic ref (branch name, short SHA) would make the cell
 	// irreproducible; require a full 40-char commit SHA.
 	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(bdCurrentRef) {
 		t.Fatalf("deps.env BD_CURRENT_REF = %q, want a full 40-char gastownhall/beads commit SHA", bdCurrentRef)
 	}
 	if !regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`).MatchString(bdCurrent) {
 		t.Fatalf("deps.env BD_CURRENT_VERSION = %q, want a semver token", bdCurrent)
+	}
+	// The CLI and native library must carry the same schema catalog.
+	goMod := readFile(t, root, "go.mod")
+	match := regexp.MustCompile(`(?m)^\s*github\.com/steveyegge/beads\s+(v\S+)\s*$`).FindStringSubmatch(goMod)
+	if match == nil || match[1] != bdCurrent {
+		t.Fatalf("go.mod Beads pin must equal BD_CURRENT_VERSION %q", bdCurrent)
+	}
+	if !strings.Contains(readFile(t, root, "contrib/k8s/Dockerfile.agent"), "ARG BD_SOURCE_REF="+bdCurrentRef) {
+		t.Fatal("agent image Beads source must equal BD_CURRENT_REF")
 	}
 
 	// Anchor roles, kept as distinct contracts so a promotion cannot quietly
