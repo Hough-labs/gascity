@@ -16,6 +16,7 @@ func TestCommandDoctorChecksWarmupEligibleDefaultsFalse(t *testing.T) {
 		&jsonlArchiveDoctorCheck{},
 		&mcpConfigDoctorCheck{},
 		&mcpSharedTargetDoctorCheck{},
+		&routedToHumanCheck{},
 		&sessionModelDoctorCheck{},
 		&v2RoutedToNamespaceCheck{},
 		&workOptionMetadataMigrationCheck{},
