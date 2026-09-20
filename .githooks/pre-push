@@ -63,6 +63,16 @@ fi
 # cmd/gc excluded plus the sharded packages — and cmd/gc stays out of it
 # deliberately: at bounded concurrency it is green, so it costs ~24 minutes to
 # learn nothing that CI's shard matrix does not already cover.
+
+# The race detector runs FIRST, on both platforms, and is the only lane in this
+# repo that carries -race at all (gascity-tvwi). Two reasons for the ordering:
+# it is the cheap lane (~2 minutes against ./internal/api, versus ~20 for the
+# platform suite), so a reintroduced race fails the push fast; and it is not
+# platform-specific -- a data race is a property of the code, not of Darwin.
+# `set -e` above aborts the push if it fails. Scope lives in $(RACE_PKGS) in
+# the Makefile, not here.
+make test-race
+
 case "$(uname -s)" in
   Darwin)
     exec make test-mac

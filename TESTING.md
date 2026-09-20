@@ -705,6 +705,10 @@ make test-integration-shards-parallel
 
 # Fast + process-backed cmd/gc + integration shards.
 make test-local-full-parallel
+
+# The race detector over $(RACE_PKGS) — the only lane that passes -race.
+# See "The race lane" below.
+make test-race
 ```
 
 By default, the local runners bound concurrency by both detected CPUs and
@@ -1815,6 +1819,84 @@ source of truth.
 2. If the provider has lifecycle dependencies (startup ordering, shutdown
    sequencing), add a coordination test using the `exec:<spy>` pattern
 3. Update this table
+
+## The race lane
+
+`make test-race` is the only lane in this repo that passes `-race`. It runs the
+detector over `$(RACE_PKGS)` and `.githooks/pre-push` invokes it on every
+platform, before the platform suite.
+
+**Why it is a separate lane.** Until it existed the Makefile contained no
+`-race` anywhere, so `make test`, `make test-mac` and every sharded target ran
+without the detector. Four real data races in `internal/api`'s test doubles
+therefore survived indefinitely (gascity-lzzj): they were not flaky in the
+gate, they were invisible to it. The gap was structural, not a tuning problem.
+
+**Why it runs first.** A data race is a property of the code, not of the
+platform, so the lane sits outside the `uname` switch — and since both platform
+branches `exec` their lane, anything placed after the switch would never run.
+It is also the cheap check (~2.5 minutes against the current `$(RACE_PKGS)`,
+versus ~20 for the Darwin suite), so a reintroduced race fails the push fast.
+
+**Why `-p` is lower here.** `GATE_RACE_P` is 2, not `GATE_TEST_P`'s 4. The
+detector costs memory, not just time: measured on hammer, the
+race-instrumented `internal/docgen` binary alone resident-sets ~1.8 GiB. The
+`-p × -parallel ≈ cores` rule that sizes the uninstrumented sweep is the wrong
+bound for an instrumented one.
+
+**Scope.** `$(RACE_PKGS)` holds the packages that have had a real race and are
+green under `-race` now — today `./internal/api`, `./internal/runtime/t3bridge`
+and `./internal/supervisor`. Extend it the moment a race is found anywhere
+else: that package joins the lane in the same commit as its fix.
+
+The whole sweep is *not* the default, and the reason is not cost. Two full
+`-race` passes over `$(UNIT_PKGS_SWEEP)` (179 packages) were measured on hammer
+at `-p=2` on 2026-09-20:
+
+| Run | Wall | Result |
+| --- | --- | --- |
+| 1 | 670s | 160 ok, 18 no test files, 1 fail — `internal/runtime/t3bridge` |
+| 2 | 635s | 160 ok, 18 no test files, 1 fail — `internal/supervisor` |
+
+Same tree, same command, a **different package red each time**. Reproduce with:
+
+```bash
+make test-race RACE_PKGS="$(go list ./... | grep -v -E '/(cmd/gc|examples/gastown|examples/bd/dolt|scripts)$')"
+```
+
+That variance is the argument, not the runtime. Neither run alone found both
+races, so neither run alone was evidence of anything; a sweep that reds on a
+different package per run cannot be a gate. This lane blocks every push, and a
+race gate that reds intermittently is how a repo learns to reach for
+`--no-verify` — the exact failure this lane exists to undo, since pushes here
+ran with `--no-verify` from 2026-08-18 until `c2709323e`. Widening is tracked
+in gascity-ujru; the prerequisite is repeated green full sweeps.
+
+**What the guards pin.** `scripts/makefile_race_lane_test.go` fails the build
+if the recipe stops passing `-race`, stops running `$(RACE_PKGS)`, stops taking
+a push-gate slot, drops `./internal/api` from the list, or if the hook stops
+invoking the lane ahead of the platform switch. The guards are about the
+*wiring*; which packages are in scope is a judgement call that lives in
+`$(RACE_PKGS)`.
+
+**Writing tests that survive it.** The races found so far were all one shape:
+a test goroutine reading state that a handler goroutine was still writing. The
+package-local answers already exist — use them rather than inventing another:
+
+| Shared thing | Use |
+| --- | --- |
+| HTTP response body being streamed | `newSyncResponseRecorder` + `waitForRecorderSubstring` |
+| A counter a handler bumps | a mutex-guarded accessor (`fakeState.PokeCount`) |
+| A `log` sink you poll | `syncLogBuffer`, not a bare `bytes.Buffer` |
+| A knob production code reads | pass it as an argument; do not shrink a package var |
+
+The last row is the one that bites hardest, and it is the majority of what the
+sweeps found: a package var that exists only "so tests can shrink it" is shared
+mutable state. The reader that races it does not have to be in the same test —
+it can be a `t.Parallel()` sibling (gascity-cvb5) or a goroutine leaked by an
+*earlier*, already-finished test (gascity-20h2). Give each test its own value
+instead: an argument (`latestSeqWithBackoff`) or a per-instance field
+(`StoreMaintenanceLoop.smokeTimeout`).
 
 ## Test deadline rule
 

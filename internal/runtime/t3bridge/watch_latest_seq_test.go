@@ -8,19 +8,15 @@ import (
 	"time"
 )
 
-// shrinkRetryBackoff makes latestSeqWithBackoff's waits negligible for tests and
-// restores the production value on cleanup.
-func shrinkRetryBackoff(t *testing.T) {
-	t.Helper()
-	prev := latestSeqRetryInitialBackoff
-	latestSeqRetryInitialBackoff = time.Millisecond
-	t.Cleanup(func() { latestSeqRetryInitialBackoff = prev })
-}
+// testRetryBackoff is the negligible inter-attempt wait these tests pass to
+// latestSeqWithBackoff. It is an argument rather than a shrunk package var
+// because the var was shared mutable state: writing it raced a leaked
+// event-watcher goroutine still reading it (gascity-20h2).
+const testRetryBackoff = time.Millisecond
 
 func TestLatestSeqWithBackoffRetriesThenSucceeds(t *testing.T) {
-	shrinkRetryBackoff(t)
 	calls := 0
-	seq, err := latestSeqWithBackoff(context.Background(), func() (uint64, error) {
+	seq, err := latestSeqWithBackoff(context.Background(), testRetryBackoff, func() (uint64, error) {
 		calls++
 		if calls < 3 {
 			return 0, fmt.Errorf("transient hiccup %d", calls)
@@ -39,11 +35,10 @@ func TestLatestSeqWithBackoffRetriesThenSucceeds(t *testing.T) {
 }
 
 func TestLatestSeqWithBackoffHonorsContextCancel(t *testing.T) {
-	shrinkRetryBackoff(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	calls := 0
-	_, err := latestSeqWithBackoff(ctx, func() (uint64, error) {
+	_, err := latestSeqWithBackoff(ctx, testRetryBackoff, func() (uint64, error) {
 		calls++
 		return 0, errors.New("always fails")
 	})
@@ -56,9 +51,8 @@ func TestLatestSeqWithBackoffHonorsContextCancel(t *testing.T) {
 }
 
 func TestLatestSeqWithBackoffGivesUpAfterMaxAttempts(t *testing.T) {
-	shrinkRetryBackoff(t)
 	calls := 0
-	_, err := latestSeqWithBackoff(context.Background(), func() (uint64, error) {
+	_, err := latestSeqWithBackoff(context.Background(), testRetryBackoff, func() (uint64, error) {
 		calls++
 		return 0, fmt.Errorf("attempt %d", calls)
 	})

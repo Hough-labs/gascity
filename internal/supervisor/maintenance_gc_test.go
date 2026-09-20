@@ -168,13 +168,12 @@ func TestRunDoltGC_SmokeSQLError_ReturnsStageSmokeTest(t *testing.T) {
 
 func TestRunDoltGC_SmokeDeadlineExceeded_ReturnsStageSmokeTest(t *testing.T) {
 	t.Parallel()
-	// Override the smoke timeout to something small; smoke takes longer.
-	orig := maintenanceSmokeTimeout
-	maintenanceSmokeTimeout = 10 * time.Millisecond
-	t.Cleanup(func() { maintenanceSmokeTimeout = orig })
-
 	ops := &fakeDoltOps{smokeDelay: 100 * time.Millisecond}
 	loop := newGCTestLoop(t, config.DoltMaintenance{Enabled: true, GCTimeout: "1s"}, ops)
+	// Shorten the smoke timeout on THIS loop only; smoke takes longer. Set
+	// per-loop rather than on a package var, which this t.Parallel() test used
+	// to race against the other parallel runDoltGC tests (gascity-cvb5).
+	loop.smokeTimeout = 10 * time.Millisecond
 
 	err := loop.runDoltGC(context.Background())
 	var me *MaintenanceError

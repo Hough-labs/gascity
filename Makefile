@@ -157,7 +157,7 @@ endif
 endif
 endif
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-race test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 
 ## build: compile gc binary with version metadata
@@ -661,6 +661,69 @@ test-mac: test-fsys-darwin-compile
 				./scripts/test-go-test-shard "$$p" "$$s" $(SHARDED_UNIT_TOTAL) || exit 1; \
 			done; \
 		done'
+
+## RACE_PKGS: the packages `make test-race` runs the detector over.
+##
+## The race detector is absent from every other lane, which is why the
+## internal/api test-double races in gascity-lzzj survived indefinitely: the
+## gate structurally could not observe them. It is not free, so this lane is
+## scoped rather than universal.
+##
+## The list is the packages that have had a real race AND are verified green
+## under repeated -race runs:
+##
+##   internal/api            -- all four gascity-lzzj races. Its handlers do
+##                              real work on background goroutines (async
+##                              session create, SSE/peek streaming, late
+##                              provider results), so its tests are the ones
+##                              sharing mutable state across goroutines.
+##                              124s with -race against 63s without.
+##   internal/runtime/t3bridge -- gascity-20h2: a test shrank a package-level
+##                              backoff that a leaked event-watcher goroutine
+##                              from an earlier test was still reading. 27s.
+##   internal/supervisor     -- gascity-cvb5: two t.Parallel() runDoltGC tests
+##                              shared the package-level smoke timeout, one
+##                              writing it while the other read it through
+##                              production code. 3s.
+##
+## WHY NOT THE WHOLE SWEEP -- and the reason is NOT cost. Two full -race passes
+## over $(UNIT_PKGS_SWEEP) were measured on hammer 2026-09-20 at -p=2:
+##
+##   run 1: 670s, 160 ok, 18 no-test-files, 1 fail -- internal/runtime/t3bridge
+##   run 2: 635s, 160 ok, 18 no-test-files, 1 fail -- internal/supervisor
+##
+## Same tree, same command, a DIFFERENT package red each time. Neither run
+## alone would have found both, and a sweep that reds on a different package
+## per run cannot be a gate. Reproduce with:
+##
+##   make test-race RACE_PKGS="$$(go list ./... | grep -v -E '/(cmd/gc|examples/gastown|examples/bd/dolt|scripts)$$$$')"
+##
+## That variance is the argument. This lane blocks every push, and a race gate
+## that reds intermittently is how a repo learns to reach for --no-verify --
+## the exact failure it exists to undo (pushes here ran with --no-verify from
+## 2026-08-18 until c2709323e). Widening is gascity-ujru; the prerequisite is
+## repeated green full sweeps, not a decision.
+##
+## Extend the list the moment a race is found anywhere else -- that package
+## joins the lane in the same commit as its fix, which is how t3bridge and
+## supervisor got here.
+RACE_PKGS ?= ./internal/api ./internal/runtime/t3bridge ./internal/supervisor
+
+## GATE_RACE_P: -p for the race lane, smaller than $(GATE_TEST_P) on purpose.
+## The detector costs 5-10x memory, not just time: measured on hammer the
+## race-instrumented internal/docgen binary alone resident-sets ~1.8 GiB, so
+## the sweep's four live binaries is the wrong bound for this lane even though
+## it is the right one for an uninstrumented run. Two keeps the lane's
+## footprint bounded while the machine is also carrying the push-gate slot.
+GATE_RACE_P ?= 2
+
+## test-race: run the race detector over $(RACE_PKGS).
+## Slot-capped like the other top-level lanes so it cannot stack on a
+## concurrent gate -- see scripts/gate-slot-run. Wired into .githooks/pre-push
+## ahead of the platform lane: it is the cheaper check, so a reintroduced race
+## fails the push in ~2 minutes instead of behind a 20-minute suite.
+test-race:
+	./scripts/gate-slot-run test-race $(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-race -- -race -p=$(GATE_RACE_P) -parallel=$(GATE_TEST_PARALLEL) -count=1 -timeout 15m $(RACE_PKGS)
 
 LOCAL_TEST_JOBS ?= $(shell ./scripts/test-local-job-count)
 

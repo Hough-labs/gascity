@@ -1812,8 +1812,13 @@ func (p *Provider) refreshAssignmentProjection(threadID string, envelope Startup
 }
 
 // latestSeqRetryInitialBackoff is the first wait between LatestSeq retries; it
-// doubles each attempt. A package var so tests can shrink it.
-var latestSeqRetryInitialBackoff = 100 * time.Millisecond
+// doubles each attempt.
+//
+// A const, and passed in as an argument below, deliberately: it used to be a
+// package var "so tests can shrink it", and a test writing it raced a leaked
+// event-watcher goroutine from an earlier test that was still reading it
+// (gascity-20h2). A caller-supplied value has no shared cell to race.
+const latestSeqRetryInitialBackoff = 100 * time.Millisecond
 
 // latestSeqWithBackoff resolves the current head sequence, retrying a transient
 // read failure with context-aware exponential backoff before giving up. Watch
@@ -1822,9 +1827,12 @@ var latestSeqRetryInitialBackoff = 100 * time.Millisecond
 // disable the session's only event-projection goroutine. It returns the context
 // error if canceled while waiting, or the last read error after exhausting the
 // attempt budget.
-func latestSeqWithBackoff(ctx context.Context, latest func() (uint64, error)) (uint64, error) {
+//
+// initialBackoff is the first inter-attempt wait; production passes
+// latestSeqRetryInitialBackoff and tests pass a negligible value of their own.
+func latestSeqWithBackoff(ctx context.Context, initialBackoff time.Duration, latest func() (uint64, error)) (uint64, error) {
 	const maxAttempts = 5
-	backoff := latestSeqRetryInitialBackoff
+	backoff := initialBackoff
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		seq, err := latest()
@@ -1871,7 +1879,7 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 	// event-projection goroutine — so retry with context-aware backoff and log
 	// the terminal give-up so operators can tell a dead watcher from a healthy
 	// idle one.
-	afterSeq, err := latestSeqWithBackoff(ctx, recorder.LatestSeq)
+	afterSeq, err := latestSeqWithBackoff(ctx, latestSeqRetryInitialBackoff, recorder.LatestSeq)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "t3bridge: event watcher for %q exiting — could not resolve latest seq: %v\n", providerName, err) //nolint:errcheck // best-effort debug logging
 		return

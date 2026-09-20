@@ -737,7 +737,7 @@ install_guard_hook() {
     cp "$LIB" "$repo/scripts/push-ownership-guard.sh"
     cp "$REPO_ROOT/.githooks/pre-push" "$repo/.githooks/pre-push"
     chmod +x "$repo/.githooks/pre-push"
-    printf 'test-fast-parallel:\n\t@true\n\ntest-mac:\n\t@true\n' > "$repo/Makefile"
+    printf 'test-race:\n\t@true\n\ntest-fast-parallel:\n\t@true\n\ntest-mac:\n\t@true\n' > "$repo/Makefile"
     git -C "$repo" config core.hooksPath .githooks
 }
 

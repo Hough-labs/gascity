@@ -44,10 +44,15 @@ const (
 	maintenanceSmokeTable = "issues"
 )
 
-// maintenanceSmokeTimeout caps the post-gc SELECT COUNT(*) probe. It is
-// a var (not const) so tests can shorten it; production keeps the 5 s
-// value mandated by design D5.
-var maintenanceSmokeTimeout = 5 * time.Second
+// maintenanceSmokeTimeout caps the post-gc SELECT COUNT(*) probe; production
+// keeps the 5 s value mandated by design D5.
+//
+// A const, and carried per-loop in StoreMaintenanceLoop.smokeTimeout, on
+// purpose: it used to be a var "so tests can shorten it", and two parallel
+// runDoltGC tests raced on that one cell -- one writing it while the other
+// read it through production code (gascity-cvb5). A per-loop field gives each
+// test its own.
+const maintenanceSmokeTimeout = 5 * time.Second
 
 // MaintenanceRun summarizes one completed (or failed) maintenance run.
 // Stage is "done" for successful runs and names the failing phase
@@ -179,6 +184,11 @@ type StoreMaintenanceLoop struct {
 	diskMinFreeBytes  int64
 	diskWarnFreeBytes int64
 
+	// smokeTimeout caps the post-gc smoke probe. Defaults to
+	// maintenanceSmokeTimeout; tests in this package set it per loop rather
+	// than mutating a shared package var (gascity-cvb5).
+	smokeTimeout time.Duration
+
 	// mu is the in-process maintenance lease. runOnce and TriggerNow hold
 	// it for the duration of a single maintenance cycle; each contends on
 	// the same mutex so the manual-override API returns 409 when the
@@ -248,6 +258,7 @@ func NewStoreMaintenanceLoop(deps StoreMaintenanceLoopDeps) *StoreMaintenanceLoo
 		diskMinFreeBytes:  deps.DiskMinFreeBytes,
 		diskWarnFreeBytes: deps.DiskWarnFreeBytes,
 		lastRunAt:         deps.LastRunAt,
+		smokeTimeout:      maintenanceSmokeTimeout,
 		history:           make([]MaintenanceRun, 0, maintenanceHistorySize),
 	}
 }
@@ -623,7 +634,7 @@ func (m *StoreMaintenanceLoop) runDoltGC(ctx context.Context) error {
 		return &MaintenanceError{Stage: "gc", Err: err}
 	}
 
-	smokeCtx, cancelSmoke := context.WithTimeout(ctx, maintenanceSmokeTimeout)
+	smokeCtx, cancelSmoke := context.WithTimeout(ctx, m.smokeTimeout)
 	defer cancelSmoke()
 	count, err := ops.SmokeCount(smokeCtx)
 	if err != nil {
