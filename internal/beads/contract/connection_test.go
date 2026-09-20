@@ -1190,3 +1190,34 @@ func TestResolveDoltConnectionTargetManagedCity_EnvOverrideAppliesToReachability
 		t.Fatalf("ResolveDoltConnectionTarget() error = %v, want unavailable (override routed liveness probe elsewhere)", err)
 	}
 }
+
+func TestProbeDialTimeoutScalesWithHostClass(t *testing.T) {
+	// A loopback endpoint answers in microseconds, so it keeps the tight budget
+	// that stops a down local server from stalling the CLI. A non-loopback
+	// endpoint must survive one TCP SYN retransmit (initial RTO ~1s), so a
+	// sub-second budget would reject a reachable remote endpoint as unavailable.
+	tests := []struct {
+		name string
+		host string
+		want time.Duration
+	}{
+		{name: "ipv4 loopback", host: "127.0.0.1", want: loopbackProbeTimeout},
+		{name: "secondary loopback", host: "127.0.0.2", want: loopbackProbeTimeout},
+		{name: "localhost", host: "localhost", want: loopbackProbeTimeout},
+		{name: "empty host is local", host: "", want: loopbackProbeTimeout},
+		{name: "ipv6 loopback", host: "::1", want: loopbackProbeTimeout},
+		{name: "private lan", host: "10.77.100.2", want: remoteProbeTimeout},
+		{name: "routable", host: "192.0.2.10", want: remoteProbeTimeout},
+		{name: "named remote", host: "anvil", want: remoteProbeTimeout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := probeDialTimeout(tt.host); got != tt.want {
+				t.Fatalf("probeDialTimeout(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
+	}
+	if remoteProbeTimeout <= time.Second {
+		t.Fatalf("remoteProbeTimeout = %v; must exceed the ~1s initial SYN retransmit RTO", remoteProbeTimeout)
+	}
+}

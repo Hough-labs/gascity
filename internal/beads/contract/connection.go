@@ -719,11 +719,38 @@ func contractPIDAlive(pid int) bool {
 	return pidutil.Alive(pid)
 }
 
+// Reachability-probe dial budgets, by host class.
+//
+// The 250ms budget predates GC_DOLT_HOST: it was written when this probe was
+// hardcoded to 127.0.0.1, where a live listener answers in microseconds and a
+// tight budget keeps a *down* local server from stalling the CLI. Allowing the
+// host to be overridden kept that loopback-era budget, which is too tight for a
+// non-loopback endpoint: such a dial must survive one TCP SYN retransmit, whose
+// initial RTO is ~1s. Measured against a live listener on this host's own
+// WireGuard interface, p50/p95 are well under a millisecond but the tail reaches
+// 1.0s on an *idle* machine, so 250ms rejects a reachable endpoint outright.
+//
+// That misreads as "dolt runtime state unavailable", and for a non-loopback host
+// it is the only way to get there: managedCityHostRequiresLocalPID skips the PID
+// check for remote hosts, leaving port reachability as the sole validity signal.
+const (
+	loopbackProbeTimeout = 250 * time.Millisecond
+	remoteProbeTimeout   = 2 * time.Second
+)
+
+// probeDialTimeout returns the reachability-probe dial budget for host.
+func probeDialTimeout(host string) time.Duration {
+	if DoltHostIsLocal(host) {
+		return loopbackProbeTimeout
+	}
+	return remoteProbeTimeout
+}
+
 func contractPortReachable(host, port string) bool {
 	if strings.TrimSpace(port) == "" {
 		return false
 	}
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 250*time.Millisecond)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), probeDialTimeout(host))
 	if err != nil {
 		return false
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -456,7 +457,9 @@ func TestAgentOutputStreamNewTurns(t *testing.T) {
 
 	srv := newServerWithSearchPaths(state, searchBase)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Hang backstop only: the stream is torn down by the explicit cancel() below,
+	// so this must outlast every testutil.GoroutineRaceTimeout wait that follows.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*testutil.GoroutineRaceTimeout)
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
@@ -468,7 +471,7 @@ func TestAgentOutputStreamNewTurns(t *testing.T) {
 		close(done)
 	}()
 
-	if body := waitForRecorderSubstring(t, rec, "first", time.Second); !strings.Contains(body, "first") {
+	if body := waitForRecorderSubstring(t, rec, "first", testutil.GoroutineRaceTimeout); !strings.Contains(body, "first") {
 		t.Fatalf("stream body missing initial turn: %s", body)
 	}
 
@@ -488,7 +491,7 @@ func TestAgentOutputStreamNewTurns(t *testing.T) {
 
 	// fsnotify should wake this quickly, but keep enough budget for the
 	// fallback poll path in environments where file watching is unavailable.
-	body := waitForRecorderSubstring(t, rec, "second", 3*time.Second)
+	body := waitForRecorderSubstring(t, rec, "second", testutil.GoroutineRaceTimeout)
 	cancel()
 	<-done
 
@@ -583,7 +586,9 @@ func TestAgentOutputStreamStoppedAgentCommitsStatusHeader(t *testing.T) {
 func TestAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *testing.T) {
 	fixture := newGeminiAgentOutputStreamFixture(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Hang backstop only: the stream is torn down by the explicit cancel() below,
+	// so this must outlast every testutil.GoroutineRaceTimeout wait that follows.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*testutil.GoroutineRaceTimeout)
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
@@ -594,7 +599,7 @@ func TestAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *testing.T) 
 		close(done)
 	}()
 
-	if body := waitForRecorderSubstring(t, rec, "first-output", time.Second); !strings.Contains(body, "first-output") {
+	if body := waitForRecorderSubstring(t, rec, "first-output", testutil.GoroutineRaceTimeout); !strings.Contains(body, "first-output") {
 		t.Fatalf("stream body missing initial transcript turn: %s", body)
 	}
 
@@ -615,7 +620,7 @@ func TestAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *testing.T) 
 		Subject: sessionName,
 	})
 
-	if body := waitForRecorderSubstring(t, rec, "second-output", 1500*time.Millisecond); !strings.Contains(body, "second-output") {
+	if body := waitForRecorderSubstring(t, rec, "second-output", testutil.GoroutineRaceTimeout); !strings.Contains(body, "second-output") {
 		t.Fatalf("stream body missing rotated transcript after wake: %s", body)
 	}
 
@@ -629,7 +634,7 @@ func TestAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *testing.T) 
 		t.Fatalf("chtimes(updated second transcript): %v", err)
 	}
 
-	body := waitForRecorderSubstring(t, rec, "third-output", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "third-output", testutil.GoroutineRaceTimeout)
 
 	cancel()
 	<-done
@@ -643,7 +648,9 @@ func TestCityScopedAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *t
 	fixture := newGeminiAgentOutputStreamFixture(t)
 	h := newTestCityHandlerWith(t, fixture.state, fixture.srv)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Hang backstop only: the stream is torn down by the explicit cancel() below,
+	// so this must outlast every testutil.GoroutineRaceTimeout wait that follows.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*testutil.GoroutineRaceTimeout)
 	defer cancel()
 
 	req := httptest.NewRequest("GET", cityURL(fixture.state, "/agent/myrig/worker/output/stream"), nil).WithContext(ctx)
@@ -654,7 +661,7 @@ func TestCityScopedAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *t
 		close(done)
 	}()
 
-	if body := waitForRecorderSubstring(t, rec, "first-output", time.Second); !strings.Contains(body, "first-output") {
+	if body := waitForRecorderSubstring(t, rec, "first-output", testutil.GoroutineRaceTimeout); !strings.Contains(body, "first-output") {
 		t.Fatalf("city-scoped stream body missing initial transcript turn: %s", body)
 	}
 
@@ -675,7 +682,7 @@ func TestCityScopedAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *t
 		Subject: sessionName,
 	})
 
-	if body := waitForRecorderSubstring(t, rec, "second-output", 1500*time.Millisecond); !strings.Contains(body, "second-output") {
+	if body := waitForRecorderSubstring(t, rec, "second-output", testutil.GoroutineRaceTimeout); !strings.Contains(body, "second-output") {
 		t.Fatalf("city-scoped stream body missing rotated transcript after wake: %s", body)
 	}
 
@@ -689,7 +696,7 @@ func TestCityScopedAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *t
 		t.Fatalf("chtimes(updated second transcript): %v", err)
 	}
 
-	body := waitForRecorderSubstring(t, rec, "third-output", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "third-output", testutil.GoroutineRaceTimeout)
 
 	cancel()
 	<-done
@@ -708,7 +715,9 @@ func TestAgentOutputStreamWorkerOperationEventWakesPeekFallback(t *testing.T) {
 	srv := New(state)
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Hang backstop only: the stream is torn down by the explicit cancel() below,
+	// so this must outlast every testutil.GoroutineRaceTimeout wait that follows.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*testutil.GoroutineRaceTimeout)
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
@@ -719,7 +728,7 @@ func TestAgentOutputStreamWorkerOperationEventWakesPeekFallback(t *testing.T) {
 		close(done)
 	}()
 
-	if body := waitForRecorderSubstring(t, rec, "first output", 10*time.Second); !strings.Contains(body, "first output") {
+	if body := waitForRecorderSubstring(t, rec, "first output", testutil.GoroutineRaceTimeout); !strings.Contains(body, "first output") {
 		t.Fatalf("stream body missing initial output: %s", body)
 	}
 
@@ -730,7 +739,7 @@ func TestAgentOutputStreamWorkerOperationEventWakesPeekFallback(t *testing.T) {
 		Subject: "myrig--worker",
 	})
 
-	body := waitForRecorderSubstring(t, rec, "wake from runtime event", 10*time.Second)
+	body := waitForRecorderSubstring(t, rec, "wake from runtime event", testutil.GoroutineRaceTimeout)
 
 	cancel()
 	<-done
@@ -753,7 +762,9 @@ func TestAgentOutputStreamWorkerOperationSessionIDWakesPeekFallback(t *testing.T
 	srv := New(state)
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Hang backstop only: the stream is torn down by the explicit cancel() below,
+	// so this must outlast every testutil.GoroutineRaceTimeout wait that follows.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*testutil.GoroutineRaceTimeout)
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
@@ -764,7 +775,7 @@ func TestAgentOutputStreamWorkerOperationSessionIDWakesPeekFallback(t *testing.T
 		close(done)
 	}()
 
-	if body := waitForRecorderSubstring(t, rec, "first output", 10*time.Second); !strings.Contains(body, "first output") {
+	if body := waitForRecorderSubstring(t, rec, "first output", testutil.GoroutineRaceTimeout); !strings.Contains(body, "first output") {
 		t.Fatalf("stream body missing initial output: %s", body)
 	}
 
@@ -775,7 +786,7 @@ func TestAgentOutputStreamWorkerOperationSessionIDWakesPeekFallback(t *testing.T
 		Subject: info.ID,
 	})
 
-	body := waitForRecorderSubstring(t, rec, "wake from session id", 10*time.Second)
+	body := waitForRecorderSubstring(t, rec, "wake from session id", testutil.GoroutineRaceTimeout)
 
 	cancel()
 	<-done
