@@ -666,48 +666,51 @@ test-mac: test-fsys-darwin-compile
 ##
 ## The race detector is absent from every other lane, which is why the
 ## internal/api test-double races in gascity-lzzj survived indefinitely: the
-## gate structurally could not observe them. It is not free, so this lane is
-## scoped rather than universal.
+## gate structurally could not observe them.
 ##
-## The list is the packages that have had a real race AND are verified green
-## under repeated -race runs:
+## WHY THE WHOLE SWEEP -- and why it was not, until now. Cost was never the
+## blocker; run-to-run variance was. Five full -race passes over
+## $(UNIT_PKGS_SWEEP) (179 packages) have now been measured on hammer at -p=2:
 ##
-##   internal/api            -- all four gascity-lzzj races. Its handlers do
-##                              real work on background goroutines (async
-##                              session create, SSE/peek streaming, late
-##                              provider results), so its tests are the ones
-##                              sharing mutable state across goroutines.
-##                              124s with -race against 63s without.
-##   internal/runtime/t3bridge -- gascity-20h2: a test shrank a package-level
-##                              backoff that a leaked event-watcher goroutine
-##                              from an earlier test was still reading. 27s.
-##   internal/supervisor     -- gascity-cvb5: two t.Parallel() runDoltGC tests
-##                              shared the package-level smoke timeout, one
-##                              writing it while the other read it through
-##                              production code. 3s.
+##   2026-09-20, BEFORE the t3bridge/supervisor fixes landed:
+##     run 1: 670s, 160 ok, 18 no-test-files, 1 fail -- internal/runtime/t3bridge
+##     run 2: 635s, 160 ok, 18 no-test-files, 1 fail -- internal/supervisor
 ##
-## WHY NOT THE WHOLE SWEEP -- and the reason is NOT cost. Two full -race passes
-## over $(UNIT_PKGS_SWEEP) were measured on hammer 2026-09-20 at -p=2:
+##   2026-09-20, AFTER both fixes (dd1dbd88a), same tree:
+##     run 3: 662s, clean, 0 race reports          (idle box, load ~4/16)
+##     run 4: 591s, clean, 0 race reports          (idle box, load ~4/16)
+##     run 5: 613s, clean, 0 race reports          (load driven to ~12/16)
 ##
-##   run 1: 670s, 160 ok, 18 no-test-files, 1 fail -- internal/runtime/t3bridge
-##   run 2: 635s, 160 ok, 18 no-test-files, 1 fail -- internal/supervisor
+## Runs 1 and 2 reddened on a DIFFERENT package each -- that variance was the
+## argument against widening, and it is explained: each run surfaced one of two
+## real races, and neither race is present any more. Runs 3-5 are three
+## consecutive green sweeps on the fixed tree.
 ##
-## Same tree, same command, a DIFFERENT package red each time. Neither run
-## alone would have found both, and a sweep that reds on a different package
-## per run cannot be a gate. Reproduce with:
+## Run 5 matters more than 3 and 4. This box's documented failure mode is
+## load-coupled (TESTING.md, "Timing objectives and resource ratchets"), so an
+## idle green sweep is the weakest evidence for a gate that runs on every push
+## whatever else the machine is doing. Driving load to ~12/16 moved wall time by
+## ~20s and produced no failure, which is the property a push gate needs.
+##
+## THE TRADEOFF, stated rather than discovered: this lane runs BEFORE the
+## ~11-minute platform lane, so a reintroduced race now fails a push in ~10
+## minutes instead of ~2. That is the price of the detector seeing all 179
+## packages instead of 3. If a package turns out to be flaky under -race,
+## exclude it here BY NAME with a reason -- do not narrow the list wholesale
+## and do not reach for --no-verify (pushes here ran with --no-verify from
+## 2026-08-18 until c2709323e; this lane exists to undo that).
+##
+## Reproduce a single sweep with:
 ##
 ##   make test-race RACE_PKGS="$$(go list ./... | grep -v -E '/(cmd/gc|examples/gastown|examples/bd/dolt|scripts)$$$$')"
 ##
-## That variance is the argument. This lane blocks every push, and a race gate
-## that reds intermittently is how a repo learns to reach for --no-verify --
-## the exact failure it exists to undo (pushes here ran with --no-verify from
-## 2026-08-18 until c2709323e). Widening is gascity-ujru; the prerequisite is
-## repeated green full sweeps, not a decision.
-##
-## Extend the list the moment a race is found anywhere else -- that package
-## joins the lane in the same commit as its fix, which is how t3bridge and
-## supervisor got here.
-RACE_PKGS ?= ./internal/api ./internal/runtime/t3bridge ./internal/supervisor
+## The three packages that had real races -- internal/api (gascity-lzzj, four
+## test-double races), internal/runtime/t3bridge (gascity-20h2, a leaked
+## goroutine reading a package-level backoff a later test shrank) and
+## internal/supervisor (gascity-cvb5, two t.Parallel() tests sharing a
+## package-level timeout) -- are covered by the sweep like everything else and
+## no longer need naming here.
+RACE_PKGS ?= $(UNIT_PKGS_SWEEP)
 
 ## GATE_RACE_P: -p for the race lane, smaller than $(GATE_TEST_P) on purpose.
 ## The detector costs 5-10x memory, not just time: measured on hammer the
@@ -720,9 +723,11 @@ GATE_RACE_P ?= 2
 ## test-race: run the race detector over $(RACE_PKGS).
 ## Slot-capped like the other top-level lanes so it cannot stack on a
 ## concurrent gate -- see scripts/gate-slot-run. Wired into .githooks/pre-push
-## ahead of the platform lane: it is the cheaper check, so a reintroduced race
-## fails the push in ~2 minutes instead of behind the platform suite (measured
-## on the dd1dbd88a push: 2m01s for this lane, 11m for test-mac after it).
+## ahead of the platform lane, because a race is a property of the code rather
+## than of a platform. Since gascity-ujru widened $(RACE_PKGS) to the whole unit
+## sweep the lane is no longer the cheap check: it is ~10 minutes (591-662s over
+## five measured sweeps) against ~11m for test-mac behind it, so a push now
+## fails on a reintroduced race at roughly the 10-minute mark rather than at 2.
 test-race:
 	./scripts/gate-slot-run test-race $(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-race -- -race -p=$(GATE_RACE_P) -parallel=$(GATE_TEST_PARALLEL) -count=1 -timeout 15m $(RACE_PKGS)
 

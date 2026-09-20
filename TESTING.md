@@ -1835,9 +1835,12 @@ gate, they were invisible to it. The gap was structural, not a tuning problem.
 **Why it runs first.** A data race is a property of the code, not of the
 platform, so the lane sits outside the `uname` switch — and since both platform
 branches `exec` their lane, anything placed after the switch would never run.
-It is also the cheap check: on the `dd1dbd88a` push the lane took **2m01s**
-against the three packages in `$(RACE_PKGS)` and `test-mac` took **11m** after
-it, so a reintroduced race fails the push in the first two minutes.
+It is no longer the *cheap* check. When `$(RACE_PKGS)` was three packages the
+lane took **2m01s** on the `dd1dbd88a` push against `test-mac`'s **11m** behind
+it. Since gascity-ujru widened it to the whole unit sweep it is **~10 minutes**,
+so a reintroduced race now fails a push at roughly the ten-minute mark rather
+than at two. That is the price of the detector seeing all 179 packages instead
+of three, and it is a deliberate trade, not a regression.
 
 **Why `-p` is lower here.** `GATE_RACE_P` is 2, not `GATE_TEST_P`'s 4. The
 detector costs memory, not just time: measured on hammer, the
@@ -1845,40 +1848,57 @@ race-instrumented `internal/docgen` binary alone resident-sets ~1.8 GiB. The
 `-p × -parallel ≈ cores` rule that sizes the uninstrumented sweep is the wrong
 bound for an instrumented one.
 
-**Scope.** `$(RACE_PKGS)` holds the packages that have had a real race and are
-green under `-race` now — today `./internal/api`, `./internal/runtime/t3bridge`
-and `./internal/supervisor`. Extend it the moment a race is found anywhere
-else: that package joins the lane in the same commit as its fix.
+**Scope.** `$(RACE_PKGS)` defaults to `$(UNIT_PKGS_SWEEP)` — every unit package
+(179 of them), which is every package the fast lane runs minus `cmd/gc`, the
+`examples/` trees and `scripts`. It was not always: the lane shipped scoped to
+the three packages that had had a real race (`./internal/api`,
+`./internal/runtime/t3bridge`, `./internal/supervisor`), because cost was never
+the blocker but run-to-run variance was.
 
-The whole sweep is *not* the default, and the reason is not cost. Two full
-`-race` passes over `$(UNIT_PKGS_SWEEP)` (179 packages) were measured on hammer
-at `-p=2` on 2026-09-20:
+Five full `-race` passes over `$(UNIT_PKGS_SWEEP)` have been measured on hammer
+at `-p=2`, all on 2026-09-20:
 
-| Run | Wall | Result |
-| --- | --- | --- |
-| 1 | 670s | 160 ok, 18 no test files, 1 fail — `internal/runtime/t3bridge` |
-| 2 | 635s | 160 ok, 18 no test files, 1 fail — `internal/supervisor` |
+| Run | Tree | Load | Wall | Result |
+| --- | --- | --- | --- | --- |
+| 1 | before the t3bridge/supervisor fixes | idle | 670s | 1 fail — `internal/runtime/t3bridge` |
+| 2 | before the t3bridge/supervisor fixes | idle | 635s | 1 fail — `internal/supervisor` |
+| 3 | after both fixes (`dd1dbd88a`) | idle (~4/16) | 662s | clean, 0 race reports |
+| 4 | after both fixes | idle (~4/16) | 591s | clean, 0 race reports |
+| 5 | after both fixes | driven to ~12/16 | 613s | clean, 0 race reports |
 
-Same tree, same command, a **different package red each time**. Reproduce with:
+Runs 1 and 2 reddened on a **different package each**, and that variance — not
+the runtime — was the argument against widening. It is now explained rather than
+outstanding: each run surfaced one of two real races, and neither race exists
+any more. Runs 3–5 are three consecutive green sweeps on the fixed tree.
+
+Run 5 is the one that mattered. This box's documented failure mode is
+load-coupled (see "Timing objectives and resource ratchets"), so an idle green
+sweep is the weakest possible evidence for a gate that runs on every push
+whatever else the machine is doing. Driving load to ~12/16 moved wall time by
+about twenty seconds and produced no failure.
+
+Reproduce a single sweep with:
 
 ```bash
 make test-race RACE_PKGS="$(go list ./... | grep -v -E '/(cmd/gc|examples/gastown|examples/bd/dolt|scripts)$')"
 ```
 
-That variance is the argument, not the runtime. Neither run alone found both
-races, so neither run alone was evidence of anything; a sweep that reds on a
-different package per run cannot be a gate. This lane blocks every push, and a
-race gate that reds intermittently is how a repo learns to reach for
-`--no-verify` — the exact failure this lane exists to undo, since pushes here
-ran with `--no-verify` from 2026-08-18 until `c2709323e`. Widening is tracked
-in gascity-ujru; the prerequisite is repeated green full sweeps.
+If a package turns out to be flaky under `-race`, exclude it **by name with a
+reason** rather than narrowing the list wholesale — and do not reach for
+`--no-verify`. A race gate that reds intermittently is how a repo learns to
+bypass it, which is the exact failure this lane exists to undo: pushes here ran
+with `--no-verify` from 2026-08-18 until `c2709323e`.
 
 **What the guards pin.** `scripts/makefile_race_lane_test.go` fails the build
 if the recipe stops passing `-race`, stops running `$(RACE_PKGS)`, stops taking
-a push-gate slot, drops `./internal/api` from the list, or if the hook stops
-invoking the lane ahead of the platform switch. The guards are about the
-*wiring*; which packages are in scope is a judgement call that lives in
-`$(RACE_PKGS)`.
+a push-gate slot, drops `./internal/api` from the lane, or if the hook stops
+invoking the lane ahead of the platform switch. Now that the default is
+`$(UNIT_PKGS_SWEEP)` the `internal/api` floor cannot be checked by looking for a
+literal string, so the guard asserts the underlying property instead: it pulls
+the sweep's `grep -v -E` exclusion pattern out of the Makefile, compiles it, and
+fails if it would match `internal/api`. The guards are about the *wiring* and
+that one floor; which packages are otherwise in scope is a judgement call that
+lives in `$(RACE_PKGS)`.
 
 **Writing tests that survive it.** Every race found so far came from one test
 sharing mutable state with something running concurrently — sometimes a handler

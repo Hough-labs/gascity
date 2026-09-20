@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -45,6 +46,13 @@ func TestRaceLaneIsTheOnlyLaneCarryingTheDetector(t *testing.T) {
 // is where all four gascity-lzzj races were, so dropping it would leave the
 // lane wired up and green while covering nothing that ever broke. The list may
 // grow freely; it may not shrink past this.
+//
+// Since gascity-ujru the lane defaults to $(UNIT_PKGS_SWEEP) rather than an
+// explicit list, so the floor can no longer be checked by looking for a literal
+// "./internal/api". Naming the sweep satisfies the floor only because the sweep
+// is a superset — which is a property of the sweep's own exclusion pattern, not
+// of its name. So this asserts that property directly: whatever `go list ./...`
+// yields for internal/api must survive the filter.
 func TestRacePkgsCoversThePackageThatHadRaces(t *testing.T) {
 	makefile := readMakefile(t)
 
@@ -59,8 +67,39 @@ func TestRacePkgsCoversThePackageThatHadRaces(t *testing.T) {
 	}
 
 	pkgs := strings.Fields(line)
-	if !containsString(pkgs, "./internal/api") {
-		t.Fatalf("RACE_PKGS = %q, want it to still include ./internal/api (gascity-lzzj)", line)
+	if containsString(pkgs, "./internal/api") {
+		return // an explicit list that still names it
+	}
+	if !containsString(pkgs, "$(UNIT_PKGS_SWEEP)") {
+		t.Fatalf("RACE_PKGS = %q, want it to include ./internal/api (gascity-lzzj) "+
+			"either explicitly or via $(UNIT_PKGS_SWEEP)", line)
+	}
+
+	// $(UNIT_PKGS_SWEEP) is `go list ./...` minus a grep -v -E pattern. Pull the
+	// pattern out and prove it does not filter internal/api away.
+	sweepIdx := strings.Index(makefile, "UNIT_PKGS_SWEEP = ")
+	if sweepIdx < 0 {
+		t.Fatal("Makefile has no UNIT_PKGS_SWEEP definition")
+	}
+	sweep := makefile[sweepIdx:]
+	if nl := strings.IndexByte(sweep, '\n'); nl >= 0 {
+		sweep = sweep[:nl]
+	}
+	m := regexp.MustCompile(`grep -v -E '([^']*)'`).FindStringSubmatch(sweep)
+	if m == nil {
+		t.Fatalf("UNIT_PKGS_SWEEP = %q, want a grep -v -E '<pattern>' this test can check", sweep)
+	}
+	// The Makefile doubles $ for make; undo that to get the shell-level pattern.
+	pattern := strings.ReplaceAll(m[1], "$$", "$")
+	excluded, err := regexp.Compile(pattern)
+	if err != nil {
+		t.Fatalf("UNIT_PKGS_SWEEP exclusion pattern %q does not compile: %v", pattern, err)
+	}
+	const apiPkg = "github.com/gastownhall/gascity/internal/api"
+	if excluded.MatchString(apiPkg) {
+		t.Fatalf("RACE_PKGS is $(UNIT_PKGS_SWEEP) but its exclusion pattern %q drops %s "+
+			"(gascity-lzzj); the lane would be green while covering nothing that ever broke",
+			pattern, apiPkg)
 	}
 }
 
