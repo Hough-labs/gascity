@@ -1835,8 +1835,9 @@ gate, they were invisible to it. The gap was structural, not a tuning problem.
 **Why it runs first.** A data race is a property of the code, not of the
 platform, so the lane sits outside the `uname` switch — and since both platform
 branches `exec` their lane, anything placed after the switch would never run.
-It is also the cheap check (~2.5 minutes against the current `$(RACE_PKGS)`,
-versus ~20 for the Darwin suite), so a reintroduced race fails the push fast.
+It is also the cheap check: on the `dd1dbd88a` push the lane took **2m01s**
+against the three packages in `$(RACE_PKGS)` and `test-mac` took **11m** after
+it, so a reintroduced race fails the push in the first two minutes.
 
 **Why `-p` is lower here.** `GATE_RACE_P` is 2, not `GATE_TEST_P`'s 4. The
 detector costs memory, not just time: measured on hammer, the
@@ -1879,9 +1880,11 @@ invoking the lane ahead of the platform switch. The guards are about the
 *wiring*; which packages are in scope is a judgement call that lives in
 `$(RACE_PKGS)`.
 
-**Writing tests that survive it.** The races found so far were all one shape:
-a test goroutine reading state that a handler goroutine was still writing. The
-package-local answers already exist — use them rather than inventing another:
+**Writing tests that survive it.** Every race found so far came from one test
+sharing mutable state with something running concurrently — sometimes a handler
+goroutine the test itself started, sometimes a `t.Parallel()` sibling, sometimes
+a goroutine leaked by a test that had already finished. The package-local
+answers already exist — use them rather than inventing another:
 
 | Shared thing | Use |
 | --- | --- |
@@ -1890,13 +1893,14 @@ package-local answers already exist — use them rather than inventing another:
 | A `log` sink you poll | `syncLogBuffer`, not a bare `bytes.Buffer` |
 | A knob production code reads | pass it as an argument; do not shrink a package var |
 
-The last row is the one that bites hardest, and it is the majority of what the
-sweeps found: a package var that exists only "so tests can shrink it" is shared
-mutable state. The reader that races it does not have to be in the same test —
-it can be a `t.Parallel()` sibling (gascity-cvb5) or a goroutine leaked by an
-*earlier*, already-finished test (gascity-20h2). Give each test its own value
-instead: an argument (`latestSeqWithBackoff`) or a per-instance field
-(`StoreMaintenanceLoop.smokeTimeout`).
+The last row is the one that bites hardest, and it is what both full-sweep
+failures turned out to be: a package var that exists only "so tests can shrink
+it" is shared mutable state, and nothing about the test that writes it bounds
+who reads it. Give each test its own value instead — an argument
+(`latestSeqWithBackoff`, gascity-20h2) or a per-instance field
+(`StoreMaintenanceLoop.smokeTimeout`, gascity-cvb5). Both fixes delete the
+shared cell rather than locking it, so the race cannot come back under a
+different interleaving.
 
 ## Test deadline rule
 

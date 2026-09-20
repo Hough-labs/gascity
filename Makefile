@@ -721,7 +721,8 @@ GATE_RACE_P ?= 2
 ## Slot-capped like the other top-level lanes so it cannot stack on a
 ## concurrent gate -- see scripts/gate-slot-run. Wired into .githooks/pre-push
 ## ahead of the platform lane: it is the cheaper check, so a reintroduced race
-## fails the push in ~2 minutes instead of behind a 20-minute suite.
+## fails the push in ~2 minutes instead of behind the platform suite (measured
+## on the dd1dbd88a push: 2m01s for this lane, 11m for test-mac after it).
 test-race:
 	./scripts/gate-slot-run test-race $(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-race -- -race -p=$(GATE_RACE_P) -parallel=$(GATE_TEST_PARALLEL) -count=1 -timeout 15m $(RACE_PKGS)
 

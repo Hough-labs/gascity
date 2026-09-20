@@ -66,8 +66,9 @@ fi
 
 # The race detector runs FIRST, on both platforms, and is the only lane in this
 # repo that carries -race at all (gascity-tvwi). Two reasons for the ordering:
-# it is the cheap lane (~2 minutes against ./internal/api, versus ~20 for the
-# platform suite), so a reintroduced race fails the push fast; and it is not
+# it is the cheap lane -- measured 2m01s against the three packages in
+# $(RACE_PKGS) versus 11m for test-mac on the dd1dbd88a push -- so a
+# reintroduced race fails the push fast; and it is not
 # platform-specific -- a data race is a property of the code, not of Darwin.
 # `set -e` above aborts the push if it fails. Scope lives in $(RACE_PKGS) in
 # the Makefile, not here.
