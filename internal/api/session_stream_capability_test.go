@@ -2,14 +2,13 @@ package api
 
 import (
 	"context"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -24,7 +23,9 @@ func (h peekOnlyHandle) Peek(context.Context, int) (string, error) {
 func TestStreamSessionPeekAcceptsPeekCapability(t *testing.T) {
 	srv := New(newSessionFakeState(t))
 	info := session.Info{ID: "sess-1", Template: "probe", Provider: "claude"}
-	rec := httptest.NewRecorder()
+	// The streaming goroutine writes the body while this goroutine reads it, so
+	// the recorder has to be the locked one; a bare httptest.NewRecorder races.
+	rec := newSyncResponseRecorder()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -32,24 +33,18 @@ func TestStreamSessionPeekAcceptsPeekCapability(t *testing.T) {
 		srv.streamSessionPeek(ctx, rec, info, peekOnlyHandle{output: "hello from peek"})
 		close(done)
 	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
 
-	deadline := time.Now().Add(250 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if strings.Contains(rec.Body.String(), "hello from peek") {
-			if !strings.Contains(rec.Body.String(), `"provider":"claude"`) {
-				cancel()
-				<-done
-				t.Fatalf("stream body missing provider envelope: %s", rec.Body.String())
-			}
-			cancel()
-			<-done
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "hello from peek", testutil.GoroutineRaceTimeout)
+	if !strings.Contains(body, "hello from peek") {
+		t.Fatalf("stream body missing peek output: %s", body)
 	}
-	cancel()
-	<-done
-	t.Fatalf("stream body missing peek output: %s", rec.Body.String())
+	if !strings.Contains(body, `"provider":"claude"`) {
+		t.Fatalf("stream body missing provider envelope: %s", body)
+	}
 }
 
 type peekPendingHandle struct {
@@ -105,7 +100,9 @@ func TestStreamSessionPeekRawWorkerWakeEmitsPendingWithoutOutputChange(t *testin
 	handle := &peekPendingHandle{output: "steady output"}
 	rec := newSyncResponseRecorder()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Hang backstop only: the stream is torn down by the explicit cancel() below,
+	// so this must outlast every testutil.GoroutineRaceTimeout wait that follows.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*testutil.GoroutineRaceTimeout)
 	defer cancel()
 
 	done := make(chan struct{})
@@ -114,7 +111,7 @@ func TestStreamSessionPeekRawWorkerWakeEmitsPendingWithoutOutputChange(t *testin
 		close(done)
 	}()
 
-	if body := waitForRecorderSubstring(t, rec, "steady output", time.Second); !strings.Contains(body, "steady output") {
+	if body := waitForRecorderSubstring(t, rec, "steady output", testutil.GoroutineRaceTimeout); !strings.Contains(body, "steady output") {
 		t.Fatalf("stream body missing initial peek output: %s", body)
 	} else if !strings.Contains(body, `"provider":"claude"`) {
 		t.Fatalf("stream body missing provider envelope: %s", body)
@@ -131,7 +128,7 @@ func TestStreamSessionPeekRawWorkerWakeEmitsPendingWithoutOutputChange(t *testin
 		Subject: info.ID,
 	})
 
-	body := waitForRecorderSubstring(t, rec, "req-1", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "req-1", testutil.GoroutineRaceTimeout)
 
 	cancel()
 	<-done

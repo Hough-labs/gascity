@@ -26,6 +26,7 @@ import (
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -36,7 +37,11 @@ func newSessionFakeState(t *testing.T) *fakeState {
 	return fs
 }
 
-const testEventTimeout = 5 * time.Second
+// testEventTimeout bounds waits for events published by async handler
+// goroutines. TESTING.md "Test deadline rule" puts a 10s floor on any timer
+// that races a goroutine; widening is free because every waiter returns the
+// instant it matches, so only the failure path pays.
+const testEventTimeout = testutil.GoroutineRaceTimeout
 
 func sameCanonicalTestPath(got, want string) bool {
 	canonicalGot, gotErr := filepath.EvalSymlinks(got)
@@ -107,6 +112,26 @@ func waitForSessionCreateResult(t *testing.T, prov events.Provider, requestID st
 	}
 	t.Fatalf("timed out waiting for session create result")
 	return nil, nil
+}
+
+// waitForPokeCount waits for the state fake to observe at least want pokes and
+// returns the count it settled on.
+//
+// humaHandleSessionCreate emits the create-succeeded event BEFORE it calls
+// Poke, so waitForSessionCreateResult returning does not mean the poke has
+// landed -- reading the count straight after it is a lost race, not a
+// measurement.
+func waitForPokeCount(t *testing.T, fs *fakeState, want int) int {
+	t.Helper()
+
+	deadline := time.Now().Add(testutil.GoroutineRaceTimeout)
+	for time.Now().Before(deadline) {
+		if got := fs.PokeCount(); got >= want {
+			return got
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fs.PokeCount()
 }
 
 func TestWaitForSessionCreateResultMatchesRequestID(t *testing.T) {
@@ -670,6 +695,27 @@ func writeNamedSessionJSONL(t *testing.T, searchBase, workDir, fileName string, 
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// syncLogBuffer is a log sink that can be read while a background goroutine is
+// still writing to it. log.Logger serializes its own writers, but the test
+// goroutine's String() call is outside that lock, so an unguarded bytes.Buffer
+// races every late log line. Same discipline as syncResponseRecorder.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 type syncResponseRecorder struct {
@@ -2672,8 +2718,8 @@ func TestHandleSessionCreateAsync(t *testing.T) {
 	if success.Session.Alias != "sky" {
 		t.Fatalf("Alias = %q, want %q", success.Session.Alias, "sky")
 	}
-	if fs.pokeCount != 1 {
-		t.Fatalf("pokeCount = %d, want 1", fs.pokeCount)
+	if got := waitForPokeCount(t, fs, 1); got != 1 {
+		t.Fatalf("pokeCount = %d, want 1", got)
 	}
 }
 
@@ -2977,8 +3023,8 @@ func TestHandleProviderSessionCreateRejectsAsync(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "async session creation is only supported for configured agent templates") {
 		t.Fatalf("body = %q, want provider async guidance", w.Body.String())
 	}
-	if fs.pokeCount != 0 {
-		t.Fatalf("pokeCount = %d, want 0", fs.pokeCount)
+	if got := fs.PokeCount(); got != 0 {
+		t.Fatalf("pokeCount = %d, want 0", got)
 	}
 }
 
@@ -4890,7 +4936,7 @@ func TestHandleSessionMessageLogsLateProviderResultAfterTimeout(t *testing.T) {
 		sessionMessageAsyncTimeout = prevTimeout
 	})
 
-	var logs bytes.Buffer
+	var logs syncLogBuffer
 	oldOutput := log.Writer()
 	oldFlags := log.Flags()
 	log.SetOutput(&logs)

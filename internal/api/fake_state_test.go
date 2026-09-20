@@ -56,11 +56,17 @@ type fakeState struct {
 	allOrders         []orders.Order
 	services          workspacesvc.Registry
 	webhookDispatcher orderdispatch.Dispatcher // backs WebhookDispatchProvider; nil disables webhook dispatch
-	pokeCount         int
-	extmsgSvc         *extmsg.Services
-	adapterReg        *extmsg.AdapterRegistry
-	maintenance       MaintenanceProvider
-	usageSink         usage.Sink
+	// pokeMu guards pokeCount. Async handlers (humaHandleSessionCreate) call
+	// Poke from their own goroutine while the test goroutine asserts the count,
+	// so both sides synchronize -- the discipline syncResponseRecorder already
+	// applies to the response body. Read the count via PokeCount, never the
+	// field.
+	pokeMu      sync.Mutex
+	pokeCount   int
+	extmsgSvc   *extmsg.Services
+	adapterReg  *extmsg.AdapterRegistry
+	maintenance MaintenanceProvider
+	usageSink   usage.Sink
 	// scopedStoreFn backs ScopedStoreLike. Nil (the default) returns
 	// (nil, nil) — "existing isn't bd-CLI backed, keep using it directly" —
 	// matching the real implementation's answer for the MemStore fakes most
@@ -170,7 +176,20 @@ func (f *fakeState) OrdersAll() []orders.Order {
 	}
 	return f.autos
 }
-func (f *fakeState) Poke()                                  { f.pokeCount++ }
+
+func (f *fakeState) Poke() {
+	f.pokeMu.Lock()
+	defer f.pokeMu.Unlock()
+	f.pokeCount++
+}
+
+// PokeCount reports how many times Poke has been called.
+func (f *fakeState) PokeCount() int {
+	f.pokeMu.Lock()
+	defer f.pokeMu.Unlock()
+	return f.pokeCount
+}
+
 func (f *fakeState) ServiceRegistry() workspacesvc.Registry { return f.services }
 
 // WebhookDispatcher lets fakeState satisfy WebhookDispatchProvider so webhook

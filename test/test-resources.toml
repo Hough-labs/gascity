@@ -175,12 +175,12 @@ expires = "2026-10-01"
 scope = "all"
 resource = "fixed_sleep"
 baseline_calls = 432
-baseline_files = 162
+baseline_files = 161
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
 invariant = "tracked test source totals remain visible as audit evidence"
-resource_owner = "ga-80po0c.2 owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go); +1/+1 on 2026-08-27 owned by gascity-n17v (serializingExecutor.executeCtx in internal/runtime/tmux/new_session_guard_test.go, the file's single sleep: it is the occupancy window TestNewSessionSerializesCreationPerSocket measures, not a delay waiting for a condition. The test fans 12 concurrent NewSession calls at one socket and asserts in-flight creates never exceed 1; with a zero-width critical section an unserialized implementation serializes by accident and the test passes on the bug it exists to catch); +1/+1 on 2026-08-27 owned by gascity-n17v (waitForSession in internal/runtime/tmux/socket_clobber_integration_test.go, integration-tagged so it lands in scope=all only: the poll interval of a deadline-bounded retry loop that returns as soon as the session appears and t.Fatalf's at 10s, the shape already banked for gascity-4zf)"
+resource_owner = "ga-80po0c.2 owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go); +1/+1 on 2026-08-27 owned by gascity-n17v (serializingExecutor.executeCtx in internal/runtime/tmux/new_session_guard_test.go, the file's single sleep: it is the occupancy window TestNewSessionSerializesCreationPerSocket measures, not a delay waiting for a condition. The test fans 12 concurrent NewSession calls at one socket and asserts in-flight creates never exceed 1; with a zero-width critical section an unserialized implementation serializes by accident and the test passes on the bug it exists to catch); +1/+1 on 2026-08-27 owned by gascity-n17v (waitForSession in internal/runtime/tmux/socket_clobber_integration_test.go, integration-tagged so it lands in scope=all only: the poll interval of a deadline-bounded retry loop that returns as soon as the session appears and t.Fatalf's at 10s, the shape already banked for gascity-4zf); -0/-1 on 2026-09-20 owned by gascity-lzzj (internal/api/session_stream_capability_test.go loses its only sleep: TestStreamSessionPeekAcceptsPeekCapability's hand-rolled poll loop over an unsynchronized httptest recorder was the data race the bead exists to fix, and replacing it with the package's shared waitForRecorderSubstring helper moves the poll onto a sleep handler_sessions_test.go already owns. Calls are unchanged; the file drops out of the census)"
 migration_target = "P0.4a"
 expires = "2026-10-01"
 
@@ -216,12 +216,12 @@ expires = "2026-10-01"
 scope = "untagged"
 resource = "fixed_sleep"
 baseline_calls = 286
-baseline_files = 115
+baseline_files = 114
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-80po0c.2"
 invariant = "untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each owning test replaces elapsed wall time with its lifecycle signal; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go); +1/+1 on 2026-08-27 owned by gascity-n17v (serializingExecutor.executeCtx in internal/runtime/tmux/new_session_guard_test.go, the file's single sleep: it is the occupancy window TestNewSessionSerializesCreationPerSocket measures, not a delay waiting for a condition. The test fans 12 concurrent NewSession calls at one socket and asserts in-flight creates never exceed 1; with a zero-width critical section an unserialized implementation serializes by accident and the test passes on the bug it exists to catch)"
+resource_owner = "each owning test replaces elapsed wall time with its lifecycle signal; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go); +1/+1 on 2026-08-27 owned by gascity-n17v (serializingExecutor.executeCtx in internal/runtime/tmux/new_session_guard_test.go, the file's single sleep: it is the occupancy window TestNewSessionSerializesCreationPerSocket measures, not a delay waiting for a condition. The test fans 12 concurrent NewSession calls at one socket and asserts in-flight creates never exceed 1; with a zero-width critical section an unserialized implementation serializes by accident and the test passes on the bug it exists to catch); -0/-1 on 2026-09-20 owned by gascity-lzzj (internal/api/session_stream_capability_test.go loses its only sleep: TestStreamSessionPeekAcceptsPeekCapability's hand-rolled poll loop over an unsynchronized httptest recorder was the data race the bead exists to fix, and replacing it with the package's shared waitForRecorderSubstring helper moves the poll onto a sleep handler_sessions_test.go already owns. Calls are unchanged; the file drops out of the census)"
 migration_target = "W1-W5"
 expires = "2026-10-01"
 
@@ -498,12 +498,12 @@ expires = "2026-10-01"
 scope = "untagged"
 resource = "fixed_sleep"
 baseline_calls = 286
-baseline_files = 115
+baseline_files = 114
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-80po0c.2.1"
 invariant = "untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners replace elapsed wall time with lifecycle signals; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go); +1/+1 on 2026-08-27 owned by gascity-n17v (serializingExecutor.executeCtx in internal/runtime/tmux/new_session_guard_test.go, the file's single sleep: it is the occupancy window TestNewSessionSerializesCreationPerSocket measures, not a delay waiting for a condition. The test fans 12 concurrent NewSession calls at one socket and asserts in-flight creates never exceed 1; with a zero-width critical section an unserialized implementation serializes by accident and the test passes on the bug it exists to catch)"
+resource_owner = "non-Medium lexical owners replace elapsed wall time with lifecycle signals; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go); +1/+1 on 2026-08-27 owned by gascity-n17v (serializingExecutor.executeCtx in internal/runtime/tmux/new_session_guard_test.go, the file's single sleep: it is the occupancy window TestNewSessionSerializesCreationPerSocket measures, not a delay waiting for a condition. The test fans 12 concurrent NewSession calls at one socket and asserts in-flight creates never exceed 1; with a zero-width critical section an unserialized implementation serializes by accident and the test passes on the bug it exists to catch); -0/-1 on 2026-09-20 owned by gascity-lzzj (internal/api/session_stream_capability_test.go loses its only sleep: TestStreamSessionPeekAcceptsPeekCapability's hand-rolled poll loop over an unsynchronized httptest recorder was the data race the bead exists to fix, and replacing it with the package's shared waitForRecorderSubstring helper moves the poll onto a sleep handler_sessions_test.go already owns. Calls are unchanged; the file drops out of the census)"
 migration_target = "W1-W5"
 expires = "2026-10-01"
 
