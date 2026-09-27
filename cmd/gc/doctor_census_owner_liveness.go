@@ -19,6 +19,11 @@ import (
 // censusOwnerLivenessCheck detects resource-census ledger rows
 // (test/test-resources.toml) whose owner_bead no longer resolves in the
 // scope's bead store. Detection only: it never repairs the ledger.
+//
+// The ledger is repo content, so a scope can carry rows owned by beads in
+// another store — a fork inherits upstream's rows and upstream's owner ids.
+// The scope's store can only vouch for its own namespace, so an owner_bead
+// outside it is counted as not checked, never reported as dangling.
 type censusOwnerLivenessCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -45,20 +50,25 @@ func (c *censusOwnerLivenessCheck) Fix(_ *doctor.CheckContext) error { return ni
 func (c *censusOwnerLivenessCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	var findings []string
 	var skipped []string
+	foreign := 0
 
-	c.scanScope(&findings, &skipped, "city", c.cityPath)
+	c.scanScope(&findings, &skipped, &foreign, "city", c.cityPath, config.EffectiveHQPrefix(c.cfg))
 	if c.cfg != nil {
 		suspState, _ := loadSuspensionState(fsys.OSFS{}, c.cityPath)
 		for _, rig := range c.cfg.Rigs {
 			if suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart()) || strings.TrimSpace(rig.Path) == "" {
 				continue
 			}
-			c.scanScope(&findings, &skipped, "rig "+rig.Name, rig.Path)
+			c.scanScope(&findings, &skipped, &foreign, "rig "+rig.Name, rig.Path, rig.EffectivePrefix())
 		}
 	}
 
 	if len(findings) == 0 && len(skipped) == 0 {
-		return okCheck(c.Name(), "no dangling owner_bead references found in resource-census ledgers")
+		message := "no dangling owner_bead references found in resource-census ledgers"
+		if foreign > 0 {
+			message = fmt.Sprintf("%s (%d reference(s) to other bead stores not checked)", message, foreign)
+		}
+		return okCheck(c.Name(), message)
 	}
 
 	details := append([]string{}, findings...)
@@ -85,8 +95,10 @@ func (c *censusOwnerLivenessCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 // A missing ledger file is expected for almost every scope and is skipped
 // silently; any other load error, store-open error, or non-not-found Get
 // error is recorded as a skip with a reason rather than treated as a
-// dangling finding.
-func (c *censusOwnerLivenessCheck) scanScope(findings, skipped *[]string, label, path string) {
+// dangling finding. An owner_bead outside the scope's namespace — its id does
+// not start with "<prefix>-" — belongs to another store: it is counted in
+// foreign and never looked up. An empty prefix leaves every id local.
+func (c *censusOwnerLivenessCheck) scanScope(findings, skipped *[]string, foreign *int, label, path, prefix string) {
 	if c.newStore == nil || strings.TrimSpace(path) == "" {
 		return
 	}
@@ -106,17 +118,24 @@ func (c *censusOwnerLivenessCheck) scanScope(findings, skipped *[]string, label,
 		return
 	}
 
+	ids := make([]string, 0, len(rows))
+	for id := range rows {
+		if prefix != "" && !strings.HasPrefix(id, prefix+"-") {
+			*foreign++
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return
+	}
+	sort.Strings(ids)
+
 	store, err := c.newStore(path)
 	if err != nil {
 		*skipped = append(*skipped, fmt.Sprintf("%s skipped: opening bead store: %v", label, err))
 		return
 	}
-
-	ids := make([]string, 0, len(rows))
-	for id := range rows {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
 
 	for _, id := range ids {
 		_, err := store.Get(id)

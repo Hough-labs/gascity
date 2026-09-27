@@ -221,7 +221,7 @@ owner_bead = "ga-rig-missing"
 `)
 	cfg := &config.City{
 		Rigs: []config.Rig{
-			{Name: "repo", Path: rigDir},
+			{Name: "repo", Path: rigDir, Prefix: "ga"},
 			{Name: "ghost", Path: ""},
 		},
 	}
@@ -241,6 +241,135 @@ owner_bead = "ga-rig-missing"
 		if !strings.Contains(details, want) {
 			t.Fatalf("details missing %q:\n%s", want, details)
 		}
+	}
+}
+
+// The ledger is repo content, so a fork inherits upstream's rows and their
+// upstream owner ids. Judging a foreign id against the scope's own store
+// reported a permanent "dangling" finding no ledger edit in the fork could
+// clear. These run against a rig whose prefix is "gascity", as in the fork.
+func censusForkRigCity(t *testing.T, ledger string) (string, *config.City) {
+	t.Helper()
+	cityDir := t.TempDir()
+	rigDir := t.TempDir()
+	writeCensusLedger(t, rigDir, ledger)
+	cfg := &config.City{
+		Workspace: config.Workspace{Prefix: "gc"},
+		Rigs:      []config.Rig{{Name: "gascity", Path: rigDir, Prefix: "gascity"}},
+	}
+	return cityDir, cfg
+}
+
+func TestCensusOwnerLivenessCheckDoesNotJudgeOwnersInOtherBeadStores(t *testing.T) {
+	cityDir, cfg := censusForkRigCity(t, `
+version = 1
+
+[[audit_baseline]]
+scope = "all"
+resource = "subprocess"
+owner_bead = "ga-80po0c.2"
+
+[[debt]]
+scope = "untagged"
+resource = "fixed_sleep"
+owner_bead = "ga-80po0c.2.1"
+`)
+	inner := beads.NewMemStoreFrom(0, nil, nil)
+	spy := &censusGetCountingStore{Store: inner, counts: map[string]int{}}
+	result := newCensusOwnerLivenessCheck(cfg, cityDir, func(string) (beads.Store, error) {
+		return spy, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want StatusOK; message=%q details=%v", result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(result.Message, "2 reference(s) to other bead stores not checked") {
+		t.Fatalf("message = %q, want the owners in other bead stores counted", result.Message)
+	}
+	if len(spy.counts) != 0 {
+		t.Fatalf("Get calls = %v, want none: an id in another store is not looked up", spy.counts)
+	}
+}
+
+func TestCensusOwnerLivenessCheckStillFlagsLocalDanglingOwner(t *testing.T) {
+	cityDir, cfg := censusForkRigCity(t, `
+version = 1
+
+[[audit_baseline]]
+scope = "all"
+resource = "subprocess"
+owner_bead = "gascity-zzz"
+
+[[small_debt]]
+scope = "all"
+resource = "fixed_sleep"
+owner_bead = "ga-80po0c.2"
+`)
+	store := beads.NewMemStoreFrom(0, nil, nil)
+	result := newCensusOwnerLivenessCheck(cfg, cityDir, func(string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want StatusWarning; message=%q details=%v", result.Status, result.Message, result.Details)
+	}
+	if result.Message != "found 1 dangling owner_bead reference(s) in resource-census ledgers" {
+		t.Fatalf("message = %q, want exactly the one local dangling reference", result.Message)
+	}
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "rig gascity: dangling owner_bead=gascity-zzz") {
+		t.Fatalf("details missing the local dangling finding:\n%s", details)
+	}
+	if strings.Contains(details, "ga-80po0c.2") {
+		t.Fatalf("an owner in another bead store must not be reported:\n%s", details)
+	}
+}
+
+func TestCensusOwnerLivenessCheckOKWhenLocalOwnerPresent(t *testing.T) {
+	cityDir, cfg := censusForkRigCity(t, `
+version = 1
+
+[[debt]]
+scope = "untagged"
+resource = "fixed_sleep"
+owner_bead = "gascity-abc"
+`)
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gascity-abc", Title: "alive"}}, nil)
+	result := newCensusOwnerLivenessCheck(cfg, cityDir, func(string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want StatusOK; message=%q details=%v", result.Status, result.Message, result.Details)
+	}
+	if result.Message != "no dangling owner_bead references found in resource-census ledgers" {
+		t.Fatalf("message = %q, want no other-bead-store note when every owner is local", result.Message)
+	}
+}
+
+// A prefix-plus-hyphen match, not a split on the first "-": with prefix "gc",
+// a gc-wisp-* id is local and still checked.
+func TestCensusOwnerLivenessCheckHyphenatedIDStaysLocal(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCensusLedger(t, cityDir, `
+version = 1
+
+[[audit_baseline]]
+scope = "all"
+resource = "subprocess"
+owner_bead = "gc-wisp-zzz"
+`)
+	cfg := &config.City{Workspace: config.Workspace{Prefix: "gc"}}
+	store := beads.NewMemStoreFrom(0, nil, nil)
+	result := newCensusOwnerLivenessCheck(cfg, cityDir, func(string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want StatusWarning; message=%q details=%v", result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "city: dangling owner_bead=gc-wisp-zzz") {
+		t.Fatalf("details = %v, want gc-wisp-zzz checked as a local id", result.Details)
 	}
 }
 
