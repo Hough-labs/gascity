@@ -9,6 +9,8 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // RigPackCoverageCheck warns when a city-level pack declares rig-scoped
@@ -116,10 +118,22 @@ func (c *RigPackCoverageCheck) Run(_ *CheckContext) *CheckResult {
 	return r
 }
 
+// activeRigs returns the rigs that are not effectively suspended: the runtime
+// override in .gc/runtime/suspension-state.json wins, and the authored
+// suspended_on_start default (with the deprecated `suspended` alias) applies
+// where it is silent. Reading `suspended` alone counted a rig parked by
+// suspended_on_start or `gc rig suspend` as a permanent coverage gap. When the
+// state file cannot be read, only the config-level `suspended` field excludes
+// a rig — never "treat every rig as suspended".
 func (c *RigPackCoverageCheck) activeRigs() []config.Rig {
+	st, err := suspensionstate.Load(fsys.OSFS{}, c.cityPath)
 	var rigs []config.Rig
 	for _, rig := range c.cfg.Rigs {
-		if !rig.Suspended {
+		suspended := rig.Suspended
+		if err == nil {
+			suspended = suspensionstate.EffectiveRigSuspended(st, rig.Name, rig.EffectiveSuspendedOnStart())
+		}
+		if !suspended {
 			rigs = append(rigs, rig)
 		}
 	}

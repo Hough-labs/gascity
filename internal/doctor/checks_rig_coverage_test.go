@@ -6,7 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestRigPackCoverageCheck_NoPacks(t *testing.T) {
@@ -239,6 +242,122 @@ mode = "always"
 	}
 	if !foundUncovered {
 		t.Errorf("expected detail about uncovered rig, got %v", r.Details)
+	}
+}
+
+// rigCoverageSuspensionCity builds a city where rig "covered" imports a pack
+// declaring a rig-scoped always session and rig "parked" does not, so the
+// check's verdict turns entirely on whether "parked" counts as active.
+func rigCoverageSuspensionCity(t *testing.T) (string, *config.City) {
+	t.Helper()
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "packs", "workflow")
+	writeTestPack(t, packDir, `
+[pack]
+name = "workflow"
+schema = 2
+
+[[named_session]]
+template = "patrol"
+scope = "rig"
+mode = "always"
+`)
+	writeTestAgent(t, packDir, "patrol")
+	cfg := &config.City{
+		PackDirs: []string{packDir},
+		Rigs: []config.Rig{
+			{Name: "covered"},
+			{Name: "parked"},
+		},
+		RigPackDirs: map[string][]string{
+			"covered": {packDir},
+		},
+	}
+	return dir, cfg
+}
+
+func setRigCoverageRuntimeSuspension(t *testing.T, cityPath, rig string, suspended bool) {
+	t.Helper()
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, rig, &suspended); err != nil {
+		t.Fatalf("writing runtime suspension for rig %q: %v", rig, err)
+	}
+}
+
+func TestRigPackCoverageCheck_SuspendedOnStartRigIgnored(t *testing.T) {
+	// `gc rig add --start-suspended` writes suspended_on_start, not the
+	// deprecated `suspended` alias. Reading only the alias reported a parked
+	// rig as a permanent coverage gap.
+	dir, cfg := rigCoverageSuspensionCity(t)
+	cfg.Rigs[1].SuspendedOnStart = true
+
+	r := NewRigPackCoverageCheck(cfg, dir).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK (suspended_on_start rig should not count); msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
+func TestRigPackCoverageCheck_RuntimeSuspendedRigIgnored(t *testing.T) {
+	// `gc rig suspend` records only a runtime override; city.toml is untouched.
+	dir, cfg := rigCoverageSuspensionCity(t)
+	setRigCoverageRuntimeSuspension(t, dir, "parked", true)
+
+	r := NewRigPackCoverageCheck(cfg, dir).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK (runtime-suspended rig should not count); msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
+func TestRigPackCoverageCheck_ResumedRigStillChecked(t *testing.T) {
+	// A rig authored suspended_on_start but resumed at runtime is live, so a
+	// coverage gap on it is real and must still be reported.
+	dir, cfg := rigCoverageSuspensionCity(t)
+	cfg.Rigs[1].SuspendedOnStart = true
+	setRigCoverageRuntimeSuspension(t, dir, "parked", false)
+
+	r := NewRigPackCoverageCheck(cfg, dir).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning (resumed rig is active and uncovered); msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(strings.Join(r.Details, "\n"), "missing from rig(s): parked") {
+		t.Fatalf("details = %v, want the resumed rig named as uncovered", r.Details)
+	}
+}
+
+func TestRigPackCoverageCheck_LegacySuspendedRigStillIgnored(t *testing.T) {
+	dir, cfg := rigCoverageSuspensionCity(t)
+	cfg.Rigs[1].Suspended = true
+
+	r := NewRigPackCoverageCheck(cfg, dir).Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK (config-level suspended rig should not count); msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
+func TestRigPackCoverageCheck_UnreadableSuspensionStateFallsBackToSuspendedField(t *testing.T) {
+	// An unreadable state file must not read as "every rig suspended", which
+	// would hide every gap: only the config-level `suspended` field excludes a
+	// rig, exactly as before effective suspension was consulted.
+	dir, cfg := rigCoverageSuspensionCity(t)
+	cfg.Rigs[1].SuspendedOnStart = true
+	cfg.Rigs = append(cfg.Rigs, config.Rig{Name: "legacy", Suspended: true})
+	statePath := citylayout.SuspensionStateFile(dir)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewRigPackCoverageCheck(cfg, dir).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning (parked counts as active without readable state); msg = %s", r.Status, r.Message)
+	}
+	details := strings.Join(r.Details, "\n")
+	if !strings.Contains(details, "missing from rig(s): parked") {
+		t.Fatalf("details = %v, want parked reported as uncovered", r.Details)
+	}
+	if strings.Contains(details, "legacy") {
+		t.Fatalf("details = %v, config-level suspended rig must stay excluded", r.Details)
 	}
 }
 
