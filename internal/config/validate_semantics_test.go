@@ -295,3 +295,64 @@ func TestValidateAgentsPromptFlagWithFlagModeOK(t *testing.T) {
 		t.Errorf("should be valid: %v", err)
 	}
 }
+
+// TestIsNonFatalConfigWarning pins the one classification strict mode and
+// gc doctor share: one warning from each non-fatal class passes, and warnings
+// that signal a real misconfiguration do not. Samples come from the producers
+// wherever a producer is reachable, so a wording change cannot leave the
+// classifier matching a string config no longer emits.
+func TestIsNonFatalConfigWarning(t *testing.T) {
+	semantic := func(t *testing.T, a Agent) string {
+		t.Helper()
+		warnings := ValidateSemantics(&City{Agents: []Agent{a}}, "city.toml")
+		if len(warnings) != 1 {
+			t.Fatalf("ValidateSemantics(%+v) = %v, want exactly one warning", a, warnings)
+		}
+		return warnings[0]
+	}
+	alwaysFresh := func(t *testing.T) string {
+		t.Helper()
+		warnings, err := ValidateNamedSessions(&City{
+			Workspace:     Workspace{Name: "test-city"},
+			Agents:        []Agent{{Name: "watchdog", WakeMode: "fresh"}},
+			NamedSessions: []NamedSession{{Template: "watchdog", Mode: "always"}},
+		})
+		if err != nil || len(warnings) != 1 {
+			t.Fatalf("ValidateNamedSessions = %v, %v; want exactly the always+fresh advisory", warnings, err)
+		}
+		return warnings[0]
+	}
+
+	tests := []struct {
+		name    string
+		warning func(t *testing.T) string
+		want    bool
+	}{
+		{"site binding", func(*testing.T) string { return legacyRigPathSiteBindingWarning("repo") }, true},
+		{"legacy v1 surface", func(*testing.T) string {
+			return "city.toml: [packs] is deprecated in v2; use [imports] + packs.lock."
+		}, true},
+		{"legacy workspace field", func(*testing.T) string {
+			return "city.toml: " + legacyWorkspaceFieldMarker("start_command") + ": Use per-agent `start_command` in `agent.toml` instead."
+		}, true},
+		{"idle sleep masked by idle timeout", func(t *testing.T) string {
+			return semantic(t, Agent{Name: "refinery", IdleTimeout: "2h", SleepAfterIdle: "300s"})
+		}, true},
+		{"always-mode named session on fresh wake", alwaysFresh, true},
+		{"retired key", func(*testing.T) string {
+			return retiredKeyWarning("city.toml", "daemon.graph_workflows", retiredKey{RemovedIn: "v1.2.0"})
+		}, true},
+		{"unknown field", func(*testing.T) string { return unknownFieldWarning("city.toml", "bogus_key", nil) }, false},
+		{"invalid session transport", func(t *testing.T) string {
+			return semantic(t, Agent{Name: "worker", Session: "bogus"})
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := tt.warning(t)
+			if got := IsNonFatalConfigWarning(w); got != tt.want {
+				t.Fatalf("IsNonFatalConfigWarning(%q) = %v, want %v", w, got, tt.want)
+			}
+		})
+	}
+}

@@ -736,7 +736,10 @@ func NewConfigSemanticsCheck(cfg *config.City, source string) *ConfigSemanticsCh
 // Name returns the check identifier.
 func (c *ConfigSemanticsCheck) Name() string { return "config-semantics" }
 
-// Run executes ValidateSemantics and reports any warnings.
+// Run executes ValidateSemantics and reports any warnings. The result is
+// advisory when every warning is one config.IsNonFatalConfigWarning
+// classifies as non-fatal — the same warnings strict mode lets through — and
+// blocking as soon as one is not.
 func (c *ConfigSemanticsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	warnings := config.ValidateSemantics(c.cfg, c.source)
@@ -748,6 +751,13 @@ func (c *ConfigSemanticsCheck) Run(_ *CheckContext) *CheckResult {
 	r.Status = StatusWarning
 	r.Message = fmt.Sprintf("%d config semantic warning(s)", len(warnings))
 	r.Details = warnings
+	r.Severity = SeverityAdvisory
+	for _, w := range warnings {
+		if !config.IsNonFatalConfigWarning(w) {
+			r.Severity = SeverityBlocking
+			break
+		}
+	}
 	return r
 }
 

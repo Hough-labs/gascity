@@ -13,6 +13,21 @@ func IsIdleSleepMaskedByIdleTimeoutWarning(warning string) bool {
 	return strings.Contains(warning, idleSleepMaskedByIdleTimeoutWarningFragment)
 }
 
+// IsNonFatalConfigWarning reports whether warning is config guidance that must
+// never gate: migration and deprecation notices (site binding, legacy v1
+// surfaces, legacy workspace fields, retired keys) and supported
+// configurations config flags but accepts (sleep_after_idle masked by
+// idle_timeout, an always-mode named session on a fresh-wake template). Strict
+// mode keeps these non-fatal, and gc doctor reports them as advisory.
+func IsNonFatalConfigWarning(warning string) bool {
+	return IsNonFatalSiteBindingWarning(warning) ||
+		IsLegacyV1SurfaceWarning(warning) ||
+		IsLegacyWorkspaceFieldWarning(warning) ||
+		IsIdleSleepMaskedByIdleTimeoutWarning(warning) ||
+		IsAlwaysFreshWakeModeWarning(warning) ||
+		IsRetiredKeyWarning(warning)
+}
+
 // ValidateSemantics checks cross-entity semantic constraints in the config
 // and returns warnings for issues that cannot be caught by individual struct
 // validation. Unlike ValidateAgents (which returns hard errors), semantic
