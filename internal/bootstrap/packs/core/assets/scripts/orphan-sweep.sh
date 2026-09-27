@@ -135,12 +135,15 @@ fi
 #     (.closed/.id/.session_name/.alias/.agent_name); PascalCase is accepted
 #     only as forward-compatible hardening so a casing change cannot make
 #     LIVE_SESSION_IDS empty and strip active pool claims.
+# Each identifier is listed once (jq unique). SESSION_TMP holds two full copies
+# of the city-wide session list per scope walked, so without de-duplication the
+# list grows with sessions times rigs.
 LIVE_SESSION_IDS=$(jq -r -s '
     def pick($snake; $pascal; $default):
       if has($snake) and .[$snake] != null then .[$snake]
       elif has($pascal) and .[$pascal] != null then .[$pascal]
       else $default end;
-    .[] | .sessions[]?
+    [ .[] | .sessions[]?
     | select(
         (pick("closed"; "Closed"; false) == false)
         and ((pick("state"; "State"; "") | ascii_downcase) != "closed")
@@ -154,18 +157,24 @@ LIVE_SESSION_IDS=$(jq -r -s '
         pick("name"; "Name"; null)
       ]
     | .[]
-    | select(. != null and . != "")
+    | select(. != null and . != "") ] | unique | .[]
 ' "$SESSION_TMP" 2>/dev/null) || exit 0
 
+# Test membership with a here-string, never `printf ... | grep -q`. `grep -q`
+# exits on its first match, so once the list outgrows the pipe buffer (64 KiB)
+# the upstream `printf` takes a SIGPIPE writing the rest; under `set -o pipefail`
+# that SIGPIPE fails the test, a live owner reads as dead, and its claim is
+# released (gascity-wix2). A here-string is a simple command (pipefail does not
+# apply) with no upstream writer to kill. reaper.sh fixed the same race.
 agent_exists() {
     local candidate="$1"
-    [ -n "$candidate" ] && printf '%s\n' "$AGENTS" | grep -Fxq -- "$candidate"
+    [ -n "$candidate" ] && grep -Fxq -- "$candidate" <<<"$AGENTS"
 }
 
 live_session_match() {
     local candidate="$1"
     [ -n "$candidate" ] && [ -n "$LIVE_SESSION_IDS" ] \
-        && printf '%s\n' "$LIVE_SESSION_IDS" | grep -Fxq -- "$candidate"
+        && grep -Fxq -- "$candidate" <<<"$LIVE_SESSION_IDS"
 }
 
 CURRENT_BEAD_JSON=""

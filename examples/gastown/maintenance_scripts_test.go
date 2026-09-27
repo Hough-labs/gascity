@@ -1542,6 +1542,193 @@ exit 1
 	}
 }
 
+// orphanSweepPipeBufferBytes is the pipe capacity on Linux and Darwin. Above
+// it, `printf '%s\n' "$LIST" | grep -Fxq -- "$candidate"` under
+// `set -o pipefail` reports a present candidate as absent: grep -q exits on its
+// first match, printf takes SIGPIPE writing the rest, and pipefail fails the
+// pipeline (gascity-wix2).
+const orphanSweepPipeBufferBytes = 64 << 10
+
+// orphanSweepOversizedListBytes is how large the pipe-buffer cases make a
+// membership list. Four buffers rather than one, so that when grep exits after
+// its first read the writer still has more than a full buffer left to send.
+const orphanSweepOversizedListBytes = 4 * orphanSweepPipeBufferBytes
+
+// TestOrphanSweepPreservesLiveEphemeralAssigneeWhenSessionListExceedsPipeBuffer
+// is the gascity-wix2 incident: a pool claim whose owner WAS in the session
+// list, carrying gc.session_name and no gc.session_id, was released once the
+// identifiers the sweep tests membership against outgrew the pipe buffer.
+func TestOrphanSweepPreservesLiveEphemeralAssigneeWhenSessionListExceedsPipeBuffer(t *testing.T) {
+	const liveAssignee = "gastown__polecat-gc-live"
+	// The live owner's row comes first, so a membership test that stops at its
+	// first match stops while the writer still has most of the list to send.
+	// Every filler identifier also sorts after it, so the list's de-duplication
+	// (jq unique sorts) cannot move the match away from the head either.
+	names := []string{liveAssignee}
+	for listBytes := 0; listBytes <= orphanSweepOversizedListBytes; {
+		i := len(names)
+		name := fmt.Sprintf("worker__pool-gc-%05d", i)
+		names = append(names, name)
+		// orphanSweepSessionListJSON gives row i the id mc-live-<i>, and the
+		// sweep lists both identifiers, one per line.
+		listBytes += len(fmt.Sprintf("mc-live-%d", i)) + len(name) + 2
+	}
+	runOrphanSweepPipeBufferCase(t, orphanSweepPipeBufferCase{
+		sessionsJSON:  orphanSweepSessionListJSON(t, names...),
+		configExplain: "Agent: gastown.polecat\n  source: pack\n",
+		ownerAssignee: liveAssignee,
+		deadAssignee:  "gastown__polecat-gc-gone",
+	})
+}
+
+// TestOrphanSweepPreservesConfiguredAgentAssigneeWhenAgentListExceedsPipeBuffer
+// is the agent_exists half of gascity-wix2: a claim held by a configured agent
+// that has no session row was released once the configured agent list outgrew
+// the pipe buffer.
+func TestOrphanSweepPreservesConfiguredAgentAssigneeWhenAgentListExceedsPipeBuffer(t *testing.T) {
+	const configuredAgent = "project/worker"
+	var explain strings.Builder
+	fmt.Fprintf(&explain, "Agent: %s\n  source: pack\n", configuredAgent)
+	for i, listBytes := 1, 0; listBytes <= orphanSweepOversizedListBytes; i++ {
+		name := fmt.Sprintf("filler/agent-%05d", i)
+		fmt.Fprintf(&explain, "Agent: %s\n  source: pack\n", name)
+		listBytes += len(name) + 1
+	}
+	runOrphanSweepPipeBufferCase(t, orphanSweepPipeBufferCase{
+		sessionsJSON:  orphanSweepSessionListJSON(t),
+		configExplain: explain.String(),
+		ownerAssignee: configuredAgent,
+		deadAssignee:  "project/retired",
+	})
+}
+
+type orphanSweepPipeBufferCase struct {
+	sessionsJSON  string // printed by every `gc session list --json`
+	configExplain string // printed by `gc config explain`
+	ownerAssignee string // holds a claim the sweep must keep
+	deadAssignee  string // holds the control claim the sweep must release
+}
+
+// runOrphanSweepPipeBufferCase runs the core orphan-sweep over an HQ-only city
+// with two in_progress claims. Both carry gc.session_name and no
+// gc.session_id, as mol-polecat-work's claims do, and no session bead answers
+// for either assignee, so the agent-list and session-list membership tests are
+// the only liveness evidence the sweep has. The dead claim is a control:
+// releasing it proves the sweep reached its release loop, so keeping the owner's
+// claim is not a vacuous pass.
+func runOrphanSweepPipeBufferCase(t *testing.T, tc orphanSweepPipeBufferCase) {
+	t.Helper()
+	const ownerID, deadID = "ga-owner-claim", "ga-dead-claim"
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	stateDir := filepath.Join(dir, "state")
+	for _, d := range []string{binDir, stateDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", d, err)
+		}
+	}
+	type bead struct {
+		ID       string `json:"id"`
+		Status   string `json:"status"`
+		Assignee string `json:"assignee"`
+	}
+	claims := []bead{
+		{ID: ownerID, Status: "in_progress", Assignee: tc.ownerAssignee},
+		{ID: deadID, Status: "in_progress", Assignee: tc.deadAssignee},
+	}
+	beadsJSON, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("Marshal(orphan-sweep beads): %v", err)
+	}
+	// Each claim's state file holds "<status> <assignee>". The stub serves it
+	// to `bd show` and rewrites it on release, so the outcome is observable.
+	files := map[string]string{
+		filepath.Join(stateDir, ownerID):     "in_progress " + tc.ownerAssignee + "\n",
+		filepath.Join(stateDir, deadID):      "in_progress " + tc.deadAssignee + "\n",
+		filepath.Join(dir, "sessions.json"):  tc.sessionsJSON + "\n",
+		filepath.Join(dir, "config-explain"): tc.configExplain,
+		filepath.Join(dir, "beads.json"):     string(beadsJSON) + "\n",
+	}
+	for path, body := range files {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$*" in
+  "rig list --json")
+    printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+    exit 0
+    ;;
+  "session list --json")
+    cat "$ORPHAN_SWEEP_FIXTURE_DIR/sessions.json"
+    exit 0
+    ;;
+  "config explain")
+    cat "$ORPHAN_SWEEP_FIXTURE_DIR/config-explain"
+    exit 0
+    ;;
+  "bd list --status=in_progress --json --limit=0")
+    cat "$ORPHAN_SWEEP_FIXTURE_DIR/beads.json"
+    exit 0
+    ;;
+esac
+state="$ORPHAN_SWEEP_FIXTURE_DIR/state/$3"
+if [ "$1" = "bd" ] && [ -f "$state" ]; then
+  read -r status assignee < "$state"
+  if [ "$2 $4" = "show --json" ]; then
+    printf '[{"id":"%s","status":"%s","assignee":"%s","metadata":{"gc.session_name":"%s"}}]\n' "$3" "$status" "$assignee" "$assignee"
+    exit 0
+  fi
+  if [ "$2" = "release-if-current" ] && [ "$status $assignee" = "in_progress $4" ]; then
+    printf 'open\n' > "$state"
+    printf 'released\n'
+    exit 0
+  fi
+fi
+if [ "$1 $2 $4" = "bd show --json" ]; then
+  # A session-bead probe by assignee name: no such bead answers.
+  exit 1
+fi
+printf 'UNEXPECTED: %s\n' "$*" >> "$GC_CALL_LOG"
+exit 2
+`)
+
+	gcLog := filepath.Join(dir, "gc.log")
+	out, err := runScriptResult(t, coreScriptPath("orphan-sweep.sh"), map[string]string{
+		"GC_CITY":                  filepath.Join(dir, "city"),
+		"GC_CITY_PATH":             filepath.Join(dir, "city"),
+		"GC_CALL_LOG":              gcLog,
+		"ORPHAN_SWEEP_FIXTURE_DIR": dir,
+		"PATH":                     binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	})
+	if err != nil {
+		t.Fatalf("orphan-sweep.sh failed: %v\n%s", err, orphanSweepFailureContext(out, gcLog))
+	}
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	if strings.Contains(log, "UNEXPECTED: ") {
+		t.Fatalf("stub gc received an unexpected call:\n%s", orphanSweepFailureContext(out, gcLog))
+	}
+	if strings.Contains(log, "bd release-if-current "+ownerID+" ") {
+		t.Fatalf("orphan-sweep released %s although %s holds it:\n%s", ownerID, tc.ownerAssignee, orphanSweepFailureContext(out, gcLog))
+	}
+	ownerState, err := os.ReadFile(filepath.Join(stateDir, ownerID))
+	if err != nil {
+		t.Fatalf("ReadFile(%s state): %v", ownerID, err)
+	}
+	if got, want := strings.TrimSpace(string(ownerState)), "in_progress "+tc.ownerAssignee; got != want {
+		t.Fatalf("%s state = %q, want %q", ownerID, got, want)
+	}
+	if !strings.Contains(log, "bd release-if-current "+deadID+" "+tc.deadAssignee+"\n") {
+		t.Fatalf("control claim %s was not released, so the sweep never reached its release loop:\n%s", deadID, orphanSweepFailureContext(out, gcLog))
+	}
+}
+
 func TestOrphanSweepPreservesPascalCaseLiveSessionIdentitiesAsForwardCompat(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
