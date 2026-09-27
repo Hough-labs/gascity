@@ -178,7 +178,7 @@ func (c *WorktreeCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
-func (c *WorktreeDiskSizeCheck) WarmupEligible() bool { return false }
+func (c *WorktreeVolumeFreeCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.

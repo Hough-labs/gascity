@@ -29,6 +29,9 @@ var (
 	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
 	newDoctorDoltBackupCheck    = doctor.NewDoltBackupCheck
 	newDoctorDoltLocalOnlyCheck = doctor.NewDoltLocalOnlyRemoteCheck
+	// doctorWorktreeVolumeFreeBytes feeds the worktree-volume-free check.
+	// Free space is host state, so tests replace it with a fake.
+	doctorWorktreeVolumeFreeBytes = fsys.FreeBytes
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -361,12 +364,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// Worktree checks deliberately run even when cfgErr != nil — they
 	// only need the city path, and a broken city.toml is exactly when
 	// silent disk-fill is most likely. The zero-value DoctorConfig
-	// produces sensible 10/50 GB defaults via its accessor methods.
+	// produces sensible 50/20 GB free-space defaults via its accessor
+	// methods.
 	var doctorCfg config.DoctorConfig
 	if cfg != nil {
 		doctorCfg = cfg.Doctor
 	}
-	register(doctor.NewWorktreeDiskSizeCheck(doctorCfg))
+	register(doctor.NewWorktreeVolumeFreeCheck(doctorCfg, doctorWorktreeVolumeFreeBytes))
 	register(doctor.NewNestedWorktreePruneCheck(doctorCfg))
 
 	// Custom types check — city store.

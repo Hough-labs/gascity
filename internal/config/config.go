@@ -2336,17 +2336,31 @@ type LocalDoctorCheck struct {
 // (broken-worktree pointers, missing files) remain hardcoded since they
 // cannot be operator-tuned in any meaningful sense.
 type DoctorConfig struct {
-	// WorktreeRigWarnSize is the per-rig warning threshold for the total
-	// disk footprint under .gc/worktrees/<rig>/. Reported by the
-	// worktree-disk-size check. Go-style human size string ("10GB", "500MB").
-	// Empty or unparseable falls back to the default (10 GB).
-	WorktreeRigWarnSize string `toml:"worktree_rig_warn_size,omitempty" jsonschema:"default=10GB"`
+	// WorktreeVolumeWarnFree is the free-space warning threshold for the
+	// volume holding .gc/worktrees/. When free space drops below it, the
+	// worktree-volume-free check reports a warning. Human size string
+	// ("50GB", "500MB"). Empty, unparseable, or non-positive falls back to
+	// the default (50 GB).
+	WorktreeVolumeWarnFree string `toml:"worktree_volume_warn_free,omitempty" jsonschema:"default=50GB"`
 
-	// WorktreeRigErrorSize is the per-rig error threshold. When any rig
-	// exceeds this, the worktree-disk-size check reports an error rather
-	// than a warning. Empty or unparseable falls back to the default
-	// (50 GB).
-	WorktreeRigErrorSize string `toml:"worktree_rig_error_size,omitempty" jsonschema:"default=50GB"`
+	// WorktreeVolumeErrorFree is the free-space error threshold for the
+	// volume holding .gc/worktrees/. When free space drops below it, the
+	// worktree-volume-free check reports an error rather than a warning.
+	// Empty, unparseable, or non-positive falls back to the default
+	// (20 GB). It must be below WorktreeVolumeWarnFree; when it is not,
+	// both thresholds fall back to their defaults, so lowering the warn
+	// threshold under 20 GB needs a lower error threshold too.
+	WorktreeVolumeErrorFree string `toml:"worktree_volume_error_free,omitempty" jsonschema:"default=20GB"`
+
+	// WorktreeRigWarnSize is a tombstone field: accepted so a city.toml
+	// that still sets worktree_rig_warn_size loads (unknown keys are
+	// fatal), but no check reads it. Use WorktreeVolumeWarnFree.
+	WorktreeRigWarnSize string `toml:"worktree_rig_warn_size,omitempty"`
+
+	// WorktreeRigErrorSize is a tombstone field: accepted so a city.toml
+	// that still sets worktree_rig_error_size loads (unknown keys are
+	// fatal), but no check reads it. Use WorktreeVolumeErrorFree.
+	WorktreeRigErrorSize string `toml:"worktree_rig_error_size,omitempty"`
 
 	// NestedWorktreePrune escalates the nested-worktree-prune check
 	// from warning to error severity when safely-prunable nested
@@ -2363,35 +2377,46 @@ type DoctorConfig struct {
 }
 
 const (
-	defaultWorktreeRigWarnBytes  = int64(10) * 1024 * 1024 * 1024 // 10 GB
-	defaultWorktreeRigErrorBytes = int64(50) * 1024 * 1024 * 1024 // 50 GB
+	defaultWorktreeVolumeWarnFreeBytes  = int64(50) * 1024 * 1024 * 1024 // 50 GB
+	defaultWorktreeVolumeErrorFreeBytes = int64(20) * 1024 * 1024 * 1024 // 20 GB
 )
 
-// WorktreeRigWarnBytes returns the warning threshold in bytes. Falls
-// back to defaultWorktreeRigWarnBytes when unset, unparseable, or
-// non-positive.
-func (c DoctorConfig) WorktreeRigWarnBytes() int64 {
-	if n, ok := parseHumanSize(c.WorktreeRigWarnSize); ok && n > 0 {
-		return n
-	}
-	return defaultWorktreeRigWarnBytes
+// WorktreeVolumeWarnFreeBytes returns the free-space warning threshold in
+// bytes. Falls back to 50 GB when unset, unparseable, or non-positive, and
+// to both defaults when the error threshold is not below it.
+func (c DoctorConfig) WorktreeVolumeWarnFreeBytes() int64 {
+	warn, _ := c.worktreeVolumeFreeThresholds()
+	return warn
 }
 
-// WorktreeRigErrorBytes returns the error threshold in bytes. Falls
-// back to defaultWorktreeRigErrorBytes when unset, unparseable, or
-// non-positive. The error threshold is clamped to at least the warn
-// threshold to keep the two-tier semantics monotonic; if the operator
-// configures error < warn, the warn value wins.
-func (c DoctorConfig) WorktreeRigErrorBytes() int64 {
-	warn := c.WorktreeRigWarnBytes()
-	n, ok := parseHumanSize(c.WorktreeRigErrorSize)
-	if !ok || n <= 0 {
-		n = defaultWorktreeRigErrorBytes
+// WorktreeVolumeErrorFreeBytes returns the free-space error threshold in
+// bytes. Falls back to 20 GB when unset, unparseable, or non-positive, and
+// to both defaults when it is not below the warning threshold.
+func (c DoctorConfig) WorktreeVolumeErrorFreeBytes() int64 {
+	_, errFree := c.worktreeVolumeFreeThresholds()
+	return errFree
+}
+
+// worktreeVolumeFreeThresholds resolves the warn and error thresholds
+// together, because whether either is usable depends on the other: the
+// error threshold must sit below the warning one, or the warning tier
+// could never fire.
+func (c DoctorConfig) worktreeVolumeFreeThresholds() (warn, errFree int64) {
+	warn = positiveHumanSizeOr(c.WorktreeVolumeWarnFree, defaultWorktreeVolumeWarnFreeBytes)
+	errFree = positiveHumanSizeOr(c.WorktreeVolumeErrorFree, defaultWorktreeVolumeErrorFreeBytes)
+	if errFree >= warn {
+		return defaultWorktreeVolumeWarnFreeBytes, defaultWorktreeVolumeErrorFreeBytes
 	}
-	if n < warn {
-		return warn
+	return warn, errFree
+}
+
+// positiveHumanSizeOr parses s with parseHumanSize and returns def when s
+// is empty, unparseable, or not positive.
+func positiveHumanSizeOr(s string, def int64) int64 {
+	if n, ok := parseHumanSize(s); ok && n > 0 {
+		return n
 	}
-	return n
+	return def
 }
 
 // parseHumanSize parses sizes like "10GB", "500 MB", "1024" (bytes

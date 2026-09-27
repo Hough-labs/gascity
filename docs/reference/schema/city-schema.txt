@@ -1430,15 +1430,23 @@
     },
     "DoctorConfig": {
       "properties": {
+        "worktree_volume_warn_free": {
+          "type": "string",
+          "description": "WorktreeVolumeWarnFree is the free-space warning threshold for the\nvolume holding .gc/worktrees/. When free space drops below it, the\nworktree-volume-free check reports a warning. Human size string\n(\"50GB\", \"500MB\"). Empty, unparseable, or non-positive falls back to\nthe default (50 GB).",
+          "default": "50GB"
+        },
+        "worktree_volume_error_free": {
+          "type": "string",
+          "description": "WorktreeVolumeErrorFree is the free-space error threshold for the\nvolume holding .gc/worktrees/. When free space drops below it, the\nworktree-volume-free check reports an error rather than a warning.\nEmpty, unparseable, or non-positive falls back to the default\n(20 GB). It must be below WorktreeVolumeWarnFree; when it is not,\nboth thresholds fall back to their defaults, so lowering the warn\nthreshold under 20 GB needs a lower error threshold too.",
+          "default": "20GB"
+        },
         "worktree_rig_warn_size": {
           "type": "string",
-          "description": "WorktreeRigWarnSize is the per-rig warning threshold for the total\ndisk footprint under .gc/worktrees/\u003crig\u003e/. Reported by the\nworktree-disk-size check. Go-style human size string (\"10GB\", \"500MB\").\nEmpty or unparseable falls back to the default (10 GB).",
-          "default": "10GB"
+          "description": "WorktreeRigWarnSize is a tombstone field: accepted so a city.toml\nthat still sets worktree_rig_warn_size loads (unknown keys are\nfatal), but no check reads it. Use WorktreeVolumeWarnFree."
         },
         "worktree_rig_error_size": {
           "type": "string",
-          "description": "WorktreeRigErrorSize is the per-rig error threshold. When any rig\nexceeds this, the worktree-disk-size check reports an error rather\nthan a warning. Empty or unparseable falls back to the default\n(50 GB).",
-          "default": "50GB"
+          "description": "WorktreeRigErrorSize is a tombstone field: accepted so a city.toml\nthat still sets worktree_rig_error_size loads (unknown keys are\nfatal), but no check reads it. Use WorktreeVolumeErrorFree."
         },
         "nested_worktree_prune": {
           "type": "boolean",

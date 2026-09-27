@@ -175,6 +175,15 @@ func configureFSPressureForTests() {
 	}
 }
 
+// configureDoctorVolumeFreeForTests pins the worktree-volume-free check's
+// reader to a fixed 1 TiB, so `gc doctor` against a throwaway city does not
+// pass or fail with how full the host's disk happens to be.
+func configureDoctorVolumeFreeForTests() {
+	doctorWorktreeVolumeFreeBytes = func(string) (int64, error) {
+		return 1 << 40, nil
+	}
+}
+
 // testTempRootAliveSentinel pins the alive-sentinel flock on this process's
 // test temp root for the binary's lifetime. The reference must stay live:
 // the runtime finalizes unreachable os.Files, which would close the
@@ -210,6 +219,7 @@ func TestMain(m *testing.M) {
 	// already owns the fixtures. Just configure hooks and forward.
 	if isTestscriptCommandInvocation(os.Args[0]) {
 		configureFSPressureForTests()
+		configureDoctorVolumeFreeForTests()
 		configureSupervisorHooksForTests()
 		testscript.Main(m, map[string]func(){
 			"gc": func() {
@@ -301,6 +311,7 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	configureFSPressureForTests()
+	configureDoctorVolumeFreeForTests()
 	configureSupervisorHooksForTests()
 	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
 	if tmuxSocketCleanupRoot != "" {

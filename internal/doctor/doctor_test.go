@@ -90,7 +90,7 @@ func TestCheckWarmupEligibleDefaultsFalse(t *testing.T) {
 		&RigPathCheck{},
 		&SkillCollisionCheck{},
 		&WorktreeCheck{},
-		&WorktreeDiskSizeCheck{},
+		&WorktreeVolumeFreeCheck{},
 		&ZombieSessionsCheck{},
 	}
 
