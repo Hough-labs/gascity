@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -127,6 +130,146 @@ func TestReconcileSessionBeads_AliveResumeModeReassignKeepsConversation(t *testi
 	}
 	if got.Metadata["continuation_reset_pending"] == "true" {
 		t.Fatalf("continuation_reset_pending = true, want unset for resume mode (no cycle should have run)")
+	}
+}
+
+// TestReconcileSessionBeads_AliveFreshPoolSameRootAdvanceKeepsConversation
+// pins gascity-gwl0: mol-polecat-work assigns every step of a workflow to the
+// claiming pool session up front, so closing one step moves the anchor to the
+// next step of the SAME workflow root. That is not new work, and a
+// wake_mode=fresh pool session must keep its process and conversation across
+// it while the recorded bead follows the anchor.
+func TestReconcileSessionBeads_AliveFreshPoolSameRootAdvanceKeepsConversation(t *testing.T) {
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "polecat", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(4)}},
+	}
+	sessionName := "polecat-gc-1"
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "polecat",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		poolManagedMetadataKey:      boolMetadata(true),
+		"template":                  "polecat",
+		"state":                     "active",
+		"wake_mode":                 "fresh",
+		"session_key":               "conversation-A",
+		sessionpkg.CurrentBeadIDKey: "mol-1.2",
+		sessionpkg.CurrentRootIDKey: "mol-1",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	// Step mol-1.2 closed; the next step of the same workflow is the only
+	// work still assigned to the session.
+	nextStep := beads.Bead{
+		ID: "mol-1.3", Title: "preflight-tests", Type: "task", Status: "in_progress", Assignee: sessionName,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "mol-1"},
+	}
+
+	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{session}, []beads.Bead{nextStep})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("pool session was killed advancing between steps of one workflow root — want it kept alive")
+	}
+	if out := env.stdout.String(); strings.Contains(out, "Cycled fresh-mode") {
+		t.Fatalf("stdout reports a fresh-mode cycle for a same-root step advance:\n%s", out)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata[sessionpkg.CurrentBeadIDKey] != "mol-1.3" {
+		t.Fatalf("%s = %q, want mol-1.3 re-stamped to the new anchor", sessionpkg.CurrentBeadIDKey, got.Metadata[sessionpkg.CurrentBeadIDKey])
+	}
+	if got.Metadata[sessionpkg.CurrentRootIDKey] != "mol-1" {
+		t.Fatalf("%s = %q, want mol-1 kept", sessionpkg.CurrentRootIDKey, got.Metadata[sessionpkg.CurrentRootIDKey])
+	}
+	if got.Metadata["session_key"] != "conversation-A" {
+		t.Fatalf("session_key = %q, want conversation-A preserved", got.Metadata["session_key"])
+	}
+}
+
+// TestRecordCurrentBeadIDOnWake_StickyRoot pins the writer half of the sticky
+// workflow root: a non-empty root is stamped beside the bead, and a rootless
+// bead re-stamps the bead alone without clearing the recorded root.
+func TestRecordCurrentBeadIDOnWake_StickyRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		recordedBead, recorded string
+		beadID, rootID         string
+		wantFold               sessionpkg.MetadataPatch
+		wantBead, wantRoot     string
+	}{
+		{
+			name: "same-root step advance", recordedBead: "mol-1.2", recorded: "mol-1",
+			beadID: "mol-1.3", rootID: "mol-1",
+			wantFold: sessionpkg.MetadataPatch{sessionpkg.CurrentBeadIDKey: "mol-1.3"},
+			wantBead: "mol-1.3", wantRoot: "mol-1",
+		},
+		{
+			name: "rootless source bead keeps the root", recordedBead: "mol-1.2", recorded: "mol-1",
+			beadID: "src-1", rootID: "",
+			wantFold: sessionpkg.MetadataPatch{sessionpkg.CurrentBeadIDKey: "src-1"},
+			wantBead: "src-1", wantRoot: "mol-1",
+		},
+		{
+			name: "new root replaces the old one", recordedBead: "mol-1.9", recorded: "mol-1",
+			beadID: "mol-2.1", rootID: "mol-2",
+			wantFold: sessionpkg.MetadataPatch{sessionpkg.CurrentBeadIDKey: "mol-2.1", sessionpkg.CurrentRootIDKey: "mol-2"},
+			wantBead: "mol-2.1", wantRoot: "mol-2",
+		},
+		{
+			name: "root backfilled on an unchanged bead", recordedBead: "mol-1.2", recorded: "",
+			beadID: "mol-1.2", rootID: "mol-1",
+			wantFold: sessionpkg.MetadataPatch{sessionpkg.CurrentBeadIDKey: "mol-1.2", sessionpkg.CurrentRootIDKey: "mol-1"},
+			wantBead: "mol-1.2", wantRoot: "mol-1",
+		},
+		{
+			name: "nothing changed", recordedBead: "mol-1.2", recorded: "mol-1",
+			beadID: "mol-1.2", rootID: "mol-1",
+			wantFold: nil,
+			wantBead: "mol-1.2", wantRoot: "mol-1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			meta := map[string]string{sessionpkg.CurrentBeadIDKey: tc.recordedBead}
+			if tc.recorded != "" {
+				meta[sessionpkg.CurrentRootIDKey] = tc.recorded
+			}
+			b, err := store.Create(beads.Bead{Title: "polecat-gc-1", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: meta})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			info := sessionpkg.Info{ID: b.ID, CurrentlyProcessingBeadID: tc.recordedBead, CurrentlyProcessingRootID: tc.recorded}
+
+			fold := recordCurrentBeadIDOnWake(info, sessionFrontDoor(store), tc.beadID, tc.rootID, nil)
+
+			if !reflect.DeepEqual(fold, tc.wantFold) {
+				t.Fatalf("fold = %#v, want %#v", fold, tc.wantFold)
+			}
+			got, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Metadata[sessionpkg.CurrentBeadIDKey] != tc.wantBead || got.Metadata[sessionpkg.CurrentRootIDKey] != tc.wantRoot {
+				t.Fatalf("stored (bead, root) = (%q, %q), want (%q, %q)",
+					got.Metadata[sessionpkg.CurrentBeadIDKey], got.Metadata[sessionpkg.CurrentRootIDKey], tc.wantBead, tc.wantRoot)
+			}
+		})
 	}
 }
 

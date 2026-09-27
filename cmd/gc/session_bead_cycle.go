@@ -18,13 +18,18 @@ import (
 // when the assignee has been pointed at a different bead. The metadata
 // survives session restart, so crash recovery can resume the same bead
 // instead of jumping to a sibling assignment.
+// The bead's workflow root (rootID) is recorded beside it as the sticky
+// currently_processing_root_id, but only when non-empty: a move to a rootless
+// bead, such as the source work bead a workflow was poured for, keeps the
+// recorded root so the next step of that workflow is not mistaken for new work.
 // recordCurrentBeadIDOnWake returns the metadata patch it applied (the
-// currently_processing_bead_id write) so the reconciler can fold it onto the
-// infoByID snapshot (write-returns-Info), or nil when it was a no-op. It reads
-// the session id and the currently-processing bead off the caller's coherent
-// typed Info (Info.ID / Info.CurrentlyProcessingBeadID, both verbatim raw
-// mirrors); the fold the caller applies keeps the snapshot in step.
-func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store, beadID string, stderr io.Writer) sessionpkg.MetadataPatch {
+// currently_processing_bead_id write, plus the root when it changed) so the
+// reconciler can fold it onto the infoByID snapshot (write-returns-Info), or
+// nil when it was a no-op. It reads the session id and the currently-processing
+// bead and root off the caller's coherent typed Info (Info.ID /
+// Info.CurrentlyProcessingBeadID / Info.CurrentlyProcessingRootID, all verbatim
+// raw mirrors); the fold the caller applies keeps the snapshot in step.
+func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store, beadID, rootID string, stderr io.Writer) sessionpkg.MetadataPatch {
 	if strings.TrimSpace(info.ID) == "" || sessFront == nil {
 		return nil
 	}
@@ -32,16 +37,25 @@ func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store
 	if beadID == "" {
 		return nil
 	}
-	if info.CurrentlyProcessingBeadID == beadID {
+	// Only a non-empty root that differs from the recorded one is written.
+	newRootID := strings.TrimSpace(rootID)
+	if newRootID == info.CurrentlyProcessingRootID {
+		newRootID = ""
+	}
+	if info.CurrentlyProcessingBeadID == beadID && newRootID == "" {
 		return nil
 	}
-	if err := sessFront.RecordCurrentBead(info.ID, beadID); err != nil {
+	if err := sessFront.RecordCurrentWork(info.ID, beadID, newRootID); err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: recording %s for %s: %v\n", sessionpkg.CurrentBeadIDKey, info.SessionNameMetadata, err) //nolint:errcheck
 		}
 		return nil
 	}
-	return sessionpkg.MetadataPatch{sessionpkg.CurrentBeadIDKey: beadID}
+	patch := sessionpkg.MetadataPatch{sessionpkg.CurrentBeadIDKey: beadID}
+	if newRootID != "" {
+		patch[sessionpkg.CurrentRootIDKey] = newRootID
+	}
+	return patch
 }
 
 // cycleAliveSessionForFreshReassign tears down a live wake_mode=fresh
@@ -60,7 +74,8 @@ func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store
 // for providers that accept --session-id, then apply RestartRequestPatch so
 // the next wake observes firstStart=true and uses the fresh-wake
 // conversation reset. We also update currently_processing_bead_id to the
-// new anchor so the divergence check does not refire on the next tick.
+// new anchor, and currently_processing_root_id to its workflow root when it
+// has one, so the divergence check does not refire on the next tick.
 func cycleAliveSessionForFreshReassign(
 	info sessionpkg.Info,
 	tp TemplateParams,
@@ -70,6 +85,7 @@ func cycleAliveSessionForFreshReassign(
 	cb *sessionCircuitBreaker,
 	name string,
 	newBeadID string,
+	newRootID string,
 	now time.Time,
 	stdout, stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
@@ -102,6 +118,9 @@ func cycleAliveSessionForFreshReassign(
 		batch["session_key"] = ""
 	}
 	batch[sessionpkg.CurrentBeadIDKey] = newBeadID
+	if newRootID = strings.TrimSpace(newRootID); newRootID != "" {
+		batch[sessionpkg.CurrentRootIDKey] = newRootID
+	}
 	if err := sessionFrontDoor(store).ApplyPatch(info.ID, batch); err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "session reconciler: recording fresh-cycle handoff for %s: %v\n", name, err) //nolint:errcheck

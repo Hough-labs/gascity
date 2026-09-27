@@ -186,6 +186,18 @@ func (s *Store) RecordCurrentBead(id, beadID string) error {
 	return s.setMetadataValue(id, CurrentBeadIDKey, beadID)
 }
 
+// RecordCurrentWork stamps the work bead a session is currently processing
+// and, when rootID is non-empty, the workflow root that bead belongs to, in
+// one SetMetadataBatch. An empty rootID writes the bead alone exactly as
+// RecordCurrentBead does and leaves any recorded root in place: the root is
+// sticky, so a move to a rootless bead never clears it.
+func (s *Store) RecordCurrentWork(id, beadID, rootID string) error {
+	if rootID == "" {
+		return s.RecordCurrentBead(id, beadID)
+	}
+	return s.ApplyPatch(id, MetadataPatch{CurrentBeadIDKey: beadID, CurrentRootIDKey: rootID})
+}
+
 // CloseWithoutReason closes the session bead identified by id without stamping
 // terminal close metadata. It is the front door for the raw store.Close(id)
 // call in closeBead, which stamps ClosePatch via setMetaBatch separately and

@@ -690,6 +690,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"instance_token":         "tok-xyz",
 				"detached_at":            pastRFC3339,
 				session.CurrentBeadIDKey: "ga-work-1",
+				session.CurrentRootIDKey: "ga-root-1",
 				// Step 6a codec-gap mirrors. wake_attempts="0" is the raw/int edge:
 				// WakeAttemptsMetadata must keep "0" verbatim while WakeAttempts parses 0
 				// (the distinction clearWakeFailures's != "" && != "0" gate needs).
@@ -974,6 +975,10 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		"sessionCurrentlyProcessingBeadID": {
 			func(b beads.Bead) string { return b.Metadata[session.CurrentBeadIDKey] },
 			func(i session.Info) string { return i.CurrentlyProcessingBeadID },
+		},
+		"sessionCurrentlyProcessingRootID": {
+			func(b beads.Bead) string { return b.Metadata[session.CurrentRootIDKey] },
+			func(i session.Info) string { return i.CurrentlyProcessingRootID },
 		},
 		"sessionCoreHashBreakdown": {
 			func(b beads.Bead) string { return b.Metadata["core_hash_breakdown"] },

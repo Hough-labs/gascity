@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -91,6 +92,7 @@ func buildAwakeInputFromReconciler(
 			ready := i < len(readyAssignedFlags) && readyAssignedFlags[i]
 			input.WorkBeads = append(input.WorkBeads, AwakeWorkBead{
 				ID: wb.ID, Assignee: a, Status: wb.Status, Ready: ready,
+				RootID: strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
 			})
 		}
 	}
@@ -136,6 +138,7 @@ func buildAwakeInputFromReconciler(
 			ContinuationResetPending: strings.TrimSpace(info.ContinuationResetPending) == "true" &&
 				strings.TrimSpace(info.ResetCommittedAt) != "",
 			CurrentlyProcessingBeadID: strings.TrimSpace(info.CurrentlyProcessingBeadID),
+			CurrentlyProcessingRootID: strings.TrimSpace(info.CurrentlyProcessingRootID),
 		}
 		bead.HeldUntil = lifecycle.HeldUntil
 		bead.QuarantinedUntil = lifecycle.QuarantinedUntil

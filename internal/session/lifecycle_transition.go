@@ -71,6 +71,14 @@ func PromptHash(prompt string) string {
 // cycle under wake_mode=fresh.
 const CurrentBeadIDKey = "currently_processing_bead_id"
 
+// CurrentRootIDKey records the workflow root (gc.root_bead_id) of the last
+// rooted work bead a session processed. Unlike CurrentBeadIDKey it is sticky:
+// a move to a bead with no root never clears it. ComputeAwakeSet uses it so a
+// session advancing between steps of one workflow, or through that workflow's
+// rootless source bead, is not cycled under wake_mode=fresh; only a bead under
+// a different root is.
+const CurrentRootIDKey = "currently_processing_root_id"
+
 var freshWakeConversationResetKeys = []string{
 	"session_key",
 	"started_config_hash",

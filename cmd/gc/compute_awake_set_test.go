@@ -2315,6 +2315,99 @@ func TestAssignedWork_NoRecordedCurrent_FirstMatchAnchors(t *testing.T) {
 	}
 }
 
+// freshPoolAwakeInput builds an alive pool session that last processed
+// recorded under the sticky workflow root stickyRoot, and whose only assigned
+// work is now anchor. It is the shape mol-polecat-work produces at a formula
+// step boundary: the closed step drops out of the assigned set and the anchor
+// falls to the next step, or to the rootless source work bead.
+func freshPoolAwakeInput(recorded, stickyRoot string, anchor AwakeWorkBead) AwakeInput {
+	anchor.Assignee = "polecat-gc-1"
+	anchor.Status = "in_progress"
+	return AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "gascity/polecat"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "gc-1", SessionName: "polecat-gc-1", Template: "gascity/polecat",
+			State:                     "active",
+			CurrentlyProcessingBeadID: recorded,
+			CurrentlyProcessingRootID: stickyRoot,
+		}},
+		WorkBeads:       []AwakeWorkBead{anchor},
+		RunningSessions: map[string]bool{"polecat-gc-1": true},
+		Now:             now,
+	}
+}
+
+func TestAssignedWork_SameRootStepAdvance_NoFreshCycle(t *testing.T) {
+	// Step mol-1.2 closed; the next step of the same workflow is the anchor.
+	d := ComputeAwakeSet(freshPoolAwakeInput("mol-1.2", "mol-1", AwakeWorkBead{ID: "mol-1.3", RootID: "mol-1"}))["polecat-gc-1"]
+	if d.AssignedWorkBeadID != "mol-1.3" || d.AssignedWorkRootID != "mol-1" {
+		t.Fatalf("anchor = (%q, root %q), want (mol-1.3, root mol-1)", d.AssignedWorkBeadID, d.AssignedWorkRootID)
+	}
+	if d.RequiresFreshCycle {
+		t.Fatal("RequiresFreshCycle = true, want false — advancing between steps of one workflow root is not new work")
+	}
+}
+
+func TestAssignedWork_StepToRootlessSourceBead_NoFreshCycle(t *testing.T) {
+	// The only assigned work left is the source bead the workflow was poured
+	// for, which carries no gc.root_bead_id.
+	d := ComputeAwakeSet(freshPoolAwakeInput("mol-1.2", "mol-1", AwakeWorkBead{ID: "src-1"}))["polecat-gc-1"]
+	if d.AssignedWorkBeadID != "src-1" {
+		t.Fatalf("AssignedWorkBeadID = %q, want src-1", d.AssignedWorkBeadID)
+	}
+	if d.AssignedWorkRootID != "" {
+		t.Fatalf("AssignedWorkRootID = %q, want empty for a rootless source bead", d.AssignedWorkRootID)
+	}
+	if d.RequiresFreshCycle {
+		t.Fatal("RequiresFreshCycle = true, want false — a rootless bead cannot show the session left its workflow")
+	}
+}
+
+func TestAssignedWork_RootlessSourceBeadToSameRootStep_NoFreshCycle(t *testing.T) {
+	// Recorded is the rootless source bead; the sticky root survived it, and
+	// the workflow's Submit step is now the anchor.
+	d := ComputeAwakeSet(freshPoolAwakeInput("src-1", "mol-1", AwakeWorkBead{ID: "mol-1.9", RootID: "mol-1"}))["polecat-gc-1"]
+	if d.AssignedWorkBeadID != "mol-1.9" {
+		t.Fatalf("AssignedWorkBeadID = %q, want mol-1.9", d.AssignedWorkBeadID)
+	}
+	if d.RequiresFreshCycle {
+		t.Fatal("RequiresFreshCycle = true, want false — the step belongs to the sticky workflow root")
+	}
+}
+
+func TestAssignedWork_DifferentRoot_EmitsFreshCycle(t *testing.T) {
+	// The previous workflow finished; the first step of a new one is assigned.
+	d := ComputeAwakeSet(freshPoolAwakeInput("mol-1.9", "mol-1", AwakeWorkBead{ID: "mol-2.1", RootID: "mol-2"}))["polecat-gc-1"]
+	if d.AssignedWorkBeadID != "mol-2.1" || d.AssignedWorkRootID != "mol-2" {
+		t.Fatalf("anchor = (%q, root %q), want (mol-2.1, root mol-2)", d.AssignedWorkBeadID, d.AssignedWorkRootID)
+	}
+	if !d.RequiresFreshCycle {
+		t.Fatal("RequiresFreshCycle = false, want true — a different workflow root is new work")
+	}
+}
+
+func TestAssignedWork_NoStickyRoot_KeepsLegacyCycle(t *testing.T) {
+	// With no sticky root recorded (named sessions, rootless work), any bead
+	// divergence still cycles, as #1893 requires.
+	for _, tc := range []struct {
+		name   string
+		anchor AwakeWorkBead
+	}{
+		{name: "anchor with root", anchor: AwakeWorkBead{ID: "mol-2.1", RootID: "mol-2"}},
+		{name: "anchor without root", anchor: AwakeWorkBead{ID: "wb-2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := ComputeAwakeSet(freshPoolAwakeInput("wb-1", "", tc.anchor))["polecat-gc-1"]
+			if d.AssignedWorkBeadID != tc.anchor.ID {
+				t.Fatalf("AssignedWorkBeadID = %q, want %q", d.AssignedWorkBeadID, tc.anchor.ID)
+			}
+			if !d.RequiresFreshCycle {
+				t.Fatal("RequiresFreshCycle = false, want true — without a sticky root a different bead cycles")
+			}
+		})
+	}
+}
+
 // TestNamedOnDemand_ResetPendingBlockedStaysAsleep is a characterisation test
 // for gascity-ksa. Every other reset-pending fixture in this file leaves the
 // wake blockers unset, so the blocked case had no coverage at all — which is

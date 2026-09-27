@@ -352,6 +352,51 @@ func TestRecordCurrentBeadEmitsSingleKeySetMetadata(t *testing.T) {
 	}
 }
 
+// TestRecordCurrentWorkWritesBeadAndRootInOneBatch proves a non-empty root is
+// stamped together with the bead in a single SetMetadataBatch.
+func TestRecordCurrentWorkWritesBeadAndRootInOneBatch(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", nil)
+	is, rec := recordingStore(t, b)
+
+	if err := is.RecordCurrentWork("s-1", "gcg-42.3", "gcg-42"); err != nil {
+		t.Fatalf("RecordCurrentWork: %v", err)
+	}
+	gotOps := opsOf(rec.Calls())
+	if !reflect.DeepEqual(gotOps, []string{"SetMetadataBatch"}) {
+		t.Fatalf("RecordCurrentWork ops = %v, want [SetMetadataBatch]", gotOps)
+	}
+	want := map[string]string{CurrentBeadIDKey: "gcg-42.3", CurrentRootIDKey: "gcg-42"}
+	if got := rec.CallsForOp("SetMetadataBatch")[0].Metadata; !reflect.DeepEqual(got, want) {
+		t.Errorf("RecordCurrentWork batch = %#v, want %#v", got, want)
+	}
+}
+
+// TestRecordCurrentWorkEmptyRootKeepsStickyRoot proves an empty root writes
+// the bead alone, as RecordCurrentBead does, and leaves the recorded root.
+func TestRecordCurrentWorkEmptyRootKeepsStickyRoot(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{CurrentRootIDKey: "gcg-42"})
+	is, rec := recordingStore(t, b)
+
+	if err := is.RecordCurrentWork("s-1", "gcg-src", ""); err != nil {
+		t.Fatalf("RecordCurrentWork: %v", err)
+	}
+	gotOps := opsOf(rec.Calls())
+	if !reflect.DeepEqual(gotOps, []string{"SetMetadata"}) {
+		t.Fatalf("RecordCurrentWork ops = %v, want [SetMetadata]", gotOps)
+	}
+	c := rec.CallsForOp("SetMetadata")[0]
+	if c.ID != "s-1" || c.Key != CurrentBeadIDKey || c.Value != "gcg-src" {
+		t.Errorf("RecordCurrentWork call = (%q,%q,%q), want (s-1,%q,gcg-src)", c.ID, c.Key, c.Value, CurrentBeadIDKey)
+	}
+	got, err := rec.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata[CurrentRootIDKey] != "gcg-42" {
+		t.Errorf("%s = %q after a rootless stamp, want gcg-42 kept", CurrentRootIDKey, got.Metadata[CurrentRootIDKey])
+	}
+}
+
 // TestCloseWithoutReasonEmitsSingleClose proves CloseWithoutReason emits exactly
 // one Close op and no metadata write — byte-identical to closeBead's raw
 // store.Close(id) after it stamps ClosePatch separately.

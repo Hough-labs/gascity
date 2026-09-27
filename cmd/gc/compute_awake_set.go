@@ -77,6 +77,7 @@ type AwakeSessionBead struct {
 	RestartRequested          bool      // restart_requested metadata is still active
 	ContinuationResetPending  bool      // continuation_reset_pending metadata is set
 	CurrentlyProcessingBeadID string    // work bead the session is currently processing
+	CurrentlyProcessingRootID string    // sticky workflow root of the last rooted bead it processed
 }
 
 // AwakeWorkBead represents a work bead with an assignee.
@@ -85,6 +86,7 @@ type AwakeWorkBead struct {
 	Assignee string
 	Status   string // "open", "in_progress"
 	Ready    bool   // true for open work only after readiness/blocker filtering
+	RootID   string // gc.root_bead_id; empty for work outside a workflow
 }
 
 // AwakeDecision is the output for a single session.
@@ -97,11 +99,14 @@ type AwakeDecision struct {
 	// use it to persist currently_processing_bead_id and to detect when an
 	// alive session has been reassigned to a different bead.
 	AssignedWorkBeadID string
-	// RequiresFreshCycle is true when an alive session's recorded
-	// currently_processing_bead_id differs from AssignedWorkBeadID. The
-	// reconciler combines this with wake_mode=fresh to trigger a
-	// restart-style cycle so the next wake starts a fresh conversation on
-	// the newly assigned bead.
+	// AssignedWorkRootID is the workflow root of AssignedWorkBeadID, or empty
+	// when that bead belongs to no workflow. Callers persist it as the
+	// session's sticky currently_processing_root_id.
+	AssignedWorkRootID string
+	// RequiresFreshCycle is true when an alive session's anchor is new work
+	// (see assignedWorkRequiresFreshCycle). The reconciler combines this with
+	// wake_mode=fresh to trigger a restart-style cycle so the next wake starts
+	// a fresh conversation on the newly assigned bead.
 	RequiresFreshCycle bool
 }
 
@@ -288,10 +293,11 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 	// matching work bead as the anchor so crash recovery brings a session
 	// back to the bead it last owned even when other beads share the
 	// assignee. If no candidate matches the recorded current bead, fall back
-	// to the first matching work bead and flag the divergence — the
-	// reconciler reads this to decide whether to cycle the conversation for
-	// wake_mode=fresh.
-	assignedAnchor := make(map[string]string) // sessionName → matched work bead ID
+	// to the first matching work bead; when that is new work
+	// (assignedWorkRequiresFreshCycle) the decision flags it, and the
+	// reconciler reads the flag to decide whether to cycle the conversation
+	// for wake_mode=fresh.
+	assignedAnchor := make(map[string]AwakeWorkBead) // sessionName → matched work bead
 	for _, bead := range input.SessionBeads {
 		if bead.State == "closed" {
 			continue
@@ -300,9 +306,9 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			continue
 		}
 		var (
-			fallback   string
+			fallback   AwakeWorkBead
 			haveExact  bool
-			anchorBead string
+			anchorBead AwakeWorkBead
 			recorded   = bead.CurrentlyProcessingBeadID
 			matchedAny = false
 		)
@@ -316,12 +322,12 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			}
 			matchedAny = true
 			if recorded != "" && wb.ID == recorded {
-				anchorBead = wb.ID
+				anchorBead = wb
 				haveExact = true
 				break
 			}
-			if fallback == "" {
-				fallback = wb.ID
+			if fallback.ID == "" {
+				fallback = wb
 			}
 		}
 		if !matchedAny {
@@ -390,10 +396,9 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			HasAssignedWork: hasAssignedWork,
 		}
 		if hasAssignedWork {
-			decision.AssignedWorkBeadID = anchor
-			if bead.CurrentlyProcessingBeadID != "" && anchor != bead.CurrentlyProcessingBeadID {
-				decision.RequiresFreshCycle = true
-			}
+			decision.AssignedWorkBeadID = anchor.ID
+			decision.AssignedWorkRootID = anchor.RootID
+			decision.RequiresFreshCycle = assignedWorkRequiresFreshCycle(bead, anchor)
 		}
 
 		// Desired set (demand-driven wake). wait_hold suppresses normal
@@ -708,6 +713,19 @@ func workBeadHasAwakeDemand(bead AwakeWorkBead) bool {
 	default:
 		return false
 	}
+}
+
+// assignedWorkRequiresFreshCycle reports whether a session's assigned-work
+// anchor is new work that needs a fresh conversation. With a sticky workflow
+// root recorded, only an anchor under a different non-empty root is new: the
+// next step of the same workflow, and the rootless source bead that workflow
+// was poured for, both continue the work in hand. Without one (named sessions,
+// rootless work) any move away from the recorded bead is new work (#1893).
+func assignedWorkRequiresFreshCycle(bead AwakeSessionBead, anchor AwakeWorkBead) bool {
+	if bead.CurrentlyProcessingRootID != "" {
+		return anchor.RootID != "" && anchor.RootID != bead.CurrentlyProcessingRootID
+	}
+	return bead.CurrentlyProcessingBeadID != "" && anchor.ID != bead.CurrentlyProcessingBeadID
 }
 
 func sessionAssigneeMatches(named []AwakeNamedSession, bead AwakeSessionBead, assignee string) bool {
