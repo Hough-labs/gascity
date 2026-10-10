@@ -1,0 +1,72 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "dashboardspa",
+    srcs = [
+        "embed.go",
+        "handler.go",
+    ],
+    embedsrcs = [
+        "dist/assets/context-window-O2hS3NR_.js",
+        "dist/assets/format-fte2CeYD.js",
+        "dist/assets/index-3CR_Qhva.css",
+        "dist/assets/inter-cyrillic-ext-wght-normal-BOeWTOD4.woff2",
+        "dist/assets/inter-cyrillic-wght-normal-DqGufNeO.woff2",
+        "dist/assets/inter-greek-ext-wght-normal-DlzME5K_.woff2",
+        "dist/assets/inter-greek-wght-normal-CkhJZR-_.woff2",
+        "dist/assets/inter-latin-ext-wght-normal-DO1Apj_S.woff2",
+        "dist/assets/inter-latin-wght-normal-Dx4kXJAl.woff2",
+        "dist/assets/inter-vietnamese-wght-normal-CBcvBZtf.woff2",
+        "dist/assets/routeHighlight-B30gQO2o.js",
+        "dist/assets/time-BVuL_AnL.js",
+        "dist/favicon-alert.svg",
+        "dist/favicon-calm.svg",
+        "dist/index.html",
+        "dist/assets/Activity-iiwUJBHj.js",
+        "dist/assets/AgentDetail-C3rkBNiJ.js",
+        "dist/assets/Agents-xLSADnZq.js",
+        "dist/assets/BeadDetailModal-SN9v786Z.js",
+        "dist/assets/Beads-D7IKMC3t.js",
+        "dist/assets/CockpitHome-DW6ORlZI.js",
+        "dist/assets/Field-BZTqzy0A.js",
+        "dist/assets/FormulaRunDetail-BioL28cR.js",
+        "dist/assets/Health-C3E8XBM8.js",
+        "dist/assets/LiveSessionPeek-Bfxoor2Y.js",
+        "dist/assets/Mail-CqZDpwl6.js",
+        "dist/assets/PageHeader-2BdjmiuE.js",
+        "dist/assets/Runs-BLHvdNoy.js",
+        "dist/assets/SseIndicator-CfT09-iI.js",
+        "dist/assets/StageLadder-BCUwMEVK.js",
+        "dist/assets/Table-DAl7RQw0.js",
+        "dist/assets/agentReads-DGHhOX33.js",
+        "dist/assets/constants-fQNFAyLX.js",
+        "dist/assets/index-DzMm__1w.js",
+        "dist/assets/projectOf-V6yR-a1N.js",
+        "dist/assets/useListFilters-7No8dfTH.js",
+        "dist/assets/useVisibleRefresh-SJfkeSHS.js",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/api/dashboardspa",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "dashboardspa_test",
+    srcs = [
+        "handler_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":dashboardspa"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

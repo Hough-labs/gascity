@@ -6,72 +6,88 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-func TestLoadRigDoltPorts_ReadsAllRigs(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
-	fs.Files["/rig-a/.beads/dolt-server.port"] = []byte("28232\n")
-	fs.Files["/rig-b/.beads/dolt-server.port"] = []byte("28233\n")
-
+func TestDoltProcRigOwner_MatchesDataDirUnderRigRoot(t *testing.T) {
 	rigs := []resolverRig{
 		{Name: "hq", Path: "/city", HQ: true},
 		{Name: "alpha", Path: "/rig-a"},
-		{Name: "beta", Path: "/rig-b"},
 	}
 
-	got := loadRigDoltPorts(rigs, fs)
-	want := map[int]string{
-		28231: "hq",
-		28232: "alpha",
-		28233: "beta",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("loadRigDoltPorts = %v, want %v", got, want)
+	proc := DoltProcInfo{Argv: []string{"dolt", "sql-server", "--data-dir", "/rig-a/.beads/dolt"}}
+	owner, ok := doltProcRigOwner(proc, rigs)
+	if !ok || owner != "alpha" {
+		t.Errorf("doltProcRigOwner = (%q, %v), want (alpha, true)", owner, ok)
 	}
 }
 
-func TestLoadRigDoltPorts_SkipsMissingAndMalformed(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/rig-a/.beads/dolt-server.port"] = []byte("28232\n")
-	fs.Files["/rig-b/.beads/dolt-server.port"] = []byte("not-a-port\n")
-	fs.Files["/rig-c/.beads/dolt-server.port"] = []byte("\n")
-	// /rig-d has no port file at all.
+func TestDoltProcRigOwner_MatchesConfigUnderRigRoot(t *testing.T) {
+	rigs := []resolverRig{{Name: "hq", Path: "/city", HQ: true}}
 
-	rigs := []resolverRig{
-		{Name: "alpha", Path: "/rig-a"},
-		{Name: "beta", Path: "/rig-b"},
-		{Name: "gamma", Path: "/rig-c"},
-		{Name: "delta", Path: "/rig-d"},
-	}
-
-	got := loadRigDoltPorts(rigs, fs)
-	want := map[int]string{
-		28232: "alpha",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("loadRigDoltPorts = %v, want %v", got, want)
+	proc := DoltProcInfo{Argv: []string{"dolt", "sql-server", "--config", "/city/.gc/runtime/packs/dolt/config.yaml"}}
+	owner, ok := doltProcRigOwner(proc, rigs)
+	if !ok || owner != "hq" {
+		t.Errorf("doltProcRigOwner = (%q, %v), want (hq, true)", owner, ok)
 	}
 }
 
-func TestLoadRigDoltPorts_DuplicatePortsLastWins(t *testing.T) {
-	// Pathological: two rigs claim the same port. Last write wins so the
-	// reaper still protects on port match (it just attributes to the
-	// later-listed rig). Acceptable behavior; documented in the function.
-	fs := fsys.NewFake()
-	fs.Files["/rig-a/.beads/dolt-server.port"] = []byte("28232\n")
-	fs.Files["/rig-b/.beads/dolt-server.port"] = []byte("28232\n")
-
+func TestDoltProcRigOwner_IgnoresForeignAndPathlessProcesses(t *testing.T) {
 	rigs := []resolverRig{
+		{Name: "hq", Path: "/city", HQ: true},
 		{Name: "alpha", Path: "/rig-a"},
-		{Name: "beta", Path: "/rig-b"},
 	}
 
-	got := loadRigDoltPorts(rigs, fs)
-	if got[28232] == "" {
-		t.Errorf("expected port 28232 to be in map, got %v", got)
+	for _, tc := range []struct {
+		name string
+		argv []string
+	}{
+		{"foreign data dir", []string{"dolt", "sql-server", "--data-dir", "/elsewhere/dolt"}},
+		{"foreign config", []string{"dolt", "sql-server", "--config", "/tmp/TestX/config.yaml"}},
+		{"no path flags", []string{"dolt", "sql-server"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if owner, ok := doltProcRigOwner(DoltProcInfo{Argv: tc.argv}, rigs); ok {
+				t.Errorf("doltProcRigOwner = (%q, true), want no owner", owner)
+			}
+		})
+	}
+}
+
+func TestDoltProcRigOwner_FirstListedRigWinsOnNestedRoots(t *testing.T) {
+	// Pathological: nested rig roots both contain the candidate path. The
+	// first-listed rig wins; the reaper is still safe because any match
+	// protects regardless of attribution.
+	rigs := []resolverRig{
+		{Name: "outer", Path: "/work"},
+		{Name: "inner", Path: "/work/rig-a"},
+	}
+
+	proc := DoltProcInfo{Argv: []string{"dolt", "sql-server", "--data-dir", "/work/rig-a/.beads/dolt"}}
+	owner, ok := doltProcRigOwner(proc, rigs)
+	if !ok || owner != "outer" {
+		t.Errorf("doltProcRigOwner = (%q, %v), want (outer, true)", owner, ok)
+	}
+}
+
+func TestPathUnderRoot(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		root string
+		want bool
+	}{
+		{"direct child", "/city/.beads/dolt", "/city", true},
+		{"equal", "/city", "/city", true},
+		{"sibling prefix is not containment", "/cityscape/.beads", "/city", false},
+		{"outside", "/elsewhere/dolt", "/city", false},
+		{"empty path", "", "/city", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pathUnderRoot(tc.path, normalizePathForCompare(tc.root)); got != tc.want {
+				t.Errorf("pathUnderRoot(%q, %q) = %v, want %v", tc.path, tc.root, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -134,7 +150,10 @@ func TestLooksLikeDoltSQLServer(t *testing.T) {
 }
 
 func TestParseDoltPSLine_DoltSQLServer(t *testing.T) {
-	line := "  78306  65392 Sun May 17 09:31:24 2026 /usr/local/bin/dolt sql-server --config /tmp/TestGcBeadsBdStartUsesRootBeadsDataDir802378814/001/.gc/runtime/packs/dolt/dolt-config.yaml --host 127.0.0.1"
+	// No rss= token: gastownhall/gascity#5201 dropped it from the requested ps
+	// fields, since some macOS hosts reject the whole ps invocation when it
+	// asks for resource-usage fields on other sessions' processes.
+	line := "  78306  Sun May 17 09:31:24 2026 /usr/local/bin/dolt sql-server --config /tmp/TestGcBeadsBdStartUsesRootBeadsDataDir802378814/001/.gc/runtime/packs/dolt/dolt-config.yaml --host 127.0.0.1"
 	got, ok := parseDoltPSLine(line, map[int][]int{78306: {3306}})
 	if !ok {
 		t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
@@ -142,8 +161,8 @@ func TestParseDoltPSLine_DoltSQLServer(t *testing.T) {
 	if got.PID != 78306 {
 		t.Fatalf("PID = %d, want 78306", got.PID)
 	}
-	if got.RSSBytes != 65392*1024 {
-		t.Fatalf("RSSBytes = %d, want %d", got.RSSBytes, int64(65392*1024))
+	if got.RSSBytes != 0 {
+		t.Fatalf("RSSBytes = %d, want 0 (rss= is no longer requested from ps, gastownhall/gascity#5201)", got.RSSBytes)
 	}
 	if !reflect.DeepEqual(got.Ports, []int{3306}) {
 		t.Fatalf("Ports = %v, want [3306]", got.Ports)
@@ -157,7 +176,7 @@ func TestParseDoltPSLine_DoltSQLServer(t *testing.T) {
 }
 
 func TestParseDoltPSLine_PreservesSpacedConfigPath(t *testing.T) {
-	line := "12345 1024 Sun May 17 09:31:24 2026 dolt sql-server --config /tmp/Test With Space/config.yaml --port 3306"
+	line := "12345 Sun May 17 09:31:24 2026 dolt sql-server --config /tmp/Test With Space/config.yaml --port 3306"
 	got, ok := parseDoltPSLine(line, nil)
 	if !ok {
 		t.Fatal("parseDoltPSLine did not recognize dolt sql-server")
@@ -168,38 +187,36 @@ func TestParseDoltPSLine_PreservesSpacedConfigPath(t *testing.T) {
 }
 
 // TestParseDoltPSLine_ColumnPaddedLstart pins the whitespace contract the
-// darwin fallback depends on. `ps -ax -o pid=,rss=,lstart=,command=` emits
+// darwin fallback depends on. `ps -ax -o pid=,lstart=,command=` emits
 // fixed-width columns, so the separators are runs of spaces rather than single
-// spaces: rss is right-aligned under the widest value, lstart is padded out to
+// spaces: pid is right-aligned under the widest value, lstart is padded out to
 // its column, and BSD formats the day of month with strftime %e, which
 // space-pads a single-digit day into two characters. Every existing fixture in
 // this file happens to use a two-digit day and single-space separators, so
 // nothing covered the padded shapes the fallback actually parses.
 //
-// The first line below is captured verbatim from `ps -ax -o
-// pid=,rss=,lstart=,command=` on darwin/arm64.
+// The first line below is a darwin/arm64 capture of `ps -ax -o
+// pid=,rss=,lstart=,command=` with the rss column removed, matching
+// psOutputFormat since gastownhall/gascity#5201 stopped requesting rss=.
 func TestParseDoltPSLine_ColumnPaddedLstart(t *testing.T) {
 	cases := []struct {
 		name         string
 		line         string
 		wantPID      int
-		wantRSSKB    int64
 		wantIdentity string
 		wantConfig   string
 	}{
 		{
 			name:         "captured darwin line",
-			line:         "19479 916576 Wed Aug 26 14:55:23 2026     dolt sql-server --config /Users/hunter/gc/.gc/runtime/packs/dolt/dolt-config.yaml",
+			line:         "19479 Wed Aug 26 14:55:23 2026     dolt sql-server --config /Users/hunter/gc/.gc/runtime/packs/dolt/dolt-config.yaml",
 			wantPID:      19479,
-			wantRSSKB:    916576,
 			wantIdentity: "Wed Aug 26 14:55:23 2026",
 			wantConfig:   "/Users/hunter/gc/.gc/runtime/packs/dolt/dolt-config.yaml",
 		},
 		{
 			name:         "single digit day padded by strftime %e",
-			line:         " 2867 1028672 Sun May  7 09:31:24 2026     /opt/homebrew/bin/dolt sql-server --config /tmp/TestX/config.yaml",
+			line:         " 2867 Sun May  7 09:31:24 2026     /opt/homebrew/bin/dolt sql-server --config /tmp/TestX/config.yaml",
 			wantPID:      2867,
-			wantRSSKB:    1028672,
 			wantIdentity: "Sun May 7 09:31:24 2026",
 			wantConfig:   "/tmp/TestX/config.yaml",
 		},
@@ -212,9 +229,6 @@ func TestParseDoltPSLine_ColumnPaddedLstart(t *testing.T) {
 			}
 			if got.PID != tc.wantPID {
 				t.Errorf("PID = %d, want %d", got.PID, tc.wantPID)
-			}
-			if got.RSSBytes != tc.wantRSSKB*1024 {
-				t.Errorf("RSSBytes = %d, want %d", got.RSSBytes, tc.wantRSSKB*1024)
 			}
 			// StartIdentity is the five lstart fields rejoined with single
 			// spaces, so the padded and unpadded forms normalize to the same
@@ -234,7 +248,7 @@ func TestParseDoltPSLine_ColumnPaddedLstart(t *testing.T) {
 // active-test-root arm, which reuses the leading-field consumer but keeps the
 // whole command line as argv rather than reducing it to the dolt form.
 func TestArgvFromPSLine_ColumnPaddedNonDolt(t *testing.T) {
-	line := " 6077   1296 Sun May  7 22:10:03 2026     tail -f /tmp/TestZq7Probe/001/dolt-config.yaml"
+	line := " 6077 Sun May  7 22:10:03 2026     tail -f /tmp/TestZq7Probe/001/dolt-config.yaml"
 	argv, ok := argvFromPSLine(line)
 	if !ok {
 		t.Fatal("argvFromPSLine did not parse a padded non-dolt line")
@@ -246,9 +260,23 @@ func TestArgvFromPSLine_ColumnPaddedNonDolt(t *testing.T) {
 }
 
 func TestParseDoltPSLine_IgnoresNonDolt(t *testing.T) {
-	line := "12345 1024 Sun May 17 09:31:24 2026 mysqld --config /tmp/TestX/config.yaml"
+	line := "12345 Sun May 17 09:31:24 2026 mysqld --config /tmp/TestX/config.yaml"
 	if got, ok := parseDoltPSLine(line, nil); ok {
 		t.Fatalf("parseDoltPSLine = %+v, want ignored", got)
+	}
+}
+
+// TestPSOutputFormatExcludesRSS pins gastownhall/gascity#5201: some macOS
+// hosts require an entitlement to report resource-usage fields (%mem/vsz/
+// rss/time) for processes outside the caller's own session, and `ps` exits
+// non-zero for the *entire* invocation when it can't — turning a clean,
+// zero-orphan scan into a reported dolt-cleanup reap-stage error. RSSBytes
+// is cosmetic-only downstream (planOrphanReap classifies purely on
+// ConfigPath/DataDir/CWDState, never on RSS), so requesting rss= here is not
+// worth trading away the whole scan for.
+func TestPSOutputFormatExcludesRSS(t *testing.T) {
+	if strings.Contains(psOutputFormat, "rss=") {
+		t.Fatalf("psOutputFormat = %q, must not request rss= (gastownhall/gascity#5201)", psOutputFormat)
 	}
 }
 

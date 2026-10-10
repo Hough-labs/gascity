@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -192,5 +193,88 @@ func TestNewSessionSerializesCreationPerSocket(t *testing.T) {
 	}
 	if se.overlaps != 0 {
 		t.Fatalf("%d concurrent new-session invocations against one socket; creation must be single-file", se.overlaps)
+	}
+}
+
+// TestGuardedCreateStagesSecretEnvUnderNoStartServer covers the composition of
+// the two new-session defenses. A secret-bearing environment moves the create
+// into a private command file, and runNewSession leads that file with
+// start-server — a command allowed to create a server, so on a refused connect
+// it takes the unlink+bind path -N exists to close. Against a server the
+// preflight found alive, the staged create must therefore carry -N and must
+// not lead with start-server, while the secret still stays off argv.
+func TestGuardedCreateStagesSecretEnvUnderNoStartServer(t *testing.T) {
+	const secret = "sk-test-not-a-real-credential"
+	fe := probeAssertSet([]string{"", ""}, []error{ErrSessionNotFound, nil})
+	tm := &Tmux{cfg: Config{SocketName: "gc-test"}, exec: fe}
+
+	env := map[string]string{"ANTHROPIC_AUTH_TOKEN": secret}
+	if err := tm.NewSessionWithCommandAndEnv("gc-staged", "", "claude", env); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	if len(fe.calls) < 2 || !firstArgsContainHasSession(fe.calls[0]) {
+		t.Fatalf("calls = %#v, want the preflight probe followed by the create", fe.calls)
+	}
+	create := fe.calls[1]
+	verb := slices.Index(create, "source-file")
+	if verb < 0 {
+		t.Fatalf("create = %v, want a staged source-file invocation", create)
+	}
+	if !slices.Contains(create[:verb], "-N") {
+		t.Fatalf("create = %v, want -N ahead of source-file so the staged create cannot start a server", create)
+	}
+	if slices.Contains(create, "start-server") {
+		t.Fatalf("create = %v, must not lead with start-server against a live socket", create)
+	}
+	for _, call := range fe.calls {
+		for _, arg := range call {
+			if strings.Contains(arg, secret) {
+				t.Fatalf("secret value reached tmux argv: %v", call)
+			}
+		}
+	}
+}
+
+// TestColdStartStagesSecretEnvWithStartServer is the other mode: a cold start
+// is the one create allowed to found the server, so its staged form keeps
+// runNewSession's start-server lead and carries no -N.
+func TestColdStartStagesSecretEnvWithStartServer(t *testing.T) {
+	fe := probeAssertSet([]string{"", "", "", ""}, []error{ErrNoServer, ErrNoServer, nil, nil})
+	tm := &Tmux{
+		cfg:                  Config{SocketName: "gc-test"},
+		exec:                 fe,
+		serverSocketObserver: func(context.Context, string) error { return nil },
+	}
+
+	env := map[string]string{"ANTHROPIC_AUTH_TOKEN": "sk-test-not-a-real-credential"}
+	if err := tm.NewSessionWithCommandAndEnv("gc-cold-staged", "", "claude", env); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	if len(fe.calls) < 3 {
+		t.Fatalf("calls = %#v, want two probes followed by the create", fe.calls)
+	}
+	create := fe.calls[2]
+	if !slices.Contains(create, "start-server") || !slices.Contains(create, "source-file") {
+		t.Fatalf("create = %v, want start-server ; source-file", create)
+	}
+	if slices.Contains(create, "-N") {
+		t.Fatalf("create = %v, a cold start must be free to create the server", create)
+	}
+}
+
+// TestGuardedStagedCreateReportsSaturationNotAbsence keeps the -N
+// classification on the staged path: a refused source-file under -N reads as
+// "no server running", which must surface as saturation, never absence.
+func TestGuardedStagedCreateReportsSaturationNotAbsence(t *testing.T) {
+	fe := probeAssertSet([]string{"", ""}, []error{ErrSessionNotFound, ErrNoServer})
+	tm := &Tmux{cfg: Config{SocketName: "gc-test"}, exec: fe}
+
+	err := tm.NewSessionWithCommandAndEnv("gc-staged-saturated", "", "claude",
+		map[string]string{"ANTHROPIC_AUTH_TOKEN": "sk-test-not-a-real-credential"})
+	if errors.Is(err, ErrNoServer) {
+		t.Fatalf("err = %v, must not report a refused -N create as absence", err)
+	}
+	if !errors.Is(err, ErrServerSaturated) {
+		t.Fatalf("err = %v, want ErrServerSaturated", err)
 	}
 }

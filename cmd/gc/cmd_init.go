@@ -31,6 +31,9 @@ const initMailRetentionExample = `# [mail]
 # retention_ttl controls how long read messages are retained before purge.
 # 0 disables retention; use "168h" for 7 days.
 # "7d" is not a valid Go duration.
+# It also sets how long a read mail bead stays open before the nudge-mail
+# sweep closes it: unset keeps that sweep's own 60m default, while "0"
+# disables the close phase too, leaving read mail beads open.
 # retention_ttl = "0"
 `
 
@@ -326,6 +329,8 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var doltUserFlag string
 	var doltDatabaseFlag string
 	var doltProjectIDFlag string
+	var beadsTransportFlag string
+	var beadsTargetFlag string
 	var skipProviderReadiness bool
 	var preserveExisting bool
 	var jsonOut bool
@@ -367,24 +372,26 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 				out = io.Discard
 			}
 			mode := "default"
-			if fromFlag != "" {
-				mode = "from"
-				code := cmdInitFromDirWithOptionsInternal(fromFlag, args, nameFlag, out, stderr, skipProviderReadiness, noStart)
-				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, "", "", nil, bootstrapProfileFlag, mode, stdout)
-			}
-			if fileFlag != "" {
-				mode = "file"
-				code := cmdInitFromFileWithOptionsInternal(fileFlag, args, nameFlag, out, stderr, skipProviderReadiness, preserveExisting, noStart)
-				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, "", "", nil, bootstrapProfileFlag, mode, stdout)
-			}
-			hosted := resolveHostedDoltInitOptions(hostedDoltInitFlagValues{
+			hostedEndpoint := resolveHostedDoltInitOptions(hostedDoltInitFlagValues{
 				Host:      doltHostFlag,
 				Port:      doltPortFlag,
 				User:      doltUserFlag,
 				Database:  doltDatabaseFlag,
 				ProjectID: doltProjectIDFlag,
+				Transport: beadsTransportFlag,
+				Target:    beadsTargetFlag,
 			}, os.Getenv)
-			wiz, flagMode, err := initWizardConfigFromFlags(runCmd, providerFlag, defaultProviderFlag, providersFlag, templateFlag, bootstrapProfileFlag, hosted, skipProviderReadiness)
+			if fromFlag != "" {
+				mode = "from"
+				code := cmdInitFromDirWithOptionsInternal(fromFlag, args, nameFlag, out, stderr, skipProviderReadiness, noStart, hostedEndpoint)
+				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, "", "", nil, bootstrapProfileFlag, mode, stdout)
+			}
+			if fileFlag != "" {
+				mode = "file"
+				code := cmdInitFromFileWithOptionsInternal(fileFlag, args, nameFlag, out, stderr, skipProviderReadiness, preserveExisting, noStart, hostedEndpoint)
+				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, "", "", nil, bootstrapProfileFlag, mode, stdout)
+			}
+			wiz, flagMode, err := initWizardConfigFromFlags(runCmd, providerFlag, defaultProviderFlag, providersFlag, templateFlag, bootstrapProfileFlag, hostedEndpoint, skipProviderReadiness)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 				return err
@@ -409,6 +416,8 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().StringVar(&doltUserFlag, "dolt-user", "", "external/hosted Dolt user (or "+envDoltUser+"); optional")
 	cmd.Flags().StringVar(&doltDatabaseFlag, "dolt-database", "", "hosted beads project database, e.g. bd_prj_… (or "+envDoltDatabase+"); required with --dolt-host")
 	cmd.Flags().StringVar(&doltProjectIDFlag, "dolt-project-id", "", "authoritative beads project_id for the identity handshake (or "+envBeadsProjectID+"); derived from a bd_<id> --dolt-database when omitted")
+	cmd.Flags().StringVar(&beadsTransportFlag, "beads-transport", "", "beads transport selector: direct or proxied (or "+envBeadsTransport+"); give with --beads-target. Default proxied: bd owns the Dolt process, any bd read restarts it, and gc stop stops it. direct is the escape hatch and is also bd-owned (bd init --server), not the legacy gc-managed server. Every fresh provider-owned init requires bd >= 1.3.0, selector or not; only the legacy --dolt-host alias given without a selector stays on the 1.0.4 floor")
+	cmd.Flags().StringVar(&beadsTargetFlag, "beads-target", "", "beads target selector: local or external (or "+envBeadsTarget+"); give with --beads-transport. Default local. external requires --dolt-host, --dolt-port and --dolt-database (or "+envDoltHost+"/"+envDoltPort+"/"+envDoltDatabase+"); bd resolves the project_id itself, so --dolt-project-id is not needed with a selector")
 	cmd.Flags().BoolVar(&skipProviderReadiness, "skip-provider-readiness", false, "skip provider login/readiness checks during init and continue startup")
 	cmd.Flags().BoolVar(&noStart, "no-start", false, "initialize files and imports without registering or starting the city")
 	cmd.Flags().BoolVar(&preserveExisting, "preserve-existing", false, "keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them")
@@ -425,9 +434,11 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.MarkFlagsMutuallyExclusive("template", "from")
 	cmd.MarkFlagsMutuallyExclusive("bootstrap-profile", "file")
 	cmd.MarkFlagsMutuallyExclusive("bootstrap-profile", "from")
+	// --dolt-* pins an external Dolt endpoint and is compatible with --from:
+	// the copied template is initialized against the supplied endpoint. Only
+	// --file (which supplies a complete city.toml verbatim) remains exclusive.
 	for _, doltFlag := range []string{"dolt-host", "dolt-port", "dolt-user", "dolt-database", "dolt-project-id"} {
 		cmd.MarkFlagsMutuallyExclusive(doltFlag, "file")
-		cmd.MarkFlagsMutuallyExclusive(doltFlag, "from")
 	}
 	_ = cmd.Flags().MarkHidden("provider")
 	return cmd
@@ -526,7 +537,7 @@ func cmdInitWithPreparedWizardInternal(args []string, prepared wizardConfig, pre
 			return 1
 		}
 	}
-	if handled, code := resumeExistingInitIfPossibleInternal(fsys.OSFS{}, cityPath, stdout, stderr, "gc init", true, skipProviderReadiness, noStart); handled {
+	if handled, code := resumeExistingInitIfPossibleInternal(fsys.OSFS{}, cityPath, stdout, stderr, "gc init", true, skipProviderReadiness, noStart, prepared.hostedDolt); handled {
 		return code
 	}
 	var wiz wizardConfig
@@ -557,10 +568,11 @@ func cmdInitWithPreparedWizardInternal(args []string, prepared wizardConfig, pre
 		showProgress:          true,
 		commandName:           "gc init",
 		noStart:               noStart,
+		hostedDolt:            wiz.hostedDolt,
 	})
 }
 
-func resumeExistingInitIfPossibleInternal(fs fsys.FS, cityPath string, stdout, stderr io.Writer, commandName string, showProgress bool, skipProviderReadiness bool, noStart bool) (bool, int) {
+func resumeExistingInitIfPossibleInternal(fs fsys.FS, cityPath string, stdout, stderr io.Writer, commandName string, showProgress bool, skipProviderReadiness bool, noStart bool, hostedDolt hostedDoltInitOptions) (bool, int) {
 	if !cityCanResumeInitFS(fs, cityPath) {
 		return false, 0
 	}
@@ -572,6 +584,7 @@ func resumeExistingInitIfPossibleInternal(fs fsys.FS, cityPath string, stdout, s
 		showProgress:          showProgress,
 		commandName:           commandName,
 		noStart:               noStart,
+		hostedDolt:            hostedDolt,
 	})
 }
 
@@ -604,7 +617,7 @@ func initWizardConfigFromFlags(cmd *cobra.Command, providerFlag, defaultProvider
 	templateChanged := cmd.Flags().Changed("template")
 	bootstrapChanged := strings.TrimSpace(bootstrapProfileFlag) != ""
 
-	if !legacyChanged && !defaultChanged && !providersChanged && !templateChanged && !bootstrapChanged && !hosted.enabled() {
+	if !legacyChanged && !defaultChanged && !providersChanged && !templateChanged && !bootstrapChanged && !hosted.enabled() && strings.TrimSpace(hosted.Transport) == "" && strings.TrimSpace(hosted.Target) == "" {
 		return wizardConfig{}, "", nil
 	}
 	if err := hosted.validate(); err != nil {
@@ -1092,10 +1105,14 @@ func appendUniqueStrings(dst []string, items ...string) []string {
 }
 
 func cmdInitFromFileWithOptions(fileArg string, args []string, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool) int {
-	return cmdInitFromFileWithOptionsInternal(fileArg, args, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false)
+	return cmdInitFromFileWithOptionsInternal(fileArg, args, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false, hostedDoltInitOptions{})
 }
 
-func cmdInitFromFileWithOptionsInternal(fileArg string, args []string, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, noStart bool) int {
+func cmdInitFromFileWithOptionsInternal(fileArg string, args []string, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, noStart bool, hostedOpts ...hostedDoltInitOptions) int {
+	var hosted hostedDoltInitOptions
+	if len(hostedOpts) > 0 {
+		hosted = hostedOpts[0]
+	}
 	var cityPath string
 	if len(args) > 0 {
 		var err error
@@ -1113,7 +1130,7 @@ func cmdInitFromFileWithOptionsInternal(fileArg string, args []string, nameOverr
 		}
 	}
 
-	return cmdInitFromTOMLFileWithOptionsInternal(fsys.OSFS{}, fileArg, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, noStart)
+	return cmdInitFromTOMLFileWithOptionsInternal(fsys.OSFS{}, fileArg, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, noStart, hosted)
 }
 
 // cmdInitFromTOMLFile initializes a city by copying a user-provided TOML
@@ -1123,10 +1140,14 @@ func cmdInitFromTOMLFile(fs fsys.FS, tomlSrc, cityPath string, stdout, stderr io
 }
 
 func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool) int {
-	return cmdInitFromTOMLFileWithOptionsInternal(fs, tomlSrc, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false)
+	return cmdInitFromTOMLFileWithOptionsInternal(fs, tomlSrc, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false, hostedDoltInitOptions{})
 }
 
-func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, noStart bool) int {
+func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, noStart bool, hostedOpts ...hostedDoltInitOptions) int {
+	var hosted hostedDoltInitOptions
+	if len(hostedOpts) > 0 {
+		hosted = hostedOpts[0]
+	}
 	// Validate the source file parses as a valid city config.
 	data, err := os.ReadFile(tomlSrc)
 	if err != nil {
@@ -1135,6 +1156,18 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 	}
 	cfg, err := config.Parse(data)
 	if err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := hosted.applySelectorToCityConfig(cfg); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// Validate semantic Dolt mode constraints before creating any target
+	// scaffold or copying the source configuration. Failing here keeps invalid init requests
+	// side-effect free and prevents a partially initialized city from being
+	// mistaken for an existing scope on retry.
+	if err := config.ValidateDoltConfig(cfg, tomlSrc); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1260,6 +1293,18 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Generic transport/target selectors are a bd-provider contract. Check
+	// the effective file config before the file-store bootstrap can write its
+	// ledger, while leaving the newly scaffolded city configuration available
+	// for a corrected retry.
+	if err := selectorBackendErrorForFileConfig(cfg, hosted); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := selectorBackendError(cityPath, hosted); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Write .gitignore entries for city-managed directories.
 	if err := ensureGitignoreEntries(fs, cityPath, cityGitignoreEntries); err != nil {
@@ -1279,6 +1324,7 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 		skipProviderReadiness: skipProviderReadiness,
 		commandName:           "gc init",
 		noStart:               noStart,
+		hostedDolt:            hosted,
 	})
 }
 
@@ -1383,11 +1429,9 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		cfg = config.DefaultCity(cityName)
 	}
 	applyBootstrapProfile(&cfg, wiz.bootstrapProfile)
-	if wiz.hostedDolt.enabled() {
-		if err := wiz.hostedDolt.applyToCityConfig(&cfg); err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	if err := wiz.hostedDolt.applySelectorToCityConfig(&cfg); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
 
@@ -1449,7 +1493,12 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		return 1
 	}
 
-	// When a hosted/external Dolt endpoint was supplied, write the full
+	if err := selectorBackendError(cityPath, wiz.hostedDolt); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// A legacy --dolt-* endpoint writes the full
 	// canonical external config now (R2/R3/R4/R5) so the unconditional
 	// initDirIfReady that follows resolves the city as external and skips the
 	// managed-local Dolt bootstrap. Reject incompatible effective backends
@@ -1460,9 +1509,11 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if err := applyInitHostedDoltCanonicalConfig(fs, cityPath, cityPrefix, wiz.hostedDolt); err != nil {
-			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+		if !wiz.hostedDolt.selectorRequested() {
+			if err := applyInitHostedDoltCanonicalConfig(fs, cityPath, cityPrefix, wiz.hostedDolt); err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 		}
 	}
 
@@ -1631,7 +1682,11 @@ func writeInitAgentPrompts(fs fsys.FS, cityPath string, cfg *config.City, stderr
 // when copying a city template directory via --from. Skips .gc/ runtime state.
 func initFromSkip(relPath string, isDir bool) bool {
 	top, _, _ := strings.Cut(relPath, string(filepath.Separator))
-	if top == ".gc" {
+	// Provider-owned beads state is initialized by the selected provider in
+	// the destination. Copying it from a template can carry stale process,
+	// endpoint, and database identity across cities, so the complete .beads
+	// tree is always excluded from --from copies.
+	if top == ".gc" || top == ".beads" {
 		return true
 	}
 	if !isDir && strings.HasSuffix(filepath.Base(relPath), "_test.go") {
@@ -1727,7 +1782,7 @@ func resolveCityName(nameOverride, sourceName, cityPath string) string {
 	return cityinit.ResolveCityName(nameOverride, sourceName, cityPath)
 }
 
-func cmdInitFromDirWithOptionsInternal(fromDir string, args []string, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool) int {
+func cmdInitFromDirWithOptionsInternal(fromDir string, args []string, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool, hosted hostedDoltInitOptions) int {
 	var cityPath string
 	if len(args) > 0 {
 		var err error
@@ -1751,7 +1806,7 @@ func cmdInitFromDirWithOptionsInternal(fromDir string, args []string, nameOverri
 		return 1
 	}
 
-	return doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, noStart)
+	return doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, noStart, hosted)
 }
 
 // doInitFromDir copies an example city directory to a new city path,
@@ -1762,10 +1817,17 @@ func doInitFromDir(srcDir, cityPath string, stdout, stderr io.Writer) int {
 }
 
 func doInitFromDirWithOptionsFS(fs fsys.FS, srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool) int {
-	return doInitFromDirWithOptionsFSInternal(fs, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, false)
+	return doInitFromDirWithOptionsFSInternal(fs, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, false, hostedDoltInitOptions{})
 }
 
-func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool) int {
+func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool, hosted hostedDoltInitOptions) int {
+	// Validate the supplied endpoint before touching the filesystem: a rejected
+	// endpoint must not leave a partially-copied destination behind, which would
+	// make the corrected retry fail with "already initialized".
+	if err := hosted.validate(); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	srcToml := filepath.Join(srcDir, "city.toml")
 	if _, err := os.Stat(srcToml); err != nil {
 		fmt.Fprintf(stderr, "gc init --from: source %q has no city.toml\n", srcDir) //nolint:errcheck // best-effort stderr
@@ -1784,7 +1846,7 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	}
 
 	copiedToml := filepath.Join(cityPath, "city.toml")
-	cfg, cityName, cityPrefix, persistSiteIdentity, err := rewriteCopiedInitFromIdentity(fs, cityPath, nameOverride)
+	cfg, cityName, cityPrefix, persistSiteIdentity, rigSiteBindings, err := rewriteCopiedInitFromIdentity(fs, cityPath, nameOverride)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1793,6 +1855,60 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 		if err := persistInitWorkspaceIdentity(fs, cityPath, copiedToml, cfg, cityName, cityPrefix); err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
+		}
+	}
+	selectorRequested := strings.TrimSpace(hosted.Transport) != "" || strings.TrimSpace(hosted.Target) != ""
+	if err := selectorBackendError(cityPath, hosted); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if selectorRequested {
+		if err := hosted.applySelectorToCityConfig(cfg); err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		writeCfg := *cfg
+		if len(rigSiteBindings) > 0 {
+			writeCfg.Rigs = append([]config.Rig(nil), rigSiteBindings...)
+		}
+		if err := writeCityConfigForEditFS(fs, copiedToml, &writeCfg); err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
+	// Pin a legacy external/hosted Dolt endpoint supplied via --dolt-* flags.
+	// GC_DOLT_* environment, the same as the default/wizard init modes. Without
+	// this, --from silently ignored the endpoint and the copied template's
+	// managed-local Dolt assumption won. Precedence (explicit flag > env >
+	// template) is already resolved in hosted; when no endpoint was supplied it
+	// is disabled and the copied template is preserved unchanged.
+	if hosted.enabled() {
+		if err := hostedDoltBackendError(cityPath); err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if !hosted.selectorRequested() {
+			if err := hosted.applyToCityConfig(cfg); err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			// Re-supply the rig paths stripped by the identity rewrite: the write
+			// path treats a rig with an empty path as "no binding" and would erase
+			// the .gc/site.toml entries just persisted. MarshalForWrite strips the
+			// paths from city.toml either way, so this only preserves site.toml.
+			writeCfg := *cfg
+			if len(rigSiteBindings) > 0 {
+				writeCfg.Rigs = append([]config.Rig(nil), rigSiteBindings...)
+			}
+			if err := writeCityConfigForEditFS(fs, copiedToml, &writeCfg); err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			if err := applyInitHostedDoltCanonicalConfig(fs, cityPath, cityPrefix, hosted); err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 		}
 	}
 
@@ -1842,6 +1958,7 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 		skipProviderReadiness: skipProviderReadiness,
 		commandName:           "gc init",
 		noStart:               noStart,
+		hostedDolt:            hosted,
 	})
 }
 
@@ -1849,19 +1966,24 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 	return doInitFromDirWithOptionsFS(fsys.OSFS{}, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness)
 }
 
-func doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool) int {
-	return doInitFromDirWithOptionsFSInternal(fsys.OSFS{}, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, noStart)
+func doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness bool, noStart bool, hosted hostedDoltInitOptions) int {
+	return doInitFromDirWithOptionsFSInternal(fsys.OSFS{}, srcDir, cityPath, nameOverride, stdout, stderr, skipProviderReadiness, noStart, hosted)
 }
 
-func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*config.City, string, string, bool, error) {
+// rewriteCopiedInitFromIdentity rewrites the copied city.toml with the resolved
+// city identity. When the source declares rig paths, those paths are stripped
+// from cfg and persisted to .gc/site.toml instead; the stripped bindings are
+// returned so later writers of the same city.toml can re-supply them and avoid
+// erasing the site bindings just written.
+func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*config.City, string, string, bool, []config.Rig, error) {
 	copiedToml := filepath.Join(cityPath, "city.toml")
 	data, err := fs.ReadFile(copiedToml)
 	if err != nil {
-		return nil, "", "", false, fmt.Errorf("reading copied city.toml: %w", err)
+		return nil, "", "", false, nil, fmt.Errorf("reading copied city.toml: %w", err)
 	}
 	cfg, err := config.Parse(data)
 	if err != nil {
-		return nil, "", "", false, err
+		return nil, "", "", false, nil, err
 	}
 
 	cityName := resolveCityName(nameOverride, "", cityPath)
@@ -1869,17 +1991,17 @@ func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*
 	packPath := filepath.Join(cityPath, "pack.toml")
 	if _, err := fs.Stat(packPath); err != nil {
 		if !os.IsNotExist(err) {
-			return nil, "", "", false, err
+			return nil, "", "", false, nil, err
 		}
 		cfg.Workspace.Name = cityName
 		content, err := cfg.Marshal()
 		if err != nil {
-			return nil, "", "", false, err
+			return nil, "", "", false, nil, err
 		}
 		if err := fs.WriteFile(copiedToml, content, 0o644); err != nil {
-			return nil, "", "", false, err
+			return nil, "", "", false, nil, err
 		}
-		return cfg, cityName, cityPrefix, false, nil
+		return cfg, cityName, cityPrefix, false, nil, nil
 	}
 	cfg.Workspace.Name = ""
 	cfg.Workspace.Prefix = ""
@@ -1895,21 +2017,21 @@ func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*
 		writeCfg := *cfg
 		writeCfg.Rigs = append([]config.Rig(nil), rigSiteBindings...)
 		if err := config.WriteCityAndRigSiteBindingsForEdit(fs, copiedToml, &writeCfg); err != nil {
-			return nil, "", "", false, initSiteBindingPersistError(err)
+			return nil, "", "", false, nil, initSiteBindingPersistError(err)
 		}
 	} else {
 		content, err := cfg.Marshal()
 		if err != nil {
-			return nil, "", "", false, err
+			return nil, "", "", false, nil, err
 		}
 		if err := fs.WriteFile(copiedToml, content, 0o644); err != nil {
-			return nil, "", "", false, err
+			return nil, "", "", false, nil, err
 		}
 	}
 	if err := rewriteCopiedInitPackName(fs, cityPath, cityName); err != nil {
-		return nil, "", "", false, err
+		return nil, "", "", false, nil, err
 	}
-	return cfg, cityName, cityPrefix, true, nil
+	return cfg, cityName, cityPrefix, true, rigSiteBindings, nil
 }
 
 func initSiteBindingPersistError(err error) error {

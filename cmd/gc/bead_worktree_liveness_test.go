@@ -80,12 +80,11 @@ func TestWorktreeIsLive_NothingMatches(t *testing.T) {
 	}
 }
 
+// TestCollectLiveWorktreeState_IncludesOwnCWD no longer skips off Linux. The
+// skip described the /proc-only limitation instead of asserting against it,
+// which let the gate stay permanently indeterminate on other platforms with a
+// green suite. The portable fallback makes the assertion meaningful on both.
 func TestCollectLiveWorktreeState_IncludesOwnCWD(t *testing.T) {
-	// Both linux (/proc) and darwin (lsof) have a real implementation; every
-	// other GOOS deliberately reports scanned=false so the reaper fails closed.
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skipf("collectLiveWorktreeState has no process table on GOOS=%s", runtime.GOOS)
-	}
 	live := collectLiveWorktreeState()
 	if !live.scanned {
 		t.Fatalf("collectLiveWorktreeState scanned = false on %s, want true", runtime.GOOS)
@@ -113,9 +112,6 @@ func TestCollectLiveWorktreeState_IncludesOwnCWD(t *testing.T) {
 // Darwin that is the difference between reading this process's state and
 // successfully parsing the whole lsof process table.
 func TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skipf("collectLiveWorktreeState has no process table on GOOS=%s", runtime.GOOS)
-	}
 	dir := t.TempDir()
 
 	// A real child process parked in dir, standing in for an agent mid-stage

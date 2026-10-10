@@ -64,16 +64,28 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 		pruneRetiredSystemPacks(cityPath, warningWriter)
 		return nil
 	}
-	if state.ready && requiredBuiltinSourcesUsable(cityPath) && lockedBundledImportsUsable(cityPath) {
-		return nil
+	// The ready fast path re-validates the shared synthetic cache so an
+	// in-place corruption after readiness is still detected and repaired. It
+	// uses a verifier that reuses an earlier pass's positive verdict while the
+	// cache tree's stat fingerprint is unchanged, so that guarantee no longer
+	// re-reads every cached pack file on every config load.
+	if state.ready {
+		warm := newWarmSyntheticCacheVerifier()
+		if requiredBuiltinSourcesUsable(cityPath, warm) && lockedBundledImportsUsable(cityPath, warm) {
+			return nil
+		}
 	}
+	// One verifier for the whole pass: the repair paths below validate the
+	// shared synthetic cache directory, and within a single pass that is the
+	// same question asked repeatedly.
+	verifier := newSyntheticCacheVerifier()
 	state.ready = false
 
 	var problems []error
-	if err := ensureBundledLockedRemoteImportsCached(cityPath); err != nil {
+	if err := ensureBundledLockedRemoteImportsCached(cityPath, verifier); err != nil {
 		problems = append(problems, err)
 	}
-	if err := ensureRequiredBuiltinSourcesCached(cityPath); err != nil {
+	if err := ensureRequiredBuiltinSourcesCached(cityPath, verifier); err != nil {
 		problems = append(problems, err)
 	}
 	if err := ensureGcBeadsBdShim(cityPath); err != nil {
@@ -82,7 +94,9 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 	pruneRetiredSystemPacks(cityPath, warningWriter)
 
 	if len(problems) > 0 {
-		if !requiredBuiltinSourcesUsable(cityPath) {
+		// A fresh verifier: the repairs above just rewrote caches, so this
+		// last-resort check must not reuse anything decided before them.
+		if !requiredBuiltinSourcesUsable(cityPath, newSyntheticCacheVerifier()) {
 			state.lastWarning = ""
 			return fmt.Errorf("preparing builtin pack caches: %w", problems[0])
 		}
@@ -236,15 +250,21 @@ func builtinImportsForNames(names []string) (map[string]config.Import, []string)
 // required bundled sources at the canonical pin, independent of packs.lock,
 // so the stable shim target and pre-migration cities always have the
 // current binary's content available.
-func ensureRequiredBuiltinSourcesCached(cityPath string) error {
+// The verifier scopes cache validation to the calling readiness pass; every
+// required source of a repository shares one synthetic cache directory, so
+// without it the same directory is walked once per source.
+func ensureRequiredBuiltinSourcesCached(cityPath string, verifier *syntheticCacheVerifier) error {
 	commit := bundledPackImportCommit()
 	for name, source := range requiredBuiltinSources(cityPath) {
 		cachePath, err := packman.RepoCachePath(source, commit)
 		if err != nil {
 			return fmt.Errorf("resolving cache path for bundled %s pack: %w", name, err)
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, commit) == nil {
-			backfillBundledCacheTreeFingerprint(cachePath, commit)
+		repository, known := builtinpacks.RepositoryForSource(source)
+		if !known {
+			return fmt.Errorf("resolving bundled repository for %s pack source %q", name, source)
+		}
+		if verifier.Valid(cachePath, repository, commit) {
 			continue
 		}
 		if _, err := packman.EnsureRepoInCache(cityPath, source, commit); err != nil {
@@ -254,45 +274,15 @@ func ensureRequiredBuiltinSourcesCached(cityPath string) error {
 	return nil
 }
 
-// backfillBundledCacheTreeFingerprint records the change-detection fingerprint
-// on a cache whose marker predates it, so subsequent invocations validate the
-// cache by a stat walk instead of re-reading every file (gascity-i7v).
-//
-// The caller has just validated the cache in full, which is the precondition
-// StampSyntheticTreeFingerprint re-checks under the lock. This runs at most
-// once per cache directory per binary: once a fingerprint is recorded the guard
-// is a single marker read and no lock is taken, which is what keeps the warm
-// readiness pass lock-free. The guard deliberately does not re-walk the tree —
-// ValidateSyntheticRepo just did, and every bundled source at the canonical pin
-// resolves to this same directory, so a walking guard would double the walks on
-// the hot path.
-//
-// Best-effort by construction: the fingerprint is an optimization, so a cache
-// root that cannot be locked or written (a read-only or concurrently-repaired
-// cache) simply leaves the next invocation on the full comparison — the same
-// behavior as before this fingerprint existed. It is never a reason to fail a
-// readiness pass whose actual work already succeeded.
-func backfillBundledCacheTreeFingerprint(cachePath, commit string) {
-	if builtinpacks.SyntheticTreeFingerprintRecorded(cachePath) {
-		return
-	}
-	root, err := packman.RepoCacheRoot()
-	if err != nil {
-		return
-	}
-	_, _ = config.WithRepoCacheWriteLock(root, func() (string, error) {
-		return "", builtinpacks.StampSyntheticTreeFingerprint(cachePath, commit)
-	})
-}
-
-func requiredBuiltinSourcesUsable(cityPath string) bool {
+func requiredBuiltinSourcesUsable(cityPath string, verifier *syntheticCacheVerifier) bool {
 	commit := bundledPackImportCommit()
 	for _, source := range requiredBuiltinSources(cityPath) {
 		cachePath, err := packman.RepoCachePath(source, commit)
 		if err != nil {
 			return false
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, commit) != nil {
+		repository, known := builtinpacks.RepositoryForSource(source)
+		if !known || !verifier.Valid(cachePath, repository, commit) {
 			return false
 		}
 	}

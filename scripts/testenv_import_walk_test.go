@@ -1,66 +1,19 @@
 package scripts_test
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 )
 
-// TestAddTestenvImportSkipsNestedWorktrees pins the fix for gascity-ru8b.
-//
-// Gastown checks every per-bead polecat worktree out INSIDE the polecat's home
-// worktree, so `go run scripts/add-testenv-import.go` from a home used to walk
-// the sibling worktrees as ordinary subdirectories. In each one it wrote a
-// testenv_import_test.go that made internal/testenv import itself and scrubbed
-// the legitimate testenv import out of that package's own tests — two separate
-// ways of not compiling, in trees the caller does not own. Six worktrees were
-// contaminated in gascity on 2026-08-26 before anyone noticed, and because the
-// droppings never self-clean they parked the witness reaper's dirty-worktree
-// gate on five closed beads permanently.
-//
-// The generator must treat a nested repository or module as a hard boundary and
-// prune the walk there, while still doing its real job in the tree it owns.
-func TestAddTestenvImportSkipsNestedWorktrees(t *testing.T) {
-	home := newTestenvGeneratorHome(t)
-	nested := filepath.Join(home, "worktrees", "gascity-nested")
-
-	before := hashTree(t, nested)
-	out := runTestenvGenerator(t, home)
-	after := hashTree(t, nested)
-
-	if diff := treeDiff(before, after); diff != "" {
-		t.Errorf("generator rewrote the nested worktree it does not own:\n%s\ngenerator output:\n%s", diff, out)
-	}
-}
-
-// TestAddTestenvImportStillGeneratesInItsOwnTree guards the other half of the
-// nested-worktree fix: pruning must not cost the generator its real job in the
-// module it was run for.
-func TestAddTestenvImportStillGeneratesInItsOwnTree(t *testing.T) {
-	home := newTestenvGeneratorHome(t)
-	out := runTestenvGenerator(t, home)
-
-	generated := filepath.Join(home, "internal", "foo", "testenv_import_test.go")
-	body, err := os.ReadFile(generated)
-	if err != nil {
-		t.Fatalf("generator did not write %s: %v\ngenerator output:\n%s", generated, err, out)
-	}
-	if !strings.Contains(string(body), `_ "github.com/gastownhall/gascity/internal/testenv"`) {
-		t.Errorf("generated file does not blank-import testenv:\n%s", body)
-	}
-}
-
-// TestAddTestenvImportSelfSkipIsPackageIdentity pins the self-skip to the
-// identity of the package that would end up importing itself, not to a path
-// fragment. A guard that matches the suffix "internal/testenv" would wrongly
-// skip an unrelated package that merely lives at a path ending that way, and a
-// guard that matches the root-relative path is the bug this bead fixes. Only
-// resolving the import path to a directory gets both cases right.
+// TestAddTestenvImportSelfSkipIsPackageIdentity pins the generator's self-skip
+// (gascity-ru8b): internal/testenv must never be given a testenv_import_test.go
+// that makes it import itself, nor lose the import its own external test needs,
+// while a decoy package whose path merely ends in internal/testenv is still
+// wired up. The fixture is a polecat-home layout with a real per-bead worktree
+// checked out beneath it; pruning that nested worktree is covered by
+// TestAddTestenvImportSkipsNestedGitWorktrees.
 func TestAddTestenvImportSelfSkipIsPackageIdentity(t *testing.T) {
 	home := newTestenvGeneratorHome(t)
 	out := runTestenvGenerator(t, home)
@@ -148,72 +101,4 @@ func runTestenvGenerator(t *testing.T, dir string) string {
 		t.Fatalf("go run scripts/add-testenv-import.go in %s: %v\n%s", dir, err, out)
 	}
 	return string(out)
-}
-
-// hashTree fingerprints every tracked-looking file under root, ignoring git's
-// own bookkeeping, so a caller can prove a tree is byte-identical.
-func hashTree(t *testing.T, root string) map[string]string {
-	t.Helper()
-	tree := map[string]string{}
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if d.Name() == ".git" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		if rel == ".git" {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		sum := sha256.Sum256(data)
-		tree[filepath.ToSlash(rel)] = hex.EncodeToString(sum[:])
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("hash tree %s: %v", root, err)
-	}
-	return tree
-}
-
-// treeDiff renders the added, removed, and modified paths between two
-// fingerprints, or "" when they match.
-func treeDiff(before, after map[string]string) string {
-	paths := map[string]bool{}
-	for path := range before {
-		paths[path] = true
-	}
-	for path := range after {
-		paths[path] = true
-	}
-	names := make([]string, 0, len(paths))
-	for path := range paths {
-		names = append(names, path)
-	}
-	sort.Strings(names)
-
-	var diff []string
-	for _, path := range names {
-		was, hadWas := before[path]
-		is, hadIs := after[path]
-		switch {
-		case !hadWas:
-			diff = append(diff, "  added:    "+path)
-		case !hadIs:
-			diff = append(diff, "  removed:  "+path)
-		case was != is:
-			diff = append(diff, "  modified: "+path)
-		}
-	}
-	return strings.Join(diff, "\n")
 }

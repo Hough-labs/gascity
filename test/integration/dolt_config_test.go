@@ -150,7 +150,7 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 // from prefix; leave it empty to create the database.
 func runBDInitCompat(t *testing.T, env []string, dir, prefix, port, database string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
 	defer cancel()
 	args := []string{
 		"init", "--server",
@@ -165,7 +165,7 @@ func runBDInitCompat(t *testing.T, env []string, dir, prefix, port, database str
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
-		t.Fatalf("bd init timed out: %s", out)
+		t.Fatalf("bd init timed out after %s: %s", bdInitTimeout, out)
 	}
 	if err != nil {
 		t.Fatalf("bd init: exit status %v: %s", err, out)
@@ -235,7 +235,7 @@ func startDoltServerOnAllInterfaces(t *testing.T, env []string, dataDir string) 
 	go func() { waitCh <- cmd.Wait() }()
 
 	// Wait for server to be ready.
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(doltServerReadyTimeout)
 	addr := net.JoinHostPort("127.0.0.1", port)
 	for {
 		conn, dialErr := net.DialTimeout("tcp", addr, 200*time.Millisecond)
@@ -253,7 +253,7 @@ func startDoltServerOnAllInterfaces(t *testing.T, env []string, dataDir string) 
 			<-waitCh
 			_ = logFile.Close()
 			logBytes, _ := os.ReadFile(logPath)
-			t.Fatalf("dolt sql-server did not become ready on %s within 15s:\n%s", addr, logBytes)
+			t.Fatalf("dolt sql-server did not become ready on %s within %s:\n%s", addr, doltServerReadyTimeout, logBytes)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 // driftFlags captures the operator-visible inputs that influence drift
@@ -526,7 +527,7 @@ var (
 
 // waitForPIDExit blocks until the process at pid is gone, escalating
 // to SIGKILL if SIGTERM did not take effect within timeout. Returns
-// nil once the kernel reports ESRCH on a signal-zero probe.
+// nil once the shared PID probe reports no live process.
 //
 // PID-recycling races are not addressed here — the window between
 // SIGTERM and SIGKILL is short enough (seconds) that a recycled PID
@@ -557,25 +558,8 @@ func waitForPIDExit(pid int, timeout, escalate time.Duration) error {
 	return fmt.Errorf("pid %d still alive after SIGKILL", pid)
 }
 
-// pidGone reports whether the given pid no longer represents a live
-// process — either the entry has been reaped (ESRCH on signal-zero)
-// or it has exited and is awaiting wait() from its parent (zombie).
-// Both cases mean the process can no longer hold ports or files, so
-// the supervisor restart can safely proceed.
-//
-// This is the negation of the shared liveness probe rather than its own
-// procfs read. The earlier local implementation probed signal-zero and then
-// read /proc/<pid>/status for the zombie case, returning os.IsNotExist(err)
-// when that read failed. That is right on Linux — a status file that vanished
-// between the two syscalls means the entry was reaped — but on a host with no
-// procfs at all the read fails with ENOENT for every PID, so every live
-// process was reported gone. waitForPIDExit then returned success on its first
-// poll without the old supervisor having exited, and gc start raced a
-// replacement onto a control socket the previous one still held.
-// pidutil.Alive keeps the signal-zero probe and the /proc/<pid>/stat zombie
-// check, and falls back to `ps -o stat=` where there is no procfs.
 func pidGone(pid int) bool {
-	return !pidAlive(pid)
+	return !pidutil.Alive(pid)
 }
 
 // humanizeReadyDuration formats a sub-minute duration as `0.7s`-style
@@ -586,9 +570,9 @@ func humanizeReadyDuration(d time.Duration) string {
 }
 
 // spawnDetachedSupervisor starts a backgrounded supervisor process,
-// inheriting the operator's environment and writing logs to the same
-// path doSupervisorStart uses. The child is fully detached so the
-// `gc start` invocation can return without orphaning it.
+// inheriting the operator's environment minus any agent-session identity, and
+// writing logs to the same path doSupervisorStart uses. The child is fully
+// detached so the `gc start` invocation can return without orphaning it.
 func spawnDetachedSupervisor(exe string, argv ...string) error {
 	logPath := supervisorLogPath()
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
@@ -604,7 +588,10 @@ func spawnDetachedSupervisor(exe string, argv ...string) error {
 	child.Stdin = nil
 	child.Stdout = logFile
 	child.Stderr = logFile
-	child.Env = os.Environ()
+	// The supervisor is Setpgid and outlives this `gc start`, so it reparents
+	// to init; inheriting an agent shell's session identity would make it that
+	// session's orphan-sweep target once the session closes (#6316).
+	child.Env = withoutSessionIdentityEnv(os.Environ())
 	disableProductMetricsForChild(child)
 	return child.Start()
 }

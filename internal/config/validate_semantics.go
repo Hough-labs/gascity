@@ -17,15 +17,17 @@ func IsIdleSleepMaskedByIdleTimeoutWarning(warning string) bool {
 // never gate: migration and deprecation notices (site binding, legacy v1
 // surfaces, legacy workspace fields, retired keys) and supported
 // configurations config flags but accepts (sleep_after_idle masked by
-// idle_timeout, an always-mode named session on a fresh-wake template). Strict
-// mode keeps these non-fatal, and gc doctor reports them as advisory.
+// idle_timeout, an always-mode named session on a fresh-wake template, the
+// [session] setup-timeout advisories). Strict mode keeps these non-fatal, and gc
+// doctor reports them as advisory.
 func IsNonFatalConfigWarning(warning string) bool {
 	return IsNonFatalSiteBindingWarning(warning) ||
 		IsLegacyV1SurfaceWarning(warning) ||
 		IsLegacyWorkspaceFieldWarning(warning) ||
 		IsIdleSleepMaskedByIdleTimeoutWarning(warning) ||
 		IsAlwaysFreshWakeModeWarning(warning) ||
-		IsRetiredKeyWarning(warning)
+		IsRetiredKeyWarning(warning) ||
+		IsSessionSetupTimeoutAdvisory(warning)
 }
 
 // ValidateSemantics checks cross-entity semantic constraints in the config

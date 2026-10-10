@@ -32,7 +32,7 @@ func TestCheckInstalledRejectsStatPreservingTamperInBundledSyntheticCache(t *tes
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)
 	}
-	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 	tamperCachedFilePreservingStat(t, filepath.Join(cachePath, filepath.FromSlash(corePackTomlRel)))
@@ -59,7 +59,7 @@ func TestEnsureRepoInCacheRehydratesStatPreservingTamper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)
 	}
-	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 	target := filepath.Join(cachePath, filepath.FromSlash(corePackTomlRel))

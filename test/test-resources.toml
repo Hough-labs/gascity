@@ -47,23 +47,6 @@ version = 2
 # Future pack-script tests should reuse runPackScript rather than add a call
 # site, which is the behaviour the file ratchet is meant to produce.
 
-# gascity-jiao is +1 call and +1 file on subprocess, in every scope that counts
-# them. Both land in scripts/install_git_hooks_test.go, which had the resource in
-# neither form before:
-#   - runHooksFixtureCommand is the file's ONLY exec.Command site. git, the
-#     installer under test (scripts/install-git-hooks) and the installed hooks
-#     themselves all route through it.
-#   - A subprocess is inherent to the claim. The file proves the installer wires
-#     the tracked .githooks up WITHOUT evicting the tool that owns
-#     core.hooksPath, and "what git runs" is not observable in process: two of
-#     the tests drive a real `git commit` — one from the main checkout, one from
-#     a linked worktree — and assert which .githooks the forwarder reached.
-#   - Written the obvious way, one exec per helper, this would have been +6
-#     calls and +2 files. The bead's other new test file,
-#     internal/doctor/checks_rig_git_hooks_test.go, reuses the doctor package's
-#     existing initGitRepoOnBranch / runGitForRigRootBranchTest helpers and adds
-#     no call site at all, which is why files moves by one rather than two.
-
 # gascity-ngab is +1 call and +1 file on subprocess, in every scope that counts
 # them. Both land in scripts/makefile_gate_parallelism_test.go, which had the
 # resource in neither form before:
@@ -161,28 +144,28 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 551
-baseline_files = 170
+baseline_calls = 714
+baseline_files = 211
 reported_calls = 495
 reported_files = 135
-owner_bead = "ga-80po0c.2"
+owner_bead = "ga-cp3hwi"
 invariant = "tracked test source totals remain visible as audit evidence"
-resource_owner = "ga-80po0c.2 owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit); +1/+0 on 2026-08-25 owned by gascity-0zw (runPackScript in examples/bd/dolt/health_test.go, the one exec site every dolt pack-script test now routes through); +1/+1 on 2026-08-26 owned by gascity-t8r1 (startLivenessSubject in cmd/gc/cmd_start_drift_pid_liveness_test.go, the file's single exec site; the four pidGone/waitForPIDExit subjects route through it); +1/+1 on 2026-08-26 owned by gascity-bh0 (runBdScriptHarness in cmd/gc/gc_beads_bd_port_probe_test.go, the one exec site every bd-script port-probe test routes through); +1/+1 on 2026-08-28 owned by gascity-ngab (runGateParallelism in scripts/makefile_gate_parallelism_test.go, the file's single exec site; both the arithmetic table and the fail-closed table route through it. The file covers scripts/test-gate-parallelism, which computes the gate lanes' -parallel bound, and scripts/test-local-concurrency.sh is wired into no make target or CI job, so an in-process shell assertion cannot replace it. Written the obvious way, one exec per table, this would have been +2 calls); -1/+1 on 2026-08-28 owned by gascity-ggq (startProcess in internal/pidutil/pidutil_test.go now carries that file's five spawns on one exec site, which is why calls fall rather than rise; the single added file is internal/nudgepoller/poller_test.go, whose sole site parks a real process carrying the poller argv so TestAliveWithCmdlineRecognizesRealPollerProcess can run the production matcher against a real process-table entry. That composition had no test, which is why AliveWithCmdline's darwin fail-open survived a suite that covered both halves separately); +1/+1 on 2026-09-13 owned by gascity-jiao (runHooksFixtureCommand in scripts/install_git_hooks_test.go, the file's single exec site; git, the installer and the installed hooks all route through it. The file proves scripts/install-git-hooks wires the tracked .githooks up without evicting the tool that owns core.hooksPath, and that is a claim about what git itself runs — real git invoking a real hook is the only thing that can assert it. Written the obvious way, one exec per helper, this would have been +6 calls and +2 files; the doctor half of the same bead reuses initGitRepoOnBranch and adds no site at all)"
+resource_owner = "ga-cp3hwi owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit); +1/+0 on 2026-08-25 owned by gascity-0zw (runPackScript in examples/bd/dolt/health_test.go, the one exec site every dolt pack-script test now routes through); +1/+1 on 2026-08-26 owned by gascity-t8r1 (startLivenessSubject in cmd/gc/cmd_start_drift_pid_liveness_test.go, the file's single exec site; the three pidGone/waitForPIDExit subjects route through it); +1/+1 on 2026-08-26 owned by gascity-bh0 (runBdScriptHarness in cmd/gc/gc_beads_bd_port_probe_test.go, the one exec site every bd-script port-probe test routes through); +1/+1 on 2026-08-28 owned by gascity-ngab (runGateParallelism in scripts/makefile_gate_parallelism_test.go, the file's single exec site; both the arithmetic table and the fail-closed table route through it. The file covers scripts/test-gate-parallelism, which computes the gate lanes' -parallel bound, and scripts/test-local-concurrency.sh is wired into no make target or CI job, so an in-process shell assertion cannot replace it. Written the obvious way, one exec per table, this would have been +2 calls); -1/+1 on 2026-08-28 owned by gascity-ggq (startProcess in internal/pidutil/pidutil_test.go now carries that file's five spawns on one exec site, which is why calls fall rather than rise; the single added file is internal/nudgepoller/poller_test.go, whose sole site parks a real process carrying the poller argv so TestAliveWithCmdlineRecognizesRealPollerProcess can run the production matcher against a real process-table entry. That composition had no test, which is why AliveWithCmdline's darwin fail-open survived a suite that covered both halves separately)"
 migration_target = "P0.4a"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 432
-baseline_files = 161
+baseline_calls = 488
+baseline_files = 180
 reported_calls = 447
 reported_files = 157
-owner_bead = "ga-80po0c.2"
+owner_bead = "ga-cp3hwi"
 invariant = "tracked test source totals remain visible as audit evidence"
-resource_owner = "ga-80po0c.2 owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go); +1/+1 on 2026-08-27 owned by gascity-n17v (serializingExecutor.executeCtx in internal/runtime/tmux/new_session_guard_test.go, the file's single sleep: it is the occupancy window TestNewSessionSerializesCreationPerSocket measures, not a delay waiting for a condition. The test fans 12 concurrent NewSession calls at one socket and asserts in-flight creates never exceed 1; with a zero-width critical section an unserialized implementation serializes by accident and the test passes on the bug it exists to catch); +1/+1 on 2026-08-27 owned by gascity-n17v (waitForSession in internal/runtime/tmux/socket_clobber_integration_test.go, integration-tagged so it lands in scope=all only: the poll interval of a deadline-bounded retry loop that returns as soon as the session appears and t.Fatalf's at 10s, the shape already banked for gascity-4zf); -0/-1 on 2026-09-20 owned by gascity-lzzj (internal/api/session_stream_capability_test.go loses its only sleep: TestStreamSessionPeekAcceptsPeekCapability's hand-rolled poll loop over an unsynchronized httptest recorder was the data race the bead exists to fix, and replacing it with the package's shared waitForRecorderSubstring helper moves the poll onto a sleep handler_sessions_test.go already owns. Calls are unchanged; the file drops out of the census)"
+resource_owner = "ga-cp3hwi owns this point-in-time source census; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go); +1/+1 on 2026-08-27 owned by gascity-n17v (serializingExecutor.executeCtx in internal/runtime/tmux/new_session_guard_test.go, the file's single sleep: it is the occupancy window TestNewSessionSerializesCreationPerSocket measures, not a delay waiting for a condition. The test fans 12 concurrent NewSession calls at one socket and asserts in-flight creates never exceed 1; with a zero-width critical section an unserialized implementation serializes by accident and the test passes on the bug it exists to catch); +1/+1 on 2026-08-27 owned by gascity-n17v (waitForSession in internal/runtime/tmux/socket_clobber_integration_test.go, integration-tagged so it lands in scope=all only: the poll interval of a deadline-bounded retry loop that returns as soon as the session appears and t.Fatalf's at 10s, the shape already banked for gascity-4zf); -0/-1 on 2026-09-20 owned by gascity-lzzj (internal/api/session_stream_capability_test.go loses its only sleep: TestStreamSessionPeekAcceptsPeekCapability's hand-rolled poll loop over an unsynchronized httptest recorder was the data race the bead exists to fix, and replacing it with the package's shared waitForRecorderSubstring helper moves the poll onto a sleep handler_sessions_test.go already owns. Calls are unchanged; the file drops out of the census)"
 migration_target = "P0.4a"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[audit_baseline]]
 scope = "all"
@@ -191,91 +174,91 @@ baseline_calls = 58
 baseline_files = 23
 reported_calls = 58
 reported_files = 23
-owner_bead = "ga-80po0c.2.2.3"
+owner_bead = "ga-cp3hwi"
 invariant = "all-source listener-helper call/file totals cannot drift without an explicit checked policy update"
-resource_owner = "ga-80po0c.2.2.3 owns this all-source audit; tagged calls stay Large and receive no Medium exemption"
+resource_owner = "ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption"
 migration_target = "P0.4c-listener-helper"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 # Debt rows ratchet source call sites only. They are not test-size entries and
 # do not exempt or reclassify any test.
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 412
-baseline_files = 119
+baseline_calls = 483
+baseline_files = 141
 reported_calls = 380
 reported_files = 98
-owner_bead = "ga-80po0c.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged subprocess call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each process-owning test removes or replaces its source call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit); +1/+0 on 2026-08-25 owned by gascity-0zw (runPackScript in examples/bd/dolt/health_test.go, the one exec site every dolt pack-script test now routes through); +1/+1 on 2026-08-26 owned by gascity-t8r1 (startLivenessSubject in cmd/gc/cmd_start_drift_pid_liveness_test.go, the file's single exec site; the four pidGone/waitForPIDExit subjects route through it); +1/+1 on 2026-08-26 owned by gascity-bh0 (runBdScriptHarness in cmd/gc/gc_beads_bd_port_probe_test.go, the one exec site every bd-script port-probe test routes through); +1/+1 on 2026-08-28 owned by gascity-ngab (runGateParallelism in scripts/makefile_gate_parallelism_test.go, the file's single exec site; both the arithmetic table and the fail-closed table route through it. The file covers scripts/test-gate-parallelism, which computes the gate lanes' -parallel bound, and scripts/test-local-concurrency.sh is wired into no make target or CI job, so an in-process shell assertion cannot replace it. Written the obvious way, one exec per table, this would have been +2 calls); -1/+1 on 2026-08-28 owned by gascity-ggq (startProcess in internal/pidutil/pidutil_test.go now carries that file's five spawns on one exec site, which is why calls fall rather than rise; the single added file is internal/nudgepoller/poller_test.go, whose sole site parks a real process carrying the poller argv so TestAliveWithCmdlineRecognizesRealPollerProcess can run the production matcher against a real process-table entry. That composition had no test, which is why AliveWithCmdline's darwin fail-open survived a suite that covered both halves separately); +1/+1 on 2026-09-13 owned by gascity-jiao (runHooksFixtureCommand in scripts/install_git_hooks_test.go, the file's single exec site; git, the installer and the installed hooks all route through it. The file proves scripts/install-git-hooks wires the tracked .githooks up without evicting the tool that owns core.hooksPath, and that is a claim about what git itself runs — real git invoking a real hook is the only thing that can assert it. Written the obvious way, one exec per helper, this would have been +6 calls and +2 files; the doctor half of the same bead reuses initGitRepoOnBranch and adds no site at all)"
+resource_owner = "each process-owning test removes or replaces its source call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit); +1/+0 on 2026-08-25 owned by gascity-0zw (runPackScript in examples/bd/dolt/health_test.go, the one exec site every dolt pack-script test now routes through); +1/+1 on 2026-08-26 owned by gascity-t8r1 (startLivenessSubject in cmd/gc/cmd_start_drift_pid_liveness_test.go, the file's single exec site; the three pidGone/waitForPIDExit subjects route through it); +1/+1 on 2026-08-26 owned by gascity-bh0 (runBdScriptHarness in cmd/gc/gc_beads_bd_port_probe_test.go, the one exec site every bd-script port-probe test routes through); +1/+1 on 2026-08-28 owned by gascity-ngab (runGateParallelism in scripts/makefile_gate_parallelism_test.go, the file's single exec site; both the arithmetic table and the fail-closed table route through it. The file covers scripts/test-gate-parallelism, which computes the gate lanes' -parallel bound, and scripts/test-local-concurrency.sh is wired into no make target or CI job, so an in-process shell assertion cannot replace it. Written the obvious way, one exec per table, this would have been +2 calls); -1/+1 on 2026-08-28 owned by gascity-ggq (startProcess in internal/pidutil/pidutil_test.go now carries that file's five spawns on one exec site, which is why calls fall rather than rise; the single added file is internal/nudgepoller/poller_test.go, whose sole site parks a real process carrying the poller argv so TestAliveWithCmdlineRecognizesRealPollerProcess can run the production matcher against a real process-table entry. That composition had no test, which is why AliveWithCmdline's darwin fail-open survived a suite that covered both halves separately)"
 migration_target = "D1/D2/D5/D6/E6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 286
-baseline_files = 114
+baseline_calls = 320
+baseline_files = 123
 reported_calls = 295
 reported_files = 114
-owner_bead = "ga-80po0c.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test replaces elapsed wall time with its lifecycle signal; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go); +1/+1 on 2026-08-27 owned by gascity-n17v (serializingExecutor.executeCtx in internal/runtime/tmux/new_session_guard_test.go, the file's single sleep: it is the occupancy window TestNewSessionSerializesCreationPerSocket measures, not a delay waiting for a condition. The test fans 12 concurrent NewSession calls at one socket and asserts in-flight creates never exceed 1; with a zero-width critical section an unserialized implementation serializes by accident and the test passes on the bug it exists to catch); -0/-1 on 2026-09-20 owned by gascity-lzzj (internal/api/session_stream_capability_test.go loses its only sleep: TestStreamSessionPeekAcceptsPeekCapability's hand-rolled poll loop over an unsynchronized httptest recorder was the data race the bead exists to fix, and replacing it with the package's shared waitForRecorderSubstring helper moves the poll onto a sleep handler_sessions_test.go already owns. Calls are unchanged; the file drops out of the census)"
 migration_target = "W1-W5"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 128
-baseline_files = 13
+baseline_calls = 122
+baseline_files = 14
 reported_calls = 3960
 reported_files = 184
-owner_bead = "ga-80po0c.2.3"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "cmd/gc callers restore or eliminate every recognized process-environment mutation"
 migration_target = "D5/D6/E6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "cwd"
-baseline_calls = 174
-baseline_files = 16
+baseline_calls = 176
+baseline_files = 17
 reported_calls = 98
 reported_files = 13
-owner_bead = "ga-80po0c.2.3"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "cmd/gc callers restore or eliminate every recognized cwd mutation"
 migration_target = "D5/D6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 58
+baseline_calls = 59
 baseline_files = 24
 reported_calls = 78
 reported_files = 27
-owner_bead = "ga-80po0c.2.3"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline"
 resource_owner = "the helper definition and every marked caller retain an explicit process-suite migration owner"
 migration_target = "D5/D6/E6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 317
+baseline_calls = 318
 baseline_files = 66
 reported_calls = 255
 reported_files = 56
-owner_bead = "ga-80po0c.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test closes its loopback server and removes duplicate server-backed coverage"
 migration_target = "P0.4c"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "untagged"
@@ -284,24 +267,24 @@ baseline_calls = 38
 baseline_files = 13
 reported_calls = 38
 reported_files = 13
-owner_bead = "ga-80po0c.2.2.3"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged listener-helper call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership"
 migration_target = "P0.4c-listener-helper"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 98
-baseline_files = 38
+baseline_calls = 100
+baseline_files = 39
 reported_calls = 92
 reported_files = 34
-owner_bead = "ga-80po0c.2.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged stream-listener call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test closes its stream listener and removes duplicate listener-backed coverage; +1/+1 on 2026-08-26 owned by gascity-bh0 (listeningPort in cmd/gc/gc_beads_bd_port_probe_test.go, the one listener site the port-probe tests share to prove a held port); +2/+1 on 2026-08-27 owned by gascity-n17v (shortPathSocketFixture and TestNamedSocketHolderReportsLiveListener in internal/runtime/tmux/socket_holder_test.go, the file's only listeners: the code under test tells a live socket holder from a stale socket file, and the refused-with-stable-inode branch is reached only when os.SameFile matches, which recognizes just FileInfo the os package produced — a synthetic fixture cannot reach it. Both listeners are closed by the test that opens them)"
 migration_target = "P0.4c-listener"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "untagged"
@@ -310,11 +293,11 @@ baseline_calls = 1
 baseline_files = 1
 reported_calls = 1
 reported_files = 1
-owner_bead = "ga-80po0c.2.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test closes its configured listener and removes duplicate listener-backed coverage"
 migration_target = "P0.4c-listener"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "untagged"
@@ -323,11 +306,11 @@ baseline_calls = 3
 baseline_files = 2
 reported_calls = 3
 reported_files = 2
-owner_bead = "ga-80po0c.2.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged packet-listener call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test closes its packet listener and removes duplicate listener-backed coverage"
 migration_target = "P0.4c-listener"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "untagged"
@@ -336,24 +319,24 @@ baseline_calls = 1
 baseline_files = 1
 reported_calls = 1
 reported_files = 1
-owner_bead = "ga-80po0c.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test closes its listening file descriptor and removes duplicate listener-backed coverage"
 migration_target = "P0.4c"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "untagged"
 resource = "tmux"
-baseline_calls = 6
-baseline_files = 2
-reported_calls = 6
-reported_files = 2
-owner_bead = "ga-80po0c.2.2.1"
+baseline_calls = 9
+baseline_files = 4
+reported_calls = 7
+reported_files = 3
+owner_bead = "ga-cp3hwi"
 invariant = "untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test confines tmux processes and sockets to its isolated namespace and cleanup"
 migration_target = "P0.4c-tmux"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 # Exact Medium owners are keyed by source directory, package clause, and
 # top-level Go test identity. Only matching resources lexically inside that
@@ -364,88 +347,176 @@ package_dir = "internal/api"
 package_name = "api"
 owner = "TestEveryEmittedErrorCodeIsRegistered"
 resources = ["subprocess"]
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "internal/api tracked-source error URN guard is a checked Medium owner"
 resource_owner = "only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt"
 migration_target = "P0.4b"
-expires = "2026-10-01"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/workrecord"
+package_name = "workrecord"
+owner = "TestCommitReachableOnBranch"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the ADR-0009 commit-reachability oracle is a checked Medium subprocess owner"
+resource_owner = "the git processes are confined to TestCommitReachableOnBranch, which exists to ask a real repository whether a commit is an ancestor of a branch: CommitReachableOnBranch is that git invocation, so a fake oracle would only prove itself"
+migration_target = "P0.4b"
+expires = "2026-10-31"
 
 [[medium]]
 package_dir = "cmd/gc"
 package_name = "main"
 owner = "TestMain"
 resources = ["environment", "tmux"]
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup"
 resource_owner = "only declared environment and tmux calls lexically inside TestMain leave Small debt"
 migration_target = "P0.4b/P0.4c-tmux"
-expires = "2026-10-01"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestPassthroughEnvWithholdsControllerTokenFromChildProcess"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the controller-token withholding proof is a checked Medium subprocess owner"
+resource_owner = "the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary"
+resources = ["subprocess"]
+owner_bead = "ga-p9iuv.30"
+invariant = "the provider-owned script boundary proof is a checked Medium subprocess owner"
+resource_owner = "the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service"
+migration_target = "GC6011"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestGcBeadsBdReadyScopeLifecycleReadsItsPersistedTopology"
+resources = ["subprocess"]
+owner_bead = "ga-p9iuv.30"
+invariant = "the ready-scope topology boundary proof is a checked Medium subprocess owner"
+resource_owner = "the test executes the shipped provider script once per init shape with a test-owned BD executable and a scope built from files alone, so no Dolt, no bd and no host service are involved"
+migration_target = "GC6011"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses"
+resources = ["slow_process_gate", "subprocess"]
+owner_bead = "ga-p9iuv.30"
+invariant = "the provider-owned BD lifecycle proof is a checked Medium process owner"
+resource_owner = "the test runs the pinned real bd direct and proxied lifecycles under deadlines, records only provider-published identities, and stops its own scope before asserting those children are absent"
+migration_target = "GC6011"
+expires = "2026-10-31"
 
 [[medium]]
 package_dir = "internal/runtime/herdr"
 package_name = "herdr"
 owner = "TestServerAliveRejectsStaleSocket"
 resources = ["net_listen"]
-owner_bead = "ga-80po0c.2.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "herdr stale-socket liveness regression is a checked Medium stream-listener owner"
 resource_owner = "the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection"
 migration_target = "P0.4c-listener"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[medium]]
 package_dir = "internal/runtime/herdr"
 package_name = "herdr"
 owner = "TestServerAliveDetectsLiveServer"
 resources = ["net_listen"]
-owner_bead = "ga-80po0c.2.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "herdr live-server liveness regression is a checked Medium stream-listener owner"
 resource_owner = "the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup"
 migration_target = "P0.4c-listener"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[medium]]
 package_dir = "internal/runtime/tmux"
 package_name = "tmux"
 owner = "TestMain"
 resources = ["environment", "tmux"]
-owner_bead = "ga-80po0c.2.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup"
 resource_owner = "only declared environment and tmux calls lexically inside TestMain leave Small debt"
 migration_target = "P0.4c-tmux"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[medium]]
 package_dir = "scripts"
 package_name = "scripts_test"
 owner = "TestDockerSessionProtocol"
 resources = ["subprocess"]
-owner_bead = "ga-80po0c.23.1"
+owner_bead = "ga-cp3hwi"
 invariant = "Docker session adapter protocol proof is a checked Medium owner"
 resource_owner = "the one adapter subprocess is confined to TestDockerSessionProtocol and Docker itself is a strict PATH-injected fake"
 migration_target = "W6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[medium]]
 package_dir = "scripts"
 package_name = "scripts_test"
 owner = "TestProviderOverridesAndSuiteContractsCrossMakeIsolation"
 resources = ["subprocess"]
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "Make/provider and suite-contract proof is a checked Medium owner"
 resource_owner = "the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation"
 migration_target = "P0.1"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[medium]]
 package_dir = "internal/doctor"
 package_name = "doctor"
 owner = "TestCustomTypesCheck_TableDrift"
 resources = ["subprocess"]
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "doctor custom-types config-CSV-vs-table drift detect+heal proof is a checked Medium owner"
 resource_owner = "the bd and dolt subprocesses are confined to TestCustomTypesCheck_TableDrift, which manufactures and heals real table drift against a throwaway store"
 migration_target = "P0.4b"
-expires = "2026-10-01"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/doctor"
+package_name = "doctor"
+owner = "TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner"
+resource_owner = "the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/doctor"
+package_name = "doctor"
+owner = "TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "doctor custom-types configured-store targeting regression proof is a checked Medium owner"
+resource_owner = "the bd subprocess is confined to TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint, which runs two disposable loopback Dolt servers and proves ambient endpoint variables cannot redirect detection or repair"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestAddTestenvImportSkipsNestedGitWorktrees"
+resources = ["subprocess"]
+owner_bead = "ga-t00ejy"
+invariant = "the nested-git-worktree walk-skip regression proof is a checked Medium subprocess owner"
+resource_owner = "the one go run subprocess is confined to TestAddTestenvImportSkipsNestedGitWorktrees, which exists to exercise add-testenv-import.go end to end: the script is package main, so only a real subprocess run can prove its directory walk skips linked git worktrees"
+migration_target = "P0.4b"
+expires = "2026-10-31"
 
 # A reviewed-hermetic-body row is narrower than a Small test declaration. It
 # proves that the exact untagged test body and statically reachable
@@ -484,54 +555,54 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 407
-baseline_files = 116
+baseline_calls = 464
+baseline_files = 134
 reported_calls = 394
 reported_files = 105
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners remove or replace each process call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit); +1/+0 on 2026-08-25 owned by gascity-0zw (runPackScript in examples/bd/dolt/health_test.go, the one exec site every dolt pack-script test now routes through); +1/+1 on 2026-08-26 owned by gascity-t8r1 (startLivenessSubject in cmd/gc/cmd_start_drift_pid_liveness_test.go, the file's single exec site; the four pidGone/waitForPIDExit subjects route through it); +1/+1 on 2026-08-26 owned by gascity-bh0 (runBdScriptHarness in cmd/gc/gc_beads_bd_port_probe_test.go, the one exec site every bd-script port-probe test routes through); +1/+1 on 2026-08-28 owned by gascity-ngab (runGateParallelism in scripts/makefile_gate_parallelism_test.go, the file's single exec site; both the arithmetic table and the fail-closed table route through it. The file covers scripts/test-gate-parallelism, which computes the gate lanes' -parallel bound, and scripts/test-local-concurrency.sh is wired into no make target or CI job, so an in-process shell assertion cannot replace it. Written the obvious way, one exec per table, this would have been +2 calls); -1/+1 on 2026-08-28 owned by gascity-ggq (startProcess in internal/pidutil/pidutil_test.go now carries that file's five spawns on one exec site, which is why calls fall rather than rise; the single added file is internal/nudgepoller/poller_test.go, whose sole site parks a real process carrying the poller argv so TestAliveWithCmdlineRecognizesRealPollerProcess can run the production matcher against a real process-table entry. That composition had no test, which is why AliveWithCmdline's darwin fail-open survived a suite that covered both halves separately); +1/+1 on 2026-09-13 owned by gascity-jiao (runHooksFixtureCommand in scripts/install_git_hooks_test.go, the file's single exec site; git, the installer and the installed hooks all route through it. The file proves scripts/install-git-hooks wires the tracked .githooks up without evicting the tool that owns core.hooksPath, and that is a claim about what git itself runs — real git invoking a real hook is the only thing that can assert it. Written the obvious way, one exec per helper, this would have been +6 calls and +2 files; the doctor half of the same bead reuses initGitRepoOnBranch and adds no site at all)"
+resource_owner = "non-Medium lexical owners remove or replace each process call site; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+0 on 2026-08-19 owned by gascity-rwu (doctorGitOutput in internal/doctor/checks_test.go, the read-side companion to doctorRunGit); +1/+0 on 2026-08-25 owned by gascity-0zw (runPackScript in examples/bd/dolt/health_test.go, the one exec site every dolt pack-script test now routes through); +1/+1 on 2026-08-26 owned by gascity-t8r1 (startLivenessSubject in cmd/gc/cmd_start_drift_pid_liveness_test.go, the file's single exec site; the three pidGone/waitForPIDExit subjects route through it); +1/+1 on 2026-08-26 owned by gascity-bh0 (runBdScriptHarness in cmd/gc/gc_beads_bd_port_probe_test.go, the one exec site every bd-script port-probe test routes through); +1/+1 on 2026-08-28 owned by gascity-ngab (runGateParallelism in scripts/makefile_gate_parallelism_test.go, the file's single exec site; both the arithmetic table and the fail-closed table route through it. The file covers scripts/test-gate-parallelism, which computes the gate lanes' -parallel bound, and scripts/test-local-concurrency.sh is wired into no make target or CI job, so an in-process shell assertion cannot replace it. Written the obvious way, one exec per table, this would have been +2 calls); -1/+1 on 2026-08-28 owned by gascity-ggq (startProcess in internal/pidutil/pidutil_test.go now carries that file's five spawns on one exec site, which is why calls fall rather than rise; the single added file is internal/nudgepoller/poller_test.go, whose sole site parks a real process carrying the poller argv so TestAliveWithCmdlineRecognizesRealPollerProcess can run the production matcher against a real process-table entry. That composition had no test, which is why AliveWithCmdline's darwin fail-open survived a suite that covered both halves separately)"
 migration_target = "D1/D2/D5/D6/E6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 286
-baseline_files = 114
+baseline_calls = 320
+baseline_files = 123
 reported_calls = 287
 reported_files = 113
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners replace elapsed wall time with lifecycle signals; +1/+1 on 2026-08-18 owned by gascity-4zf (df0f1ad31, TestCollectLiveWorktreeState_ProtectsDirWithLiveProcess); +1/+1 on 2026-08-26 owned by gascity-t8r1 (the 10ms poll interval of the deadline-bounded zombie-reap loop in cmd/gc/cmd_start_drift_pid_liveness_test.go); +1/+1 on 2026-08-27 owned by gascity-n17v (serializingExecutor.executeCtx in internal/runtime/tmux/new_session_guard_test.go, the file's single sleep: it is the occupancy window TestNewSessionSerializesCreationPerSocket measures, not a delay waiting for a condition. The test fans 12 concurrent NewSession calls at one socket and asserts in-flight creates never exceed 1; with a zero-width critical section an unserialized implementation serializes by accident and the test passes on the bug it exists to catch); -0/-1 on 2026-09-20 owned by gascity-lzzj (internal/api/session_stream_capability_test.go loses its only sleep: TestStreamSessionPeekAcceptsPeekCapability's hand-rolled poll loop over an unsynchronized httptest recorder was the data race the bead exists to fix, and replacing it with the package's shared waitForRecorderSubstring helper moves the poll onto a sleep handler_sessions_test.go already owns. Calls are unchanged; the file drops out of the census)"
 migration_target = "W1-W5"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 122
-baseline_files = 13
+baseline_calls = 117
+baseline_files = 14
 reported_calls = 4348
 reported_files = 200
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners restore or eliminate every process-environment mutation"
 migration_target = "D5/D6/E6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "cwd"
-baseline_calls = 174
-baseline_files = 16
+baseline_calls = 176
+baseline_files = 17
 reported_calls = 284
 reported_files = 43
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners restore or eliminate every cwd mutation"
 migration_target = "D5/D6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "cmd/gc+untagged"
@@ -540,24 +611,24 @@ baseline_calls = 58
 baseline_files = 24
 reported_calls = 75
 reported_files = 25
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline"
 resource_owner = "each non-Medium marked caller retains an explicit process-suite migration owner"
 migration_target = "D5/D6/E6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 317
+baseline_calls = 318
 baseline_files = 66
 reported_calls = 300
 reported_files = 66
-owner_bead = "ga-80po0c.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener"
 migration_target = "P0.4c"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "untagged"
@@ -566,24 +637,24 @@ baseline_calls = 38
 baseline_files = 13
 reported_calls = 38
 reported_files = 13
-owner_bead = "ga-80po0c.2.2.3"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership"
 migration_target = "P0.4c-listener-helper"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 96
-baseline_files = 37
+baseline_calls = 98
+baseline_files = 38
 reported_calls = 92
 reported_files = 34
-owner_bead = "ga-80po0c.2.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener; +1/+1 on 2026-08-26 owned by gascity-bh0 (listeningPort in cmd/gc/gc_beads_bd_port_probe_test.go, the one listener site the port-probe tests share to prove a held port); +2/+1 on 2026-08-27 owned by gascity-n17v (shortPathSocketFixture and TestNamedSocketHolderReportsLiveListener in internal/runtime/tmux/socket_holder_test.go, the file's only listeners: the code under test tells a live socket holder from a stale socket file, and the refused-with-stable-inode branch is reached only when os.SameFile matches, which recognizes just FileInfo the os package produced — a synthetic fixture cannot reach it. Both listeners are closed by the test that opens them)"
 migration_target = "P0.4c-listener"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "untagged"
@@ -592,11 +663,11 @@ baseline_calls = 1
 baseline_files = 1
 reported_calls = 1
 reported_files = 1
-owner_bead = "ga-80po0c.2.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener"
 migration_target = "P0.4c-listener"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "untagged"
@@ -605,11 +676,11 @@ baseline_calls = 3
 baseline_files = 2
 reported_calls = 3
 reported_files = 2
-owner_bead = "ga-80po0c.2.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener"
 migration_target = "P0.4c-listener"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "untagged"
@@ -618,21 +689,21 @@ baseline_calls = 1
 baseline_files = 1
 reported_calls = 1
 reported_files = 1
-owner_bead = "ga-80po0c.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener"
 migration_target = "P0.4c"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "untagged"
 resource = "tmux"
-baseline_calls = 0
-baseline_files = 0
-reported_calls = 0
-reported_files = 0
-owner_bead = "ga-80po0c.2.2.1"
+baseline_calls = 3
+baseline_files = 2
+reported_calls = 1
+reported_files = 1
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership"
 migration_target = "P0.4c-tmux"
-expires = "2026-10-01"
+expires = "2026-10-31"

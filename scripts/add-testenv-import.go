@@ -36,9 +36,6 @@ func main() {
 	root, err := repoRoot()
 	check(err)
 
-	selfDir, err := packageDir(root, importPath)
-	check(err)
-
 	type dirInfo struct {
 		packages      map[string]bool
 		testFiles     []string
@@ -56,10 +53,7 @@ func main() {
 			return err
 		}
 		if d.IsDir() {
-			if skipDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			if path != root && isForeignTreeRoot(path) {
+			if path != root && (skipDirs[d.Name()] || isNestedWorktreeRoot(path)) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -67,11 +61,10 @@ func main() {
 		if !strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		dir := filepath.Dir(path)
-		if dir == selfDir {
+		rel, _ := filepath.Rel(root, filepath.Dir(path))
+		if rel == "internal/testenv" {
 			return nil
 		}
-		rel, _ := filepath.Rel(root, dir)
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, path, nil, parser.PackageClauseOnly)
 		if err != nil {
@@ -244,51 +237,16 @@ func formatNode(fset *token.FileSet, file *ast.File) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// isForeignTreeRoot reports whether dir is the root of a repository or module
-// other than the one being generated for. Gastown checks every per-bead polecat
-// worktree out INSIDE the polecat's home worktree, so a walk from a home
-// descends into the sibling worktrees and rewrites source the caller does not
-// own (gascity-ru8b). A nested worktree carries its own .git file and a nested
-// module its own go.mod; either marks a tree that is not ours to touch.
-func isForeignTreeRoot(dir string) bool {
-	for _, marker := range []string{".git", "go.mod"} {
-		if _, err := os.Lstat(filepath.Join(dir, marker)); err == nil {
-			return true
-		}
-	}
-	return false
-}
-
-// packageDir resolves a package import path to its directory inside the module
-// rooted at root. The self-skip compares directories resolved this way rather
-// than matching a path fragment: the condition to avoid is the testenv package
-// importing itself, which is a question about package identity and not about
-// how the walk root happens to be nested.
-func packageDir(root, pkg string) (string, error) {
-	mod, err := modulePath(root)
-	if err != nil {
-		return "", err
-	}
-	if pkg != mod && !strings.HasPrefix(pkg, mod+"/") {
-		return "", fmt.Errorf("import path %q is outside module %q", pkg, mod)
-	}
-	return filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(pkg, mod))), nil
-}
-
-// modulePath reads the module path declared by the go.mod at root.
-func modulePath(root string) (string, error) {
-	goMod := filepath.Join(root, "go.mod")
-	data, err := os.ReadFile(goMod)
-	if err != nil {
-		return "", err
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 && fields[0] == "module" {
-			return strings.Trim(fields[1], `"`), nil
-		}
-	}
-	return "", fmt.Errorf("no module directive in %s", goMod)
+// isNestedWorktreeRoot reports whether path is the root of a linked git
+// worktree checked out inside this tree. Linked worktrees have a .git FILE
+// (a "gitdir: ..." pointer) rather than a .git directory, so this catches
+// worktrees regardless of naming convention. Ported from
+// internal/testenv/lint_test.go's isNestedWorktreeRoot: without it, walking
+// into a sibling worktree here writes generated files into whatever branch
+// that worktree has checked out.
+func isNestedWorktreeRoot(path string) bool {
+	info, err := os.Lstat(filepath.Join(path, ".git"))
+	return err == nil && !info.IsDir()
 }
 
 func repoRoot() (string, error) {

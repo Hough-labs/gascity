@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -65,7 +66,7 @@ func TestLiveRigScopedSessionOwnsItsRigStoreWork(t *testing.T) {
 		t.Fatal("fixture no longer resolves its agent; the test would pass via the unresolved wildcard, not the path under test")
 	}
 
-	index := makeOpenSessionStoreRefIndex(cityPath, cfg, []session.Info{info}, true)
+	index := makeOpenSessionStoreRefIndex(cityPath, cfg, nil, []session.Info{info}, true)
 
 	// Work lives in the winnow rig store, so its ref is the rig name.
 	const workStoreRef = "winnow"
@@ -75,7 +76,7 @@ func TestLiveRigScopedSessionOwnsItsRigStoreWork(t *testing.T) {
 			"session indexed under store-ref %q (wildcards are %q / %q). "+
 			"This verdict is what authorizes releasing a live worker's bead (gascity-jrlv).",
 			assignee, workStoreRef,
-			openSessionReachableStoreRefInfo(cityPath, cfg, info),
+			openSessionReachableStoreRefInfo(cityPath, cfg, nil, info),
 			unresolvedOpenSessionStoreRef, crossStoreOpenSessionStoreRef)
 	}
 }
@@ -105,10 +106,10 @@ func TestLiveRigScopedSessionOwnsWorkWhenDirResolvesToRig(t *testing.T) {
 	if sessionAgentConfigInfo(cfg, info) == nil {
 		t.Fatal("control fixture no longer resolves its agent")
 	}
-	index := makeOpenSessionStoreRefIndex(cityPath, cfg, []session.Info{info}, true)
+	index := makeOpenSessionStoreRefIndex(cityPath, cfg, nil, []session.Info{info}, true)
 	if !openSessionOwnsWork(nil, index, assignee, "winnow", true) {
 		t.Fatalf("control failed: session whose Dir resolves to the rig should own winnow-store work; "+
-			"store-ref resolved to %q", openSessionReachableStoreRefInfo(cityPath, cfg, info))
+			"store-ref resolved to %q", openSessionReachableStoreRefInfo(cityPath, cfg, nil, info))
 	}
 }
 
@@ -131,12 +132,12 @@ func TestOpenSessionReachableStoreRefMatchesRawForUnresolvableRig(t *testing.T) 
 	}
 	info := sessiontest.SeedBead(t, sb)
 
-	got := openSessionReachableStoreRefInfo(cityPath, cfg, info)
-	want := rawOpenSessionReachableStoreRefRef(cityPath, cfg, sb)
-	if got != want {
+	got := openSessionReachableStoreRefInfo(cityPath, cfg, nil, info)
+	want := rawOpenSessionReachableStoreRefRef(cityPath, cfg, nil, sb)
+	if !slices.Equal(got, want) {
 		t.Fatalf("info=%q raw=%q: the split forms disagree on the unresolvable-rig arm", got, want)
 	}
-	if got != unresolvedOpenSessionStoreRef {
+	if !slices.Equal(got, []string{unresolvedOpenSessionStoreRef}) {
 		t.Fatalf("store-ref = %q, want the keep-on-match wildcard %q", got, unresolvedOpenSessionStoreRef)
 	}
 }

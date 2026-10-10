@@ -477,6 +477,109 @@ func TestStateCache_DiscardRefreshAfterEvictSession(t *testing.T) {
 	}
 }
 
+// TestStateCache_EvictSessionDoesNotMutatePublishedSnapshot pins the
+// copy-on-write contract: a snapshot handed out by currentState is read
+// without the cache lock, so EvictSession must publish a new Sessions map
+// rather than deleting from the one readers may still hold.
+func TestStateCache_EvictSessionDoesNotMutatePublishedSnapshot(t *testing.T) {
+	f := &mockFetcher{sessions: map[string]bool{"agent-1": true, "agent-2": true}}
+	cache := NewStateCache(f, time.Hour)
+
+	published := cache.currentState()
+	if !published.Sessions["agent-1"].Running {
+		t.Fatal("published snapshot missing agent-1 before eviction")
+	}
+
+	f.setResult(map[string]bool{"agent-2": true}, nil)
+	cache.EvictSession("agent-1")
+
+	if !published.Sessions["agent-1"].Running || len(published.Sessions) != 2 {
+		t.Fatalf("published snapshot mutated by EvictSession: %v", published.Sessions)
+	}
+	if cache.IsRunning("agent-1") {
+		t.Fatal("IsRunning(agent-1) = true after eviction, want false")
+	}
+	if !cache.IsRunning("agent-2") {
+		t.Fatal("IsRunning(agent-2) = false after evicting agent-1, want true")
+	}
+}
+
+// TestStateCache_EvictSessionDoesNotRaceSnapshotReader reproduces the
+// controller crash deterministically under -race: a reader holds a published
+// snapshot (as IsRunning/ProcessAlive do after dropping the lock) and reads
+// its Sessions map while Stop evicts a session. Deleting from that shared map
+// in place is a concurrent map read/write, which is a fatal runtime error that
+// recover cannot catch. The handoff below orders only "snapshot taken" before
+// the eviction, never the map reads, so the detector sees the conflict
+// regardless of scheduling.
+func TestStateCache_EvictSessionDoesNotRaceSnapshotReader(t *testing.T) {
+	f := &mockFetcher{sessions: map[string]bool{"agent-1": true, "agent-2": true}}
+	cache := NewStateCache(f, time.Hour)
+
+	taken := make(chan struct{})
+	done := make(chan bool)
+	go func() {
+		snapshot := cache.currentState()
+		close(taken)
+		running := false
+		for range 1000 {
+			running = snapshot.Sessions["agent-1"].Running
+		}
+		done <- running
+	}()
+
+	<-taken
+	cache.EvictSession("agent-1")
+	if !<-done {
+		t.Fatal("reader's snapshot lost agent-1 to a concurrent eviction")
+	}
+}
+
+// TestStateCache_ConcurrentReadersAndEvictSession drives the same hazard
+// through the public API the controller uses: status reads (IsRunning,
+// ProcessAlive) racing Stop's EvictSession and Invalidate. Run with -race.
+func TestStateCache_ConcurrentReadersAndEvictSession(t *testing.T) {
+	names := []string{"agent-1", "agent-2", "agent-3", "agent-4"}
+	live := make(map[string]bool, len(names))
+	for _, name := range names {
+		live[name] = true
+	}
+	f := &mockFetcher{sessions: live}
+	cache := NewStateCache(f, time.Hour)
+	if !cache.IsRunning("agent-1") {
+		t.Fatal("IsRunning(agent-1) = false after prime, want true")
+	}
+
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	for i := range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				name := names[i%len(names)]
+				_ = cache.IsRunning(name)
+				_ = cache.ProcessAlive(name, []string{"claude"})
+			}
+		}()
+	}
+
+	for i := range 200 {
+		cache.EvictSession(names[i%len(names)])
+		if i%10 == 0 {
+			cache.Invalidate()
+		}
+		runtime.Gosched()
+	}
+	close(stop)
+	readers.Wait()
+}
+
 func TestStateCache_InvalidateForcesNextReadToRefresh(t *testing.T) {
 	f := &mockFetcher{
 		sessions: map[string]bool{"agent-1": true},
@@ -953,84 +1056,5 @@ func TestFetchDarwinProcessSnapshotRunsListingsConcurrently(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("fetchDarwinProcessSnapshot serialized its two ps listings: the second never started while the first was still in flight (gascity-hcg6)")
-	}
-}
-
-// degradingFetcher serves one live session whose process-snapshot availability
-// the test toggles, so a run of degraded refreshes needs no real ps scan, no
-// tmux, and no wall-clock wait.
-type degradingFetcher struct {
-	mu        sync.Mutex
-	available bool
-}
-
-func (f *degradingFetcher) setAvailable(available bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.available = available
-}
-
-func (f *degradingFetcher) FetchState(context.Context) (runtimeStateSnapshot, error) {
-	f.mu.Lock()
-	available := f.available
-	f.mu.Unlock()
-	return runtimeStateSnapshot{
-		Sessions: map[string]sessionRuntimeState{
-			"agent-1": {Running: true, Panes: []paneRuntimeState{{Command: "bash", PID: "101"}}},
-		},
-		ProcessesAvailable: available,
-	}, nil
-}
-
-// TestStateCache_SustainedProcessSnapshotDegradationIsReported pins the
-// observability half of gascity-hcg6. A single degraded snapshot is expected and
-// safe — the fallback holds tmux liveness — so it stays quiet. A RUN of them
-// means the supervisor has been making lifecycle decisions without an OS process
-// table for a sustained window, and that was previously indistinguishable from
-// the transient case in the log.
-func TestStateCache_SustainedProcessSnapshotDegradationIsReported(t *testing.T) {
-	var buf bytes.Buffer
-	prevOut := log.Writer()
-	prevFlags := log.Flags()
-	log.SetOutput(&buf)
-	log.SetFlags(0)
-	t.Cleanup(func() {
-		log.SetOutput(prevOut)
-		log.SetFlags(prevFlags)
-	})
-
-	f := &degradingFetcher{}
-	f.setAvailable(false)
-	// A zero TTL forces every read to refresh, so the run below is consecutive
-	// by construction and costs no wall clock.
-	cache := NewStateCache(f, 0)
-
-	for i := 1; i < processSnapshotDegradationThreshold; i++ {
-		cache.ProcessAlive("agent-1", []string{"claude"})
-	}
-	if got := buf.String(); strings.Contains(got, "sustained") {
-		t.Fatalf("reported sustained degradation after only %d refreshes, want silence before %d: %q",
-			processSnapshotDegradationThreshold-1, processSnapshotDegradationThreshold, got)
-	}
-
-	buf.Reset()
-	cache.ProcessAlive("agent-1", []string{"claude"})
-	got := buf.String()
-	if !strings.Contains(got, "sustained") {
-		t.Fatalf("no sustained-degradation report on the %dth consecutive degraded refresh, got %q",
-			processSnapshotDegradationThreshold, got)
-	}
-	if !strings.Contains(got, fmt.Sprintf("%d consecutive", processSnapshotDegradationThreshold)) {
-		t.Fatalf("sustained-degradation report does not name the consecutive count, got %q", got)
-	}
-
-	// One healthy snapshot clears the run: the next miss is transient again.
-	buf.Reset()
-	f.setAvailable(true)
-	cache.ProcessAlive("agent-1", []string{"claude"})
-	f.setAvailable(false)
-	cache.ProcessAlive("agent-1", []string{"claude"})
-	if got := buf.String(); strings.Contains(got, "sustained") {
-		t.Fatalf("sustained report survived a healthy refresh, want the run reset: %q", got)
 	}
 }

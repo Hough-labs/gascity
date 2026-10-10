@@ -3,15 +3,20 @@
 package proctable
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+const processSnapshotTimeout = 10 * time.Second
 
 // ScanBySessionID returns live agent root processes whose environment carries
 // GC_SESSION_ID equal to id. Empty id returns all roots with any GC_SESSION_ID.
@@ -23,29 +28,24 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
-	return rootsFromRecords(records, id), nil
+	return scanRecordsBySessionID(records, id), nil
 }
 
-// rootsFromRecords is the pure, IO-free core of ScanBySessionID, so the
-// which-processes-are-kill-targets decision can be unit-tested against a
-// synthetic process table instead of the host's live one.
-func rootsFromRecords(records map[int]psRecord, id string) []runtime.LiveRuntime {
+// scanRecordsBySessionID is the pure half of ScanBySessionID, over an
+// already-read process table.
+func scanRecordsBySessionID(records map[int]psRecord, id string) []runtime.LiveRuntime {
 	var out []runtime.LiveRuntime
 	for _, record := range records {
 		if record.pid <= 1 {
 			continue
 		}
-		// A tmux server is infrastructure, never an agent runtime root — and
-		// must never be handed to a caller that kills what it gets back.
-		// `ps eww` emits argv and the environment block as one
-		// whitespace-separated stream, so parseInlineEnv cannot tell a real
-		// environment entry from an argv token shaped like one. The tmux
-		// server's argv is the `new-session -e KEY=VALUE ...` command that
-		// bootstrapped it, so the server reads as carrying the GC_SESSION_ID
-		// of whichever agent happened to start it. The pre-start orphan sweep
-		// then group-SIGTERMs it and every session on the socket dies with it,
-		// including agents nobody targeted (gc-eazs). Linux is immune: it
-		// reads /proc/<pid>/environ, the true environment.
+		// A process that is itself infrastructure is never an agent root,
+		// whoever its parent is. The tmux server a session's first new-session
+		// call founded inherits that session's GC_SESSION_ID and reparents to
+		// launchd, so the parent-envelope test below cannot exclude it; reported
+		// as a root, it is handed to the orphan sweep, which kills the one server
+		// every agent in the city shares — one socket per city is the default
+		// topology, so that is the whole city (gastownhall/gascity#5392).
 		if isInfrastructureCommand(record.command) {
 			continue
 		}
@@ -56,7 +56,8 @@ func rootsFromRecords(records map[int]psRecord, id string) []runtime.LiveRuntime
 		if id != "" && sessionID != id {
 			continue
 		}
-		if parent, ok := records[record.ppid]; ok && parent.env["GC_SESSION_ID"] == sessionID && !isInfrastructureCommand(parent.command) {
+		parent, hasParent := records[record.ppid]
+		if hasParent && parent.env["GC_SESSION_ID"] == sessionID && !isInfrastructureCommand(parent.command) {
 			continue
 		}
 		epoch, _ := strconv.Atoi(record.env["GC_RUNTIME_EPOCH"])
@@ -69,6 +70,12 @@ func rootsFromRecords(records map[int]psRecord, id string) []runtime.LiveRuntime
 			City:      city,
 			Epoch:     epoch,
 			PID:       record.pid,
+			PPID:      record.ppid,
+			// A parent that is not in the snapshot at all (it exited, or ps
+			// could not report it) is not provider infrastructure: this field
+			// only ever reports what the scan positively saw.
+			ParentIsProviderInfrastructure: hasParent && isInfrastructureCommand(parent.command),
+			Name:                           filepath.Base(strings.TrimSpace(record.command)),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -80,8 +87,11 @@ func rootsFromRecords(records map[int]psRecord, id string) []runtime.LiveRuntime
 	return out
 }
 
-// IsScanRoot reports whether pid is outside its GC_SESSION_ID parent's
-// envelope and should be treated as an agent root.
+// IsScanRoot reports whether pid should be treated as an agent root. A root
+// carries a GC_SESSION_ID, is not itself infrastructure — a tmux server or
+// client is never a root, whoever its parent is — and sits outside its
+// parent's envelope: the parent is gone, carries a different GC_SESSION_ID,
+// or is infrastructure.
 func IsScanRoot(pid int) bool {
 	if err := liveScanGuard(); err != nil {
 		return false
@@ -99,16 +109,17 @@ func IsScanRoot(pid int) bool {
 	if err != nil {
 		return false
 	}
-	return isScanRootFromRecords(records, pid)
-}
-
-// isScanRootFromRecords is the pure, IO-free core of IsScanRoot.
-func isScanRootFromRecords(records map[int]psRecord, pid int) bool {
 	record, ok := records[pid]
 	if !ok {
 		return false
 	}
-	// Infrastructure is never an agent root — see rootsFromRecords.
+	return isRecordScanRoot(records, record)
+}
+
+// isRecordScanRoot is the pure half of IsScanRoot. Infrastructure is never a
+// root (see scanRecordsBySessionID), so a kill path that asks about the tmux
+// server is told no.
+func isRecordScanRoot(records map[int]psRecord, record psRecord) bool {
 	if isInfrastructureCommand(record.command) {
 		return false
 	}
@@ -128,7 +139,9 @@ type psRecord struct {
 }
 
 func psRecords() (map[int]psRecord, error) {
-	out, err := exec.Command("ps", "eww", "-ax", "-o", "pid=,ppid=,command=").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), processSnapshotTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "eww", "-ax", "-o", "pid=,ppid=,command=").Output()
 	if err != nil {
 		return nil, fmt.Errorf("running ps: %w", err)
 	}

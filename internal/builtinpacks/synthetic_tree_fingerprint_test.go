@@ -30,7 +30,7 @@ func TestValidateSyntheticRepoSkipsContentReadWhenTreeFingerprintMatches(t *test
 	dst := materializeTestRepo(t)
 	tamperPreservingStat(t, filepath.Join(dst, corePackTomlRel))
 
-	if err := ValidateSyntheticRepo(dst, testCommit); err != nil {
+	if err := ValidateSyntheticRepo(dst, Repository, testCommit); err != nil {
 		t.Fatalf("ValidateSyntheticRepo re-read file content for an unchanged tree fingerprint: %v", err)
 	}
 }
@@ -60,7 +60,7 @@ func TestValidateSyntheticRepoRejectsSameSizeTamperThatChangesModTime(t *testing
 		t.Fatalf("Chtimes(%q): %v", target, err)
 	}
 
-	err = ValidateSyntheticRepo(dst, testCommit)
+	err = ValidateSyntheticRepo(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted a same-size tamper with a changed mtime")
 	}
@@ -76,56 +76,18 @@ func TestValidateSyntheticRepoFallsBackWhenMarkerHasNoFingerprint(t *testing.T) 
 	dst := materializeTestRepo(t)
 	stripSyntheticTreeFingerprint(t, dst)
 
-	if err := ValidateSyntheticRepo(dst, testCommit); err != nil {
+	if err := ValidateSyntheticRepo(dst, Repository, testCommit); err != nil {
 		t.Fatalf("ValidateSyntheticRepo on an intact legacy-marker cache: %v", err)
 	}
 
 	writeFile(t, filepath.Join(dst, corePackTomlRel), "[pack]\nname = \"tampered\"\nschema = 1\n")
 	stripSyntheticTreeFingerprint(t, dst)
-	err := ValidateSyntheticRepo(dst, testCommit)
+	err := ValidateSyntheticRepo(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted tampered content under a legacy marker")
 	}
 	if !strings.Contains(err.Error(), "content differs") {
 		t.Fatalf("error = %v, want content differs", err)
-	}
-}
-
-// StampSyntheticTreeFingerprint backfills the fingerprint onto a cache that a
-// previous gc build materialized, so existing on-disk caches get the cheap gate
-// without waiting to be re-materialized.
-func TestStampSyntheticTreeFingerprintBackfillsLegacyMarker(t *testing.T) {
-	dst := materializeTestRepo(t)
-	stripSyntheticTreeFingerprint(t, dst)
-
-	if SyntheticTreeFingerprintCurrent(dst) {
-		t.Fatal("a stripped marker reports a current fingerprint")
-	}
-	if err := StampSyntheticTreeFingerprint(dst, testCommit); err != nil {
-		t.Fatalf("StampSyntheticTreeFingerprint: %v", err)
-	}
-	if !SyntheticTreeFingerprintCurrent(dst) {
-		t.Fatal("fingerprint is not current after stamping")
-	}
-	if err := ValidateSyntheticRepo(dst, testCommit); err != nil {
-		t.Fatalf("ValidateSyntheticRepo after stamping: %v", err)
-	}
-
-	// The stamp must not have disturbed the marker's other fields.
-	if err := ValidateSyntheticRepoFast(dst, testCommit); err != nil {
-		t.Fatalf("ValidateSyntheticRepoFast after stamping: %v", err)
-	}
-}
-
-// Stamping refuses a tree that does not currently validate, so a corrupted
-// cache can never be blessed into the cheap path.
-func TestStampSyntheticTreeFingerprintRefusesInvalidTree(t *testing.T) {
-	dst := materializeTestRepo(t)
-	writeFile(t, filepath.Join(dst, corePackTomlRel), "[pack]\nname = \"tampered\"\nschema = 1\n")
-	stripSyntheticTreeFingerprint(t, dst)
-
-	if err := StampSyntheticTreeFingerprint(dst, testCommit); err == nil {
-		t.Fatal("StampSyntheticTreeFingerprint blessed a tampered tree")
 	}
 }
 
@@ -137,7 +99,7 @@ func TestValidateSyntheticRepoRejectsDeletedFileWithFingerprintMarker(t *testing
 		t.Fatalf("Remove(%q): %v", target, err)
 	}
 
-	if err := ValidateSyntheticRepo(dst, testCommit); err == nil {
+	if err := ValidateSyntheticRepo(dst, Repository, testCommit); err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted a cache with a deleted pack file")
 	}
 }
@@ -153,7 +115,7 @@ func stripSyntheticTreeFingerprint(t *testing.T, dir string) {
 	}
 	var kept []string
 	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), syntheticTreeFingerprintTOMLKey+" ") {
+		if strings.HasPrefix(strings.TrimSpace(line), "tree_fingerprint ") {
 			continue
 		}
 		kept = append(kept, line)
@@ -168,13 +130,13 @@ func stripSyntheticTreeFingerprint(t *testing.T, dir string) {
 // invocation makes before it reaches the beads store (gascity-i7v).
 func BenchmarkValidateSyntheticRepoWarm(b *testing.B) {
 	dst := filepath.Join(b.TempDir(), "cache")
-	if err := MaterializeSyntheticRepo(dst, testCommit); err != nil {
+	if err := MaterializeSyntheticRepo(dst, Repository, testCommit); err != nil {
 		b.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := ValidateSyntheticRepo(dst, testCommit); err != nil {
+		if err := ValidateSyntheticRepo(dst, Repository, testCommit); err != nil {
 			b.Fatalf("ValidateSyntheticRepo: %v", err)
 		}
 	}
@@ -185,13 +147,13 @@ func BenchmarkValidateSyntheticRepoWarm(b *testing.B) {
 // path. Read the two together.
 func BenchmarkValidateSyntheticRepoFullComparison(b *testing.B) {
 	dst := filepath.Join(b.TempDir(), "cache")
-	if err := MaterializeSyntheticRepo(dst, testCommit); err != nil {
+	if err := MaterializeSyntheticRepo(dst, Repository, testCommit); err != nil {
 		b.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := validateSyntheticRepoContents(dst); err != nil {
+		if err := validateSyntheticRepoContents(dst, Repository, false); err != nil {
 			b.Fatalf("validateSyntheticRepoContents: %v", err)
 		}
 	}
@@ -207,13 +169,34 @@ func TestValidateSyntheticRepoFullRejectsStatPreservingTamper(t *testing.T) {
 	tamperPreservingStat(t, filepath.Join(dst, corePackTomlRel))
 
 	// The gated path accepts it — that is the documented blind spot.
-	if err := ValidateSyntheticRepo(dst, testCommit); err != nil {
+	if err := ValidateSyntheticRepo(dst, Repository, testCommit); err != nil {
 		t.Fatalf("ValidateSyntheticRepo on an unchanged tree fingerprint: %v", err)
 	}
 
-	err := ValidateSyntheticRepoFull(dst, testCommit)
+	err := ValidateSyntheticRepoFull(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepoFull accepted a stat-preserving tamper")
+	}
+	if !strings.Contains(err.Error(), "content differs") {
+		t.Fatalf("error = %v, want content differs", err)
+	}
+}
+
+// ValidateSyntheticRepoFull must not reuse the in-process content memo
+// (packContentValidationMemo) either. A long-lived process that verified the
+// cache once would otherwise accept a later tamper that preserves size, mode and
+// modification time — the blind spot this variant exists to close for the
+// integrity command and the repair path.
+func TestValidateSyntheticRepoFullIgnoresInProcessContentMemo(t *testing.T) {
+	dst := materializeTestRepo(t)
+	if err := ValidateSyntheticRepoFull(dst, Repository, testCommit); err != nil {
+		t.Fatalf("ValidateSyntheticRepoFull on an intact cache: %v", err)
+	}
+	tamperPreservingStat(t, filepath.Join(dst, corePackTomlRel))
+
+	err := ValidateSyntheticRepoFull(dst, Repository, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepoFull reused an earlier in-process verdict and accepted a stat-preserving tamper")
 	}
 	if !strings.Contains(err.Error(), "content differs") {
 		t.Fatalf("error = %v, want content differs", err)
@@ -225,7 +208,7 @@ func TestValidateSyntheticRepoFullRejectsStatPreservingTamper(t *testing.T) {
 func TestValidateSyntheticRepoFullRejectsWrongCommit(t *testing.T) {
 	dst := materializeTestRepo(t)
 
-	err := ValidateSyntheticRepoFull(dst, "0000000000000000000000000000000000000000")
+	err := ValidateSyntheticRepoFull(dst, Repository, "0000000000000000000000000000000000000000")
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepoFull accepted a cache pinned to another commit")
 	}

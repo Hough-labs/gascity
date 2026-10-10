@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/execenv"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestProductMetricsDirectChildEnvSessionSubmitPoller(t *testing.T) {
@@ -17,7 +16,10 @@ func TestProductMetricsDirectChildEnvSessionSubmitPoller(t *testing.T) {
 	snapshot := filepath.Join(dir, "child.env")
 	spy := filepath.Join(dir, "gc-child-spy")
 	script := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$GC_DISABLE_USAGE_METRICS\" \"$BD_DISABLE_METRICS\" \"$OTEL_SERVICE_NAME\" > \"$GC_TEST_PRODUCT_METRICS_CHILD_ENV_SPY\"\n"
+		"snapshot=\"$GC_TEST_PRODUCT_METRICS_CHILD_ENV_SPY\"\n" +
+		"tmp=\"${snapshot}.tmp.$$\"\n" +
+		"printf '%s\\n' \"$GC_DISABLE_USAGE_METRICS\" \"$BD_DISABLE_METRICS\" \"$OTEL_SERVICE_NAME\" > \"$tmp\"\n" +
+		"mv -f \"$tmp\" \"$snapshot\"\n"
 	if err := os.WriteFile(spy, []byte(script), 0o700); err != nil {
 		t.Fatalf("write child spy: %v", err)
 	}
@@ -33,38 +35,25 @@ func TestProductMetricsDirectChildEnvSessionSubmitPoller(t *testing.T) {
 	if err := ensureSessionSubmitPoller(dir, "worker", "session-worker"); err != nil {
 		t.Fatalf("ensureSessionSubmitPoller: %v", err)
 	}
-	want := []string{execenv.UsageMetricsDisableValue, "keep-beads-setting", "keep-otel-setting"}
-	deadline := time.Now().Add(testutil.ExecRaceTimeout)
-	var got []string
+	deadline := time.Now().Add(execHangBudget)
+	var data []byte
 	for {
-		// Poll for a COMPLETE snapshot, not merely a readable one. The spy is a
-		// shell script and its `>` redirect creates the file before printf has
-		// written any of the three lines, so a read can land mid-write and
-		// return a prefix. Breaking on the first successful ReadFile compared
-		// that prefix and failed with "environment = [1 keep-beads-setting],
-		// want [1 keep-beads-setting keep-otel-setting]" under a parallel sweep
-		// on a loaded host, while passing 20/20 in isolation (gascity-hpqe).
-		// A short read is treated exactly like a missing file.
-		//
-		// This still catches a genuinely dropped variable: the child then
-		// writes an empty third line, which parses as a complete three-element
-		// read and mismatches on VALUE rather than on length.
-		data, err := os.ReadFile(snapshot)
-		if err != nil && !os.IsNotExist(err) {
+		var err error
+		data, err = os.ReadFile(snapshot)
+		if err == nil {
+			break
+		}
+		if !os.IsNotExist(err) {
 			t.Fatalf("read child environment snapshot: %v", err)
 		}
-		if err == nil {
-			got = strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
-			if len(got) == len(want) {
-				break
-			}
-		}
 		if time.Now().After(deadline) {
-			t.Fatalf("child environment snapshot was not completely written within %s (last read %#v)", testutil.ExecRaceTimeout, got)
+			t.Fatalf("child environment snapshot was not written within %s", execHangBudget)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	want := []string{execenv.UsageMetricsDisableValue, "keep-beads-setting", "keep-otel-setting"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("session submit poller environment = %#v, want %#v", got, want)
 	}

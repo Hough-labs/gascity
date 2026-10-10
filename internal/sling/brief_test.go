@@ -133,9 +133,9 @@ func carriedContextPath(t *testing.T, carry beadBriefCarry) string {
 
 // TestResolveBeadBriefCarry is the acceptance matrix from gascity-zmli: a
 // recipe that declares context_path gets the brief carried and no note; a
-// recipe that declares neither var gets neither (the old note's advice was
-// inert there); a caller-supplied var always wins; an empty description
-// produces nothing at all.
+// recipe without context_path gets no carry and no carry note (whether the
+// operator is warned is attachedBeadInstructionsDroppedHint's call); a
+// caller-supplied var always wins; an empty description produces nothing.
 func TestResolveBeadBriefCarry(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -163,10 +163,9 @@ func TestResolveBeadBriefCarry(t *testing.T) {
 			description: "Implement the widget.",
 		},
 		{
-			name:        "declares requirements_path only hints instead of binding",
+			name:        "declares requirements_path only carries nothing and leaves the note to the attach hint",
 			formula:     "plan-requirements",
 			description: "Implement the widget.",
-			wantHint:    true,
 		},
 		{
 			name:        "caller context_path wins over the carry",
@@ -609,6 +608,13 @@ func TestResolveBeadBriefCarryHintsWhenBeadUnreadable(t *testing.T) {
 	}
 	if len(carry.Vars) != 0 {
 		t.Errorf("unreadable bead must carry nothing, got %v", carry.Vars)
+	}
+	// A recipe without context_path was never going to be carried into, so an
+	// unreadable bead is not a failed carry there.
+	envNeither := newBriefTestEnv(t, map[string]string{"polecat-like": briefFixtureNeither})
+	optsNeither := SlingOpts{Target: envNeither.agent, BeadOrFormula: "tb-unreadable"}
+	if c := resolveBeadBriefCarry(optsNeither, envNeither.deps, failingQuerier{err: errors.New("boom")}, "tb-unreadable", "polecat-like"); c.Hint != "" {
+		t.Errorf("declares-neither recipe: want no carry note, got %q", c.Hint)
 	}
 	// A caller who supplied the var owns the context, so an unreadable bead is
 	// not their problem and must stay silent.

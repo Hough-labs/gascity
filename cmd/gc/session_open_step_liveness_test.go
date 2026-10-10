@@ -154,7 +154,7 @@ func TestCollectAssignedWorkBeads_MarksOpenAssignedFormulaStepReady(t *testing.T
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	snapshot := newSessionBeadSnapshot([]beads.Bead{sess})
-	got, _, storeRefs, readyAssigned, partial := collectAssignedWorkBeadsWithStores(cfg, store, nil, nil, snapshot)
+	got, _, storeRefs, readyAssigned, partial := collectAssignedWorkBeadsWithStores("", cfg, store, nil, nil, snapshot)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}

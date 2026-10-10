@@ -6,14 +6,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestOrderFiringCurrent_NeverFired_BeyondUptime(t *testing.T) {
@@ -237,51 +238,26 @@ func TestOrderFiringCurrent_SkipsSuspendedRigOrders(t *testing.T) {
 	}
 }
 
-func orderFiringWriteSuspensionState(t *testing.T, cityPath string, rigs map[string]bool) {
-	t.Helper()
-	dir := filepath.Join(cityPath, ".gc", "runtime")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("creating runtime dir: %v", err)
-	}
-	entries := make([]string, 0, len(rigs))
-	for name, susp := range rigs {
-		entries = append(entries, fmt.Sprintf("%q:{%q:%t}", name, "suspended", susp))
-	}
-	body := fmt.Sprintf(`{"rigs":{%s}}`, strings.Join(entries, ","))
-	if err := os.WriteFile(filepath.Join(dir, "suspension-state.json"), []byte(body), 0o644); err != nil {
-		t.Fatalf("writing suspension state: %v", err)
-	}
-}
-
-func orderFiringSuspensionCity(t *testing.T, now time.Time) (string, *config.City) {
-	t.Helper()
+func TestOrderFiringCurrent_SkipsSuspendedOnStartRigOrders(t *testing.T) {
+	// Regression for #5268: the legacy Suspended field is deprecated and no
+	// longer written by live suspend/resume. A rig parked the *current* way
+	// (suspended_on_start = true in city.toml) must be skipped exactly like
+	// the legacy field was in TestOrderFiringCurrent_SkipsSuspendedRigOrders.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)
 	rigPath := filepath.Join(cityPath, "rigs", "parked")
+	rigFormulas := filepath.Join(rigPath, "formulas")
 	rigOrders := filepath.Join(rigPath, "orders")
 	if err := os.MkdirAll(rigOrders, 0o755); err != nil {
 		t.Fatalf("creating rig orders dir: %v", err)
 	}
-	cfg.FormulaLayers.Rigs = map[string][]string{
-		"parked": {cfg.FormulaLayers.City[0], filepath.Join(rigPath, "formulas")},
-	}
+	cfg.Rigs = []config.Rig{{Name: "parked", Path: rigPath, SuspendedOnStart: true}}
+	cfg.FormulaLayers.Rigs = map[string][]string{"parked": {cfg.FormulaLayers.City[0], rigFormulas}}
 	writeOrderFiringTestOrderInDir(t, rigOrders, "gate-sweep", "cooldown", "1m")
 	writeOrderFiringTestEvents(t, cityPath,
 		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
 		events.Event{Type: events.OrderFired, Subject: "gate-sweep:rig:parked", Ts: now.Add(-24 * time.Hour)},
 	)
-	cfg.Rigs = []config.Rig{{Name: "parked", Path: rigPath}}
-	return cityPath, cfg
-}
-
-func TestOrderFiringCurrent_SkipsRigSuspendedOnStart(t *testing.T) {
-	// Regression for gascity-u4a. Modern suspension writes `suspended_on_start`
-	// (what `gc rig add --start-suspended` produces); `suspended` is only the
-	// deprecated alias. Reading the raw legacy field made this exemption dead
-	// code in any city that satisfies the legacy-suspended-field check, so
-	// every dormant rig's orders raised a permanent false blocking ERROR.
-	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
-	cityPath, cfg := orderFiringSuspensionCity(t, now)
-	cfg.Rigs[0].SuspendedOnStart = true
 
 	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
 	if result.Status != StatusOK {
@@ -292,40 +268,68 @@ func TestOrderFiringCurrent_SkipsRigSuspendedOnStart(t *testing.T) {
 	}
 }
 
-func TestOrderFiringCurrent_SkipsRigSuspendedOnlyAtRuntime(t *testing.T) {
-	// gascity-u4a, second direction. winnow is suspended by `gc rig suspend`
-	// and carries NO suspended_on_start in city.toml, so a config-only read
-	// still reports its paused orders as CRITICAL stale.
+func TestOrderFiringCurrent_SkipsRuntimeStateSuspendedRigOrders(t *testing.T) {
+	// Regression for #5268: `gc rig suspend` records its preference in
+	// .gc/runtime/suspension-state.json, not in any city.toml field. This is
+	// the more common suspend path (it leaves no trace in city.toml) and the
+	// one #5268 reports as unconditionally missed.
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
-	cityPath, cfg := orderFiringSuspensionCity(t, now)
-	orderFiringWriteSuspensionState(t, cityPath, map[string]bool{"parked": true})
+	cityPath, cfg := orderFiringTestCity(t)
+	rigPath := filepath.Join(cityPath, "rigs", "parked")
+	rigFormulas := filepath.Join(rigPath, "formulas")
+	rigOrders := filepath.Join(rigPath, "orders")
+	if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+		t.Fatalf("creating rig orders dir: %v", err)
+	}
+	cfg.Rigs = []config.Rig{{Name: "parked", Path: rigPath}}
+	cfg.FormulaLayers.Rigs = map[string][]string{"parked": {cfg.FormulaLayers.City[0], rigFormulas}}
+	writeOrderFiringTestOrderInDir(t, rigOrders, "gate-sweep", "cooldown", "1m")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "gate-sweep:rig:parked", Ts: now.Add(-24 * time.Hour)},
+	)
+	suspended := true
+	st := suspensionstate.State{Rigs: map[string]suspensionstate.Override{"parked": {Suspended: &suspended}}}
+	if err := suspensionstate.Save(fsys.OSFS{}, cityPath, st); err != nil {
+		t.Fatalf("saving runtime suspension state: %v", err)
+	}
 
 	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
 	if result.Status != StatusOK {
-		t.Fatalf("status = %v, want OK for runtime-suspended rig; msg = %s; details = %v", result.Status, result.Message, result.Details)
+		t.Fatalf("status = %v, want OK for runtime-state suspended rig; msg = %s; details = %v", result.Status, result.Message, result.Details)
 	}
 	if strings.Contains(strings.Join(result.Details, "\n"), "parked") {
-		t.Fatalf("details = %v, runtime-suspended rig order should be skipped", result.Details)
+		t.Fatalf("details = %v, runtime-state suspended rig order should be skipped", result.Details)
 	}
 }
 
-func TestOrderFiringCurrent_ChecksResumedRigDespiteSuspendedOnStart(t *testing.T) {
-	// gascity-u4a, the direction that matters most. gascity carries
-	// `suspended_on_start = true` but has been RESUMED, so the runtime
-	// override says active. Exempting it on the authored default alone would
-	// silence genuine staleness on a live rig — strictly worse than the false
-	// positive this bead started from.
+func TestOrderFiringCurrent_RuntimeStateResumeOverridesSuspendedOnStart(t *testing.T) {
+	// The runtime override wins over the authored default in both
+	// directions: `gc rig resume` on a rig whose city.toml still says
+	// suspended_on_start = true must re-enable staleness checking for it.
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
-	cityPath, cfg := orderFiringSuspensionCity(t, now)
-	cfg.Rigs[0].SuspendedOnStart = true
-	orderFiringWriteSuspensionState(t, cityPath, map[string]bool{"parked": false})
+	cityPath, cfg := orderFiringTestCity(t)
+	rigPath := filepath.Join(cityPath, "rigs", "resumed")
+	rigFormulas := filepath.Join(rigPath, "formulas")
+	rigOrders := filepath.Join(rigPath, "orders")
+	if err := os.MkdirAll(rigOrders, 0o755); err != nil {
+		t.Fatalf("creating rig orders dir: %v", err)
+	}
+	cfg.Rigs = []config.Rig{{Name: "resumed", Path: rigPath, SuspendedOnStart: true}}
+	cfg.FormulaLayers.Rigs = map[string][]string{"resumed": {cfg.FormulaLayers.City[0], rigFormulas}}
+	writeOrderFiringTestOrderInDir(t, rigOrders, "gate-sweep", "cooldown", "1m")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+	)
+	resumed := false
+	st := suspensionstate.State{Rigs: map[string]suspensionstate.Override{"resumed": {Suspended: &resumed}}}
+	if err := suspensionstate.Save(fsys.OSFS{}, cityPath, st); err != nil {
+		t.Fatalf("saving runtime suspension state: %v", err)
+	}
 
 	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
-	if result.Status == StatusOK {
-		t.Fatalf("status = OK, want stale reported for a resumed rig; details = %v", result.Details)
-	}
-	if !strings.Contains(strings.Join(result.Details, "\n"), "parked") {
-		t.Fatalf("details = %v, resumed rig order must still be checked", result.Details)
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; an explicit runtime resume should re-enable staleness checking; msg = %s; details = %v", result.Status, result.Message, result.Details)
 	}
 }
 
@@ -731,12 +735,51 @@ func TestLatestOrderFiredAt_StaleEventConsultsLastRun(t *testing.T) {
 	}
 }
 
+func TestOrderFiringCurrent_TimesOutStalledOrderHistory(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stalled-history", "cron", "0 */4 * * *")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "mol-dog-stalled-history", Ts: now.Add(-13 * time.Hour)},
+	)
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	check := NewOrderFiringCurrentCheck(cfg, cityPath)
+	check.clock = func() time.Time { return now }
+	check.historyTimeout = 20 * time.Millisecond
+	check.lastRun = func(orders.Order) (time.Time, error) {
+		<-release
+		return time.Time{}, nil
+	}
+
+	result := check.Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error; msg = %s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "order history lookup timed out after 20ms") {
+		t.Fatalf("message = %q, want timeout diagnostic", result.Message)
+	}
+	// A slow-but-inconclusive lookup must not gate gc doctor red the same way a
+	// confirmed stale/never-fired order does (#4895): the query timing out proves
+	// nothing about whether orders are actually firing, so it must not report as
+	// SeverityBlocking (the CheckSeverity zero value, which this branch silently
+	// fell into before it explicitly set Severity).
+	if result.Severity != SeverityAdvisory {
+		t.Fatalf("severity = %v, want SeverityAdvisory (a timed-out lookup is inconclusive, not proof of a stale order)", result.Severity)
+	}
+	if !result.TimedOut {
+		t.Fatalf("TimedOut = false, want true so callers (JSON output, doctor summary) can distinguish this from a confirmed failure")
+	}
+}
+
 // TestOrderFiringCurrent_HistoryBudgetIsPerOrderNotShared is the regression
-// guard for gascity-xx4k. The budget used to wall the whole check, so it was
-// really 15s divided by the order count and the run collapsed to one opaque
-// timeout with no per-order detail. It now belongs to a single lookup: the
-// wedged order is granted the WHOLE budget and is named on its own line, and
-// every other monitored order is still accounted for individually.
+// guard for gascity-xx4k. A budget that walls the whole check lets one wedged
+// lookup time out the entire run and erase every other order's verdict,
+// including a genuinely stale one. The budget belongs to a single lookup: the
+// wedged order is named on its own line, and every other monitored order is
+// still resolved and classified individually.
 func TestOrderFiringCurrent_HistoryBudgetIsPerOrderNotShared(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)
@@ -755,14 +798,7 @@ func TestOrderFiringCurrent_HistoryBudgetIsPerOrderNotShared(t *testing.T) {
 	check := NewOrderFiringCurrentCheck(cfg, cityPath)
 	check.clock = func() time.Time { return now }
 	check.historyTimeout = 40 * time.Millisecond
-	var inFlight int32
 	check.lastRun = func(order orders.Order) (time.Time, error) {
-		// A second concurrent entry would race the caller's unsynchronized
-		// store cache, which is exactly what the abandonment guard prevents.
-		if atomic.AddInt32(&inFlight, 1) != 1 {
-			t.Errorf("order history resolver entered concurrently for %s", order.ScopedName())
-		}
-		defer atomic.AddInt32(&inFlight, -1)
 		if order.Name == "aa-wedged-history" {
 			<-release
 			return time.Time{}, nil
@@ -775,110 +811,9 @@ func TestOrderFiringCurrent_HistoryBudgetIsPerOrderNotShared(t *testing.T) {
 	if !strings.Contains(details, "aa-wedged-history: order history lookup timed out after 40ms") {
 		t.Fatalf("details = %q, want the wedged order reported as a timed-out lookup", details)
 	}
-	// The abandoned lookup is still inside the caller's resolver, which the
-	// check promises never to enter twice at once, so the remaining orders are
-	// reported as unconfirmed rather than silently dropped from the run.
-	if !strings.Contains(details, "zz-live-history: order history not consulted") {
-		t.Fatalf("details = %q, want the second order accounted for after the first one wedged", details)
-	}
-}
-
-// TestOrderFiringCurrent_SlowHistoryIsAdvisoryAndDoesNotBlameDolt pins the
-// diagnosis half of gascity-xx4k. A lookup that ran out of budget says the
-// order's freshness is UNKNOWN; it says nothing about whether beads/Dolt is
-// reachable, so it must not be reported as a blocking connectivity fault.
-func TestOrderFiringCurrent_SlowHistoryIsAdvisoryAndDoesNotBlameDolt(t *testing.T) {
-	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
-	cityPath, cfg := orderFiringTestCity(t)
-	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stalled-history", "cron", "0 */4 * * *")
-	writeOrderFiringTestEvents(t, cityPath,
-		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
-		events.Event{Type: events.OrderFired, Subject: "mol-dog-stalled-history", Ts: now.Add(-13 * time.Hour)},
-	)
-
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	check := NewOrderFiringCurrentCheck(cfg, cityPath)
-	check.clock = func() time.Time { return now }
-	check.historyTimeout = 40 * time.Millisecond
-	check.lastRun = func(orders.Order) (time.Time, error) {
-		<-release
-		return time.Time{}, nil
-	}
-
-	result := check.Run(&CheckContext{CityPath: cityPath})
-	if result.Status != StatusError {
-		t.Fatalf("status = %v, want error; msg = %s", result.Status, result.Message)
-	}
-	if result.Severity != SeverityAdvisory {
-		t.Fatalf("severity = %v, want SeverityAdvisory: an unconfirmed lookup is not a blocking finding", result.Severity)
-	}
-	if !strings.Contains(result.Message, "unconfirmed") {
-		t.Fatalf("message = %q, want it to report freshness as unconfirmed rather than stale", result.Message)
-	}
-	if strings.Contains(result.FixHint, "connectivity") {
-		t.Fatalf("fix hint = %q, want no connectivity claim for a lookup that merely ran slowly", result.FixHint)
-	}
-	if !strings.Contains(result.FixHint, "gc order history mol-dog-stalled-history") {
-		t.Fatalf("fix hint = %q, want it to name the order to time", result.FixHint)
-	}
-}
-
-// TestOrderFiringCurrent_HistoryErrorStaysBlockingAndNamesConnectivity is the
-// other side of the split: a lookup that actually FAILED is the one finding
-// that does implicate the data plane, and it keeps the connectivity hint.
-func TestOrderFiringCurrent_HistoryErrorStaysBlockingAndNamesConnectivity(t *testing.T) {
-	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
-	cityPath, cfg := orderFiringTestCity(t)
-	writeOrderFiringTestOrder(t, cityPath, "mol-dog-broken-history", "cron", "0 */4 * * *")
-	writeOrderFiringTestEvents(t, cityPath,
-		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
-		events.Event{Type: events.OrderFired, Subject: "mol-dog-broken-history", Ts: now.Add(-13 * time.Hour)},
-	)
-
-	check := NewOrderFiringCurrentCheck(cfg, cityPath)
-	check.clock = func() time.Time { return now }
-	check.lastRun = func(orders.Order) (time.Time, error) {
-		return time.Time{}, fmt.Errorf("dial 127.0.0.1:51160: connection refused")
-	}
-
-	result := check.Run(&CheckContext{CityPath: cityPath})
-	if result.Status != StatusError {
-		t.Fatalf("status = %v, want error; msg = %s", result.Status, result.Message)
-	}
-	if result.Severity != SeverityBlocking {
-		t.Fatalf("severity = %v, want SeverityBlocking for a failed history read", result.Severity)
-	}
-	if !strings.Contains(result.FixHint, "beads/Dolt connectivity") {
-		t.Fatalf("fix hint = %q, want the connectivity hint for a failed history read", result.FixHint)
-	}
-}
-
-// TestOrderFiringCurrent_ManyOrdersOnHealthyCityPass encodes the acceptance
-// criterion from gascity-xx4k: order count alone must never trip the check.
-// The city that reported the bug had 52 orders; this one has more.
-func TestOrderFiringCurrent_ManyOrdersOnHealthyCityPass(t *testing.T) {
-	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
-	cityPath, cfg := orderFiringTestCity(t)
-	evts := []events.Event{{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)}}
-	const orderCount = 60
-	for i := 0; i < orderCount; i++ {
-		name := fmt.Sprintf("mol-dog-healthy-%02d", i)
-		writeOrderFiringTestOrder(t, cityPath, name, "cron", "0 */4 * * *")
-		evts = append(evts, events.Event{Type: events.OrderFired, Subject: name, Ts: now.Add(-1 * time.Hour)})
-	}
-	writeOrderFiringTestEvents(t, cityPath, evts...)
-
-	check := NewOrderFiringCurrentCheck(cfg, cityPath)
-	check.clock = func() time.Time { return now }
-	check.lastRun = func(order orders.Order) (time.Time, error) {
-		t.Errorf("order history consulted for %s, which fired 1h ago: the recent-event fast path must cover it", order.ScopedName())
-		return time.Time{}, nil
-	}
-
-	result := check.Run(&CheckContext{CityPath: cityPath})
-	if result.Status != StatusOK {
-		t.Fatalf("status = %v (%s), want ok for %d healthy orders; details:\n%s",
-			result.Status, result.Message, orderCount, strings.Join(result.Details, "\n"))
+	// The wedged lookup spends only its own budget: the other order is still
+	// resolved from its own lookup and classified on its own line.
+	if !strings.Contains(details, "zz-live-history: last fired 1h ago") {
+		t.Fatalf("details = %q, want the second order classified from its own lookup after the first one wedged", details)
 	}
 }

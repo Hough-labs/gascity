@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testpolicy/waiverclock"
 )
 
 const moduleImportPath = "github.com/gastownhall/gascity"
@@ -67,6 +69,8 @@ const (
 	// runtimeContractWaiverOwner owns the remaining production-runtime gaps.
 	// It must name a bead that resolves in a rig registered with this city:
 	// validateClaim only checks the field is non-empty, so a dead id stays green.
+	// It is pinned by TestRuntimeWaiverOwnerIsPinnedAndWellFormed: changing it
+	// re-owns every runtime waiver at once, so it needs to be a deliberate edit.
 	runtimeContractWaiverOwner = "gascity-82e"
 
 	// MarkdownStart begins the generated TESTING.md table.
@@ -205,6 +209,7 @@ func Catalog() []Entry {
 			"t3bridge", "exact:t3bridge", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
+				time.Date(2026, time.November, 5, 0, 0, 0, 0, time.UTC),
 				"the production T3 bridge composition has focused tests but no full shared runtime contract",
 			),
 		),
@@ -212,20 +217,23 @@ func Catalog() []Entry {
 			"k8s", "exact:k8s", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
-				"the actual K8s production composition has no full shared runtime contract",
+				time.Date(2026, time.November, 12, 0, 0, 0, 0, time.UTC),
+				"no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s",
 			),
 		),
 		builtin(
 			"herdr", "exact:herdr", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
-				"the existing full conformance run skips in short mode or when the herdr executable is absent",
+				time.Date(2026, time.October, 31, 0, 0, 0, 0, time.UTC),
+				"the full conformance run is an opt-in live journey (make test-herdr-live, or GC_FAST_UNIT=0) and skips in the unit lane, in short mode, and when the herdr executable is absent",
 			),
 		),
 		builtin(
 			"hybrid", "exact:hybrid", nil,
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
+				time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC),
 				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract",
 			),
 		),
@@ -241,21 +249,31 @@ func Catalog() []Entry {
 			),
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
+				time.Date(2026, time.November, 5, 0, 0, 0, 0, time.UTC),
 				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract",
 			),
 		),
 		builtin(
 			"ssh", "prefix:ssh:", nil,
-			waivedRuntime(
+			provedRuntimeScoped(
 				repoSymbol("internal/runtime/ssh", "NewSeamBacked"),
-				"the production SSH composition has no full shared runtime contract",
+				"internal/runtime/ssh/conformance_integration_test.go",
+				"TestSSHConformance",
+				"hermetic ssh-client boundary; real-client transport behavior (exit-255 collapse, BatchMode/known_hosts, interactive attach) not covered",
+				repoSymbol("internal/runtime/ssh", "sshConformanceEndpoint"),
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		builtin(
 			"tmux", "exact:tmux", nil,
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/tmux", "NewSeamBackedWithConfig"),
-				"the existing full conformance run skips when the tmux executable is absent",
+				"internal/runtime/tmux/adapter_test.go",
+				"TestTmuxConformance",
+				repoSymbol("internal/runtime/tmux", "tmuxConformanceConfig"),
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		{
@@ -331,75 +349,25 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 	return claim
 }
 
-// runtimeWaiverExpiry dates every remaining runtime.Provider waiver owned by
-// runtimeContractWaiverOwner. This is the fourth value this expiry has ever
-// held, and the first this fork did not choose for itself.
+// waivedRuntime builds a claim that defers proof of the runtime.Provider
+// contract to a dated waiver. Each call site supplies its own expires
+// literal rather than a shared expiry: a single shared expiry previously
+// caused every remaining waiver to lapse in lockstep and turn the whole
+// ledger check red at once (GitHub #5195), which was "fixed" by pushing
+// the one shared date forward instead of dating each gap independently.
 //
-// The record, so the next renewal does not have to reconstruct it:
-//
-//	2026-07-13  granted, expiring 2026-08-12. It lapsed unrenewed: the whole
-//	            ledger check went red and the pre-push gate rejected every
-//	            push rig-wide, unrelated changes included, until it was
-//	            extended rather than re-decided.
-//	2026-08-11  renewed to 2026-08-26 (450c2b5f2), landing the subprocess
-//	            default-dir contract in the same commit: 9 waived -> 8.
-//	2026-08-25  renewed to 2026-09-25 (gascity-82e), re-pointing the owner off
-//	            the retired gastown-era id. 7 waived, 0 contracted here.
-//	2026-09-19  moved to 2026-10-02. This one. Not a fork decision: upstream
-//	            v1.4.2 renewed the same waiver set to that date to qualify the
-//	            Beads 1.3 compatibility fix, and this is the merge adopting it.
-//	            7 waived, 0 contracted here.
-//
-// One contract has landed since 2026-08-11: the acp default-directory
-// composition on 2026-08-18 (f84568925, gascity-0wp), taking 8 waived to 7.
-// Nothing has moved since. The migration is running at roughly one contracted
-// constructor per renewal against seven remaining gaps, so this renewal buys
-// time it has not yet earned.
-//
-// The owner changed at the 2026-08-25 renewal. Every grant before it named a
-// gastown-era id
-// that resolves in no rig registered in this city (the commit introducing this
-// renewal names the retired id), so the "put the question back in front of the
-// owner" step that the deliberately-short horizon exists to force had nobody to
-// put it in front of.
-//
-// The owner is now gascity-82e, a live bead carrying the gap inventory and the
-// migration history. Renewing a date against a dead id is what reproduced the
-// lapse on schedule; that is fixed here, not worked around.
-//
-// gascity-82e carries a standing obligation: if nothing has moved across two
-// consecutive renewals, fund the migration or retire the waived entries
-// deliberately rather than renew a third time. Read literally that trigger has
-// not fired — one constructor was contracted in each of the last two renewal
-// intervals — but this is nonetheless the third grant of the same waiver set,
-// and the decision it guards is now due on the merits. It has been
-// escalated to Hunter; the resolution belongs on gascity-82e. That this
-// deadline can redden an unrelated push at all is gascity-8v7.
-//
-// The 2026-10-02 date is upstream's, taken so this fork's ledger does not
-// re-conflict on every 1.4.x merge. Adopting a date is not re-deciding the
-// waiver: seven gaps remain, none contracted since 2026-08-18, and the
-// obligation above is due on the merits regardless of which branch set the
-// expiry.
-//
-// Each gap was re-checked against cmd/gc/runtime_registry.go at renewal: all
-// seven constructors are still live registrations, and none has gained a
-// runnable full contract, so none was retired as stale.
-//
-// Two weeks from upstream's 2026-09-18 grant, and not the 90-day
-// maxWaiverHorizon the validator permits. A long horizon hides a stalled track
-// behind a green run; a short one puts the question back in front of an owner
-// who now actually exists.
-var runtimeWaiverExpiry = time.Date(2026, time.October, 2, 0, 0, 0, 0, time.UTC)
-
-func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
+// Prefer a short horizon (weeks, not the 90-day maxWaiverHorizon the
+// validator allows): a long horizon hides a stalled contract behind a
+// green run, while a short one puts the question back in front of the
+// owner while the context is still fresh.
+func waivedRuntime(constructor SymbolRef, expires time.Time, reason string) ContractClaim {
 	return ContractClaim{
 		Constructor: constructor,
 		Contract:    ContractRuntimeProvider,
 		Disposition: DispositionWaived,
 		Waiver: &Waiver{
 			Owner:   runtimeContractWaiverOwner,
-			Expires: runtimeWaiverExpiry,
+			Expires: expires,
 			Reason:  reason,
 		},
 	}
@@ -415,8 +383,15 @@ func notApplicableRuntime(constructor SymbolRef, reason string) ContractClaim {
 }
 
 // Validate checks ledger structure and waiver policy at the supplied time.
-func Validate(entries []Entry, now time.Time) error {
+//
+// Structural problems always fail, in every mode: they can only appear with a
+// code change, so they belong to whoever made it. A lapsed waiver is different
+// — the clock moves on its own, so it fails under mode, and the returned
+// warnings carry the lapses that are being tolerated for now. See
+// internal/testpolicy/waiverclock for why that split exists.
+func Validate(entries []Entry, now time.Time, mode waiverclock.Mode) (warnings []string, err error) {
 	var problems []string
+	var expiries []waiverclock.Expiry
 	seenIDs := make(map[string]bool)
 	seenCatalogKeys := make(map[string]string)
 	seenSourceRefs := make(map[string]string)
@@ -539,7 +514,9 @@ func Validate(entries []Entry, now time.Time) error {
 				problems = append(problems, claimPrefix+" is duplicated")
 			}
 			seenClaims[key] = true
-			problems = append(problems, validateClaim(claimPrefix, claim, now)...)
+			claimProblems, claimExpiries := validateClaim(claimPrefix, claim, now)
+			problems = append(problems, claimProblems...)
+			expiries = append(expiries, claimExpiries...)
 		}
 		for _, constructor := range entry.Constructors {
 			if !seenClaims[claimKey{constructor: constructor, contract: ContractRuntimeProvider}] {
@@ -548,7 +525,8 @@ func Validate(entries []Entry, now time.Time) error {
 		}
 	}
 
-	return joinProblems(problems)
+	report := waiverclock.Check(expiries, now, mode)
+	return report.Warnings, joinProblems(append(problems, report.Fatal...))
 }
 
 func hasRole(roles []Role, want Role) bool {
@@ -560,8 +538,11 @@ func hasRole(roles []Role, want Role) bool {
 	return false
 }
 
-func validateClaim(prefix string, claim ContractClaim, now time.Time) []string {
-	var problems []string
+// validateClaim reports the claim's structural problems and hands back any
+// dated waiver for the clock policy to classify. It deliberately does not
+// decide whether a waiver has lapsed: that verdict depends on the enforcement
+// mode, which only the caller knows.
+func validateClaim(prefix string, claim ContractClaim, now time.Time) (problems []string, expiries []waiverclock.Expiry) {
 	payloads := 0
 	if claim.Proof != nil {
 		payloads++
@@ -622,15 +603,22 @@ func validateClaim(prefix string, claim ContractClaim, now time.Time) []string {
 		if waiver.Expires.IsZero() {
 			problems = append(problems, prefix+" waiver expiry is required")
 		} else {
-			if !waiver.Expires.After(now) {
-				problems = append(problems, fmt.Sprintf("%s waiver owned by %s expired %s", prefix, waiver.Owner, waiver.Expires.Format("2006-01-02")))
-			}
+			// The horizon stays fatal in every mode. It reads the clock but is
+			// self-healing — time passing can only bring a distant date inside
+			// the horizon — so unlike a lapse it can never red a bystander.
 			if waiver.Expires.After(now.Add(maxWaiverHorizon)) {
 				problems = append(problems, fmt.Sprintf("%s waiver owned by %s exceeds the %s horizon", prefix, waiver.Owner, maxWaiverHorizon))
 			}
+			if strings.TrimSpace(waiver.Owner) != "" {
+				expiries = append(expiries, waiverclock.Expiry{
+					Label:   prefix,
+					Owner:   waiver.Owner,
+					Expires: waiver.Expires,
+				})
+			}
 		}
 	}
-	return problems
+	return problems, expiries
 }
 
 func validateSymbolRef(ref SymbolRef) error {
@@ -791,19 +779,38 @@ func markdownCell(value string) string {
 
 // CheckMarkdown checks the single generated TESTING.md ledger block.
 func CheckMarkdown(document string, entries []Entry) error {
-	if strings.Count(document, MarkdownStart) != 1 || strings.Count(document, MarkdownEnd) != 1 {
-		return errors.New("TESTING.md must contain exactly one checked runtime provider ledger marker pair")
+	start, end, err := markerBlockBounds(document)
+	if err != nil {
+		return err
 	}
-	start := strings.Index(document, MarkdownStart)
-	end := strings.Index(document[start:], MarkdownEnd)
-	if end < 0 {
-		return errors.New("TESTING.md checked runtime provider ledger markers are out of order")
-	}
-	end += start + len(MarkdownEnd)
 	if got, want := document[start:end], RenderMarkdown(entries); got != want {
 		return fmt.Errorf("TESTING.md checked runtime provider table does not match the provider ledger; replace the marker block with:\n%s", want)
 	}
 	return nil
+}
+
+// ReplaceMarkdownBlock swaps the marked ledger block for replacement, leaving
+// the rest of the document byte-identical.
+func ReplaceMarkdownBlock(document, replacement string) (string, error) {
+	start, end, err := markerBlockBounds(document)
+	if err != nil {
+		return "", err
+	}
+	return document[:start] + replacement + document[end:], nil
+}
+
+// markerBlockBounds locates the single marked ledger block, returning the
+// half-open byte range that covers it including both markers.
+func markerBlockBounds(document string) (start, end int, err error) {
+	if strings.Count(document, MarkdownStart) != 1 || strings.Count(document, MarkdownEnd) != 1 {
+		return 0, 0, errors.New("TESTING.md must contain exactly one checked runtime provider ledger marker pair")
+	}
+	start = strings.Index(document, MarkdownStart)
+	end = strings.Index(document[start:], MarkdownEnd)
+	if end < 0 {
+		return 0, 0, errors.New("TESTING.md checked runtime provider ledger markers are out of order")
+	}
+	return start, end + start + len(MarkdownEnd), nil
 }
 
 func joinProblems(problems []string) error {

@@ -308,6 +308,25 @@ func TestLocalParallelFansOutEveryShardedPackage(t *testing.T) {
 	}
 }
 
+// TestTestEnvForwardsGOTOOLCHAINWithGOROOT keeps the two halves of the
+// toolchain selection together through TEST_ENV's env -i. GOROOT_VAL is
+// resolved under the caller's GOTOOLCHAIN, so a TEST_ENV that forwards GOROOT
+// but drops GOTOOLCHAIN hands every sweep and shard leg the PATH go driver with
+// another toolchain's compiler, and every compile dies with "compile: version
+// ... does not match go tool version ..." (gascity-mg86). scripts/test-go-test-shard
+// carries the same pairing in its own allowlist.
+func TestTestEnvForwardsGOTOOLCHAINWithGOROOT(t *testing.T) {
+	def := regexp.MustCompile(`(?s)\nTEST_ENV = env -i \\\n(.*?)\$\(EXTRA_TEST_ENV\)`).FindStringSubmatch(readMakefile(t))
+	if len(def) != 2 {
+		t.Fatal("Makefile has no TEST_ENV = env -i ... $(EXTRA_TEST_ENV) definition")
+	}
+	for _, want := range []string{`GOROOT="$${GOROOT:-$(GOROOT_VAL)}"`, `GOTOOLCHAIN="$${GOTOOLCHAIN-}"`} {
+		if !strings.Contains(def[1], want) {
+			t.Errorf("TEST_ENV does not forward %s; GOROOT and GOTOOLCHAIN must travel together:\n%s", want, def[1])
+		}
+	}
+}
+
 // shellCaseBody returns the body of one `case` arm in a shell script, from the
 // `<mode>)` label to its `;;` terminator.
 func shellCaseBody(t *testing.T, script, mode string) string {
@@ -398,13 +417,4 @@ func shardedSweepPackages(t *testing.T, makefile string) []string {
 		t.Fatal("Makefile has no SHARDED_SWEEP_PKGS definition")
 	}
 	return strings.Fields(def[1])
-}
-
-func readMakefile(t *testing.T) string {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
-	if err != nil {
-		t.Fatalf("read Makefile: %v", err)
-	}
-	return string(data)
 }

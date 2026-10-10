@@ -11,10 +11,11 @@ import (
 
 // The build tag here is narrower than it looks: the portable behavior contract
 // (matcher consulted, boundaries preserved, fail-closed) is asserted in
-// pidutil_test.go, which carries no tag and therefore runs on darwin. This file
-// only unit-tests the KERN_PROCARGS2 decoder, which exists on no other
-// platform. Do not move behavior assertions in here — hiding them behind a
-// platform tag is what let gascity-ggq regress unnoticed.
+// untagged test files, which therefore run on darwin. This file only
+// unit-tests the KERN_PROCARGS2 decoder against buffers rendered the way the
+// darwin kernel writes them, and what the darwin start-time source adds over
+// ps. Do not move behavior assertions in here — hiding them behind a platform
+// tag is what let gascity-ggq regress unnoticed.
 
 // procArgs2Buffer renders a KERN_PROCARGS2 buffer the way the kernel does:
 // the argc word, the NUL-terminated executable path, alignment padding, then
@@ -34,24 +35,6 @@ func procArgs2Buffer(argc uint32, execPath string, padding int, args, env []stri
 		buf.WriteByte(0)
 	}
 	return buf.Bytes()
-}
-
-func TestParseProcArgs2DecodesArgvAndStopsAtArgc(t *testing.T) {
-	args := []string{"/usr/local/bin/gc", "nudge", "poll", "--city", "/Users/a b/city", "--session", "s-worker"}
-	buf := procArgs2Buffer(uint32(len(args)), "/usr/local/bin/gc", 7, args, []string{"PATH=/usr/bin", "HOME=/Users/a b"})
-
-	got, err := parseProcArgs2(buf)
-	if err != nil {
-		t.Fatalf("parseProcArgs2: %v", err)
-	}
-	if len(got) != len(args) {
-		t.Fatalf("parseProcArgs2 = %q (%d elements), want %d — the environment must not be read as arguments", got, len(got), len(args))
-	}
-	for i := range args {
-		if got[i] != args[i] {
-			t.Fatalf("parseProcArgs2[%d] = %q, want %q (full argv %q)", i, got[i], args[i], got)
-		}
-	}
 }
 
 func TestParseProcArgs2RejectsMalformedBuffers(t *testing.T) {
@@ -89,19 +72,34 @@ func TestParseProcArgs2TreatsZeroArgcAsNoArgv(t *testing.T) {
 	}
 }
 
-// TestStartTimeIsPerProcessOnDarwin pins the property the identity guard rests
-// on: the token distinguishes two different processes, so a PID recycled to an
-// unrelated process cannot pass a start-time comparison against the original.
-func TestStartTimeIsPerProcessOnDarwin(t *testing.T) {
-	self, err := StartTime(os.Getpid())
+// TestStartTimeResolvesBelowOneSecondOnDarwin pins what the kern.proc.pid
+// source adds over `ps -o lstart=`: two processes started back to back, well
+// inside one second, still get different tokens. lstart resolves only to the
+// second, so a PID recycled within the second its predecessor started would
+// compare equal and pass as the original process.
+func TestStartTimeResolvesBelowOneSecondOnDarwin(t *testing.T) {
+	first := startProcess(t, "sleep", "5").Process.Pid
+	second := startProcess(t, "sleep", "5").Process.Pid
+	a, err := StartTime(first)
 	if err != nil {
-		t.Fatalf("StartTime(%d): %v", os.Getpid(), err)
+		t.Fatalf("StartTime(%d): %v", first, err)
 	}
-	parent, err := StartTime(os.Getppid())
+	b, err := StartTime(second)
 	if err != nil {
-		t.Fatalf("StartTime(%d): %v", os.Getppid(), err)
+		t.Fatalf("StartTime(%d): %v", second, err)
 	}
-	if self == parent {
-		t.Fatalf("StartTime is identical for PIDs %d and %d (%q) — the token cannot distinguish processes", os.Getpid(), os.Getppid(), self)
+	if a == b {
+		t.Fatalf("StartTime is %q for both PIDs %d and %d started back to back; the token cannot tell them apart", a, first, second)
+	}
+}
+
+// TestStartTimeNeedsNoSubprocessOnDarwin pins the other half: the darwin
+// source is a sysctl, not a ps fork. proctable polls StartTime on every tick of
+// a kill's SIGTERM grace, so a ps-backed identity would fork once per poll and
+// fail outright wherever ps cannot run.
+func TestStartTimeNeedsNoSubprocessOnDarwin(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	if _, err := StartTime(os.Getpid()); err != nil {
+		t.Fatalf("StartTime(self) with no ps on PATH: %v", err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -16,11 +17,10 @@ import (
 // A formula wisp root's own description is the FORMULA's boilerplate
 // (internal/formula/compile.go rootDesc), never the target bead's text, so a
 // formula that plans purely from its rendered context never sees the bead's
-// instructions. Sling used to only WARN about that, and the warning fired
-// regardless of whether the formula could act on it — inert on the polecat
-// family, which reads the bead directly in its first step. Carrying the brief
-// removes the gap for the formulas that have a var for it, which in turn makes
-// the residual warning narrow enough to be actionable.
+// instructions. attachedBeadInstructionsDroppedHint only WARNS about that, and
+// only when no route carries the bead. For a formula that declares context_path
+// there is a route sling can take itself: carry the brief into it, which also
+// satisfies that hint's caller-supplied check.
 const (
 	// briefContextPathVar is the formula var holding a read-only context bundle
 	// ("Optional source context bundle path"). It is the only var the auto-carry
@@ -33,7 +33,7 @@ const (
 	// artifact-schema check gates the result). The auto-carry never binds it: a
 	// brief written to that path is either overwritten by the formula's own
 	// artifact or fails the schema gate first. It participates only in the
-	// caller-supplied check and in the residual hint.
+	// caller-supplied check.
 	briefRequirementsPathVar = "requirements_path"
 
 	// briefDirName is the city-runtime directory holding materialized briefs,
@@ -55,26 +55,43 @@ type beadBriefCarry struct {
 	Hint string
 }
 
+// carryBeadBrief applies resolveBeadBriefCarry to an --on/default-formula
+// attach: it returns opts with any carried vars appended, and the carry's
+// operator hint. The carry binds a formula var, so it has to run before
+// attachFormulaToBead builds the var map; appending to opts.Vars covers the
+// legacy and graph.v2 branches at once, since both derive their vars from that
+// slice (BuildSlingFormulaVars and prepareGraphV2FormulaInvocation).
+//
+// opts is a value copy but opts.Vars shares the caller's backing array, so the
+// carry appends to a clone rather than risking a stomp.
+func carryBeadBrief(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID, formulaName string) (SlingOpts, string) {
+	carry := resolveBeadBriefCarry(opts, deps, querier, beadID, formulaName)
+	if len(carry.Vars) > 0 {
+		opts.Vars = append(slices.Clone(opts.Vars), carry.Vars...)
+	}
+	return opts, carry.Hint
+}
+
 // resolveBeadBriefCarry decides whether a formula attach carries the target
 // bead's brief into the formula's rendered context, and whether the operator
-// still needs a diagnostic. It changes neither routing nor the materialized
-// wisp beyond binding one variable.
+// needs a diagnostic about a carry that could not be made. It changes neither
+// routing nor the materialized wisp beyond binding one variable. Whether the
+// operator should be told the description is not reachable at all stays with
+// attachedBeadInstructionsDroppedHint.
 //
 // The rule, in order:
 //
 //  1. The caller already supplied context_path or requirements_path — they own
 //     the context. Carry nothing, say nothing.
-//  2. The bead has no description. There is no brief to carry, and nothing to
-//     warn about.
-//  3. The resolved recipe declares context_path. Materialize the brief, bind it,
-//     and stay silent: the formula now has the brief by construction.
-//  4. The recipe declares requirements_path but not context_path. Nothing is
-//     safe to bind (see briefRequirementsPathVar), but naming that var is still
-//     actionable for the operator, so hint.
-//  5. The recipe declares neither var. The old note's advice was INERT here —
-//     passing the flag binds a variable no step reads — so stay silent. This is
-//     the mol-polecat-work / mol-scoped-work case whose false alarms cost
-//     operators re-slings across several rigs (gascity-zmli).
+//  2. The resolved recipe does not declare context_path. There is nothing to
+//     carry into: requirements_path names an artifact the formula WRITES (see
+//     briefRequirementsPathVar), and a formula that declares neither var reads
+//     its bead through gc.var.issue (gascity-zmli). Say nothing here.
+//  3. The bead cannot be read. Hint: the carry was due, so the formula may plan
+//     against a bare title.
+//  4. The bead has no description. There is no brief to carry.
+//  5. Materialize the brief and bind it. The formula now has the brief by
+//     construction; a materialize failure is reported as a hint.
 func resolveBeadBriefCarry(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID, formulaName string) beadBriefCarry {
 	if querier == nil || beadID == "" || formulaName == "" {
 		return beadBriefCarry{}
@@ -82,25 +99,20 @@ func resolveBeadBriefCarry(opts SlingOpts, deps SlingDeps, querier BeadQuerier, 
 	if callerSuppliedBriefVar(opts, deps) {
 		return beadBriefCarry{}
 	}
+	if !declaredBriefVars(formulaName, SlingFormulaSearchPaths(deps, opts.Target))[briefContextPathVar] {
+		return beadBriefCarry{}
+	}
 	bead, err := querier.Get(beadID)
 	if err != nil {
-		// Do NOT fall silent here. This path now DELIVERS the brief rather than
-		// merely warning that it was dropped, so an unreadable bead means the
-		// formula may plan against a bare title — the exact failure the old note
-		// existed to surface. The hint is only appended when the attach itself
-		// succeeded, so a genuinely missing bead still fails loudly on the
-		// attach instead of producing a spurious note here.
+		// Do NOT fall silent here. This path DELIVERS the brief, so an
+		// unreadable bead means the formula may plan against a bare title. The
+		// hint is only appended when the attach itself succeeded, so a genuinely
+		// missing bead still fails loudly on the attach instead of producing a
+		// spurious note here.
 		return beadBriefCarry{Hint: briefCarryFailedHint(beadID, err)}
 	}
 	brief := formatBeadBrief(bead)
 	if brief == "" {
-		return beadBriefCarry{}
-	}
-	declared := declaredBriefVars(formulaName, SlingFormulaSearchPaths(deps, opts.Target))
-	if !declared[briefContextPathVar] {
-		if declared[briefRequirementsPathVar] {
-			return beadBriefCarry{Hint: briefRequirementsOnlyHint(beadID, formulaName)}
-		}
 		return beadBriefCarry{}
 	}
 	dir, err := materializeBeadBrief(deps.CityPath, beadID, brief)
@@ -115,8 +127,7 @@ func resolveBeadBriefCarry(opts SlingOpts, deps SlingDeps, querier BeadQuerier, 
 // two keys it cares about — explicit --var, then agent formula_vars, then rig
 // formula_vars — so an agent or rig that configures context_path counts as
 // having supplied it, just as a --var does. Presence is the test, not
-// emptiness: `--var context_path=` is a deliberate opt-out and has always
-// suppressed the note.
+// emptiness: `--var context_path=` is a deliberate opt-out.
 func callerSuppliedBriefVar(opts SlingOpts, deps SlingDeps) bool {
 	vars := make(map[string]string, len(opts.Vars))
 	for _, v := range opts.Vars {
@@ -218,14 +229,6 @@ func materializeBeadBrief(cityPath, beadID, brief string) (string, error) {
 		return "", fmt.Errorf("publishing brief for %s: %w", beadID, err)
 	}
 	return dir, nil
-}
-
-// briefRequirementsOnlyHint is the residual note for a recipe that declares
-// requirements_path but not context_path: naming that var is actionable, but
-// sling will not bind the brief there itself.
-func briefRequirementsOnlyHint(beadID, formulaName string) string {
-	return fmt.Sprintf("note: bead %s's description is not carried into %s's rendered context — it declares no %s to carry it into. Pass --var %s=<doc> to supply the instructions yourself; sling will not write there, because the formula treats that path as an artifact it produces.",
-		beadID, formulaName, briefContextPathVar, briefRequirementsPathVar)
 }
 
 // briefCarryFailedHint reports a carry that could not be materialized. The

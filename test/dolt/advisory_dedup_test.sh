@@ -6,10 +6,6 @@
 # a changed condition set re-alerts, and a healthy server clears the state so the
 # next occurrence alerts again.
 #
-# Also proves the state file round-trips the id of the message bead the advisory
-# created (gascity-9xr4), which is what lets the emitter withdraw that bead once
-# the condition clears instead of leaving it open forever.
-#
 # Run: sh test/dolt/advisory_dedup_test.sh
 set -u
 HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
@@ -29,7 +25,6 @@ bad()  { echo "FAIL: $1"; fail=1; }
 command -v advisory_changed >/dev/null 2>&1 || { echo "FAIL: advisory_changed not defined"; exit 1; }
 command -v advisory_record  >/dev/null 2>&1 || { echo "FAIL: advisory_record not defined"; exit 1; }
 command -v advisory_clear   >/dev/null 2>&1 || { echo "FAIL: advisory_clear not defined"; exit 1; }
-command -v advisory_recorded_id >/dev/null 2>&1 || { echo "FAIL: advisory_recorded_id not defined"; exit 1; }
 
 # Reap work dirs left by a run of this script that was SIGKILLed or timed
 # out: SIGKILL cannot be trapped, so `trap ... EXIT` below never fires for
@@ -107,42 +102,67 @@ NESTED="$WORK/runtime/packs/dolt/doctor-advisory-state"
 advisory_record "orphan " "$NESTED"
 if [ -f "$NESTED" ]; then pass "record creates missing parent directories"; else bad "record did not create nested state path"; fi
 
-# The recorded signature round-trips exactly, and still reads as line 1 now that
-# the bead id occupies line 2.
-got=$(sed -n '1p' "$NESTED" 2>/dev/null || true)
+# The recorded signature round-trips exactly.
+got=$(cat "$NESTED" 2>/dev/null || true)
 if [ "$got" = "orphan " ]; then pass "recorded signature round-trips"; else bad "recorded signature mismatch: got '$got'"; fi
 
-# --- message bead id (gascity-9xr4) ---
+# --- advisory_archive_superseded: the mailbox half of the lifecycle ---
 
-# A record carrying a bead id round-trips it, and does not disturb the signature.
-IDSTATE="$WORK/doctor-advisory-state-id"
-advisory_record "latency " "$IDSTATE" "gc-wisp-abc1"
-got=$(advisory_recorded_id "$IDSTATE")
-if [ "$got" = "gc-wisp-abc1" ]; then pass "recorded bead id round-trips"; else bad "recorded bead id mismatch: got '$got'"; fi
-if advisory_changed "latency " "$IDSTATE"; then bad "bead id broke signature dedup"; else pass "bead id does not disturb signature dedup"; fi
+command -v advisory_archive_superseded >/dev/null 2>&1 || { echo "FAIL: advisory_archive_superseded not defined"; exit 1; }
 
-# A record with no bead id (an escalation hook that reports none) yields an
-# empty id, which callers treat as "nothing to withdraw" rather than an error.
-advisory_record "latency " "$IDSTATE"
-got=$(advisory_recorded_id "$IDSTATE")
-if [ -z "$got" ]; then pass "absent bead id reads empty"; else bad "absent bead id returned '$got'"; fi
+# Fake gc on PATH records each invocation; the helper must go through it.
+GC_CALL_LOG="$WORK/gc-calls.log"
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/gc" <<EOF
+#!/bin/sh
+printf 'gc %s\n' "\$*" >> "$GC_CALL_LOG"
+exit "\${FAKE_GC_EXIT:-0}"
+EOF
+chmod +x "$WORK/bin/gc"
+PATH="$WORK/bin:$PATH"
 
-# Backward compatibility: a state file written before bead ids were tracked is a
-# lone signature line. It must read as "no id" instead of failing, so an upgrade
-# in place degrades to the pre-fix behavior rather than erroring every tick.
-LEGACY="$WORK/doctor-advisory-state-legacy"
-printf '%s\n' "latency " > "$LEGACY"
-got=$(advisory_recorded_id "$LEGACY")
-if [ -z "$got" ]; then pass "legacy single-line state reads as no id"; else bad "legacy state returned '$got'"; fi
-if advisory_changed "latency " "$LEGACY"; then bad "legacy state lost its dedup signature"; else pass "legacy state keeps its dedup signature"; fi
+# Subject + recipient -> one bounded, recipient-scoped archive invocation.
+advisory_archive_superseded "Dolt health advisory" "human"
+got=$(cat "$GC_CALL_LOG" 2>/dev/null || true)
+want="gc mail archive --to human --subject-prefix Dolt health advisory --limit 100"
+if [ "$got" = "$want" ]; then pass "sweep invokes bounded recipient-scoped archive"; else bad "sweep invocation mismatch: got '$got'"; fi
 
-# No state file at all -> no id, no error.
-got=$(advisory_recorded_id "$WORK/does-not-exist")
-if [ -z "$got" ]; then pass "missing state file reads as no id"; else bad "missing state file returned '$got'"; fi
+# A caller-supplied limit propagates.
+: > "$GC_CALL_LOG"
+advisory_archive_superseded "Dolt health advisory" "human" 7
+got=$(cat "$GC_CALL_LOG" 2>/dev/null || true)
+case "$got" in
+  *"--limit 7") pass "sweep propagates a caller-supplied limit" ;;
+  *) bad "caller-supplied limit not propagated: got '$got'" ;;
+esac
 
-# Empty state path -> no id, no error (mirrors advisory_changed fail-open).
-got=$(advisory_recorded_id "")
-if [ -z "$got" ]; then pass "empty state path reads as no id"; else bad "empty state path returned '$got'"; fi
+# Missing subject or recipient -> no-op, no gc invocation.
+: > "$GC_CALL_LOG"
+advisory_archive_superseded "" "human"
+advisory_archive_superseded "Dolt health advisory" ""
+got=$(cat "$GC_CALL_LOG" 2>/dev/null || true)
+if [ -z "$got" ]; then pass "missing subject/recipient -> no gc invocation"; else bad "no-op case invoked gc: '$got'"; fi
+
+# A failing gc is swallowed (fail open): the doctor run must not break because
+# archiving did.
+if (export FAKE_GC_EXIT=1; advisory_archive_superseded "Dolt health advisory" "human"); then
+  pass "failing gc mail archive is swallowed"
+else
+  bad "failing gc mail archive leaked a non-zero exit"
+fi
+
+# The swallowed failure is still visible to the caller through
+# ADVISORY_SWEEP_FAILED, so the doctor can keep its state and sweep again on the
+# next tick instead of forgetting an advisory it never archived (gascity-9xr4).
+export FAKE_GC_EXIT=1
+advisory_archive_superseded "Dolt health advisory" "human"
+unset FAKE_GC_EXIT
+if [ "${ADVISORY_SWEEP_FAILED:-}" = 1 ]; then pass "failed sweep sets ADVISORY_SWEEP_FAILED"; else bad "failed sweep left ADVISORY_SWEEP_FAILED='${ADVISORY_SWEEP_FAILED:-}'"; fi
+advisory_archive_superseded "Dolt health advisory" "human"
+if [ -z "${ADVISORY_SWEEP_FAILED:-}" ]; then pass "successful sweep clears ADVISORY_SWEEP_FAILED"; else bad "successful sweep left ADVISORY_SWEEP_FAILED set"; fi
+ADVISORY_SWEEP_FAILED=1
+advisory_archive_superseded "Dolt health advisory" ""
+if [ -z "${ADVISORY_SWEEP_FAILED:-}" ]; then pass "no-op sweep clears ADVISORY_SWEEP_FAILED"; else bad "no-op sweep left ADVISORY_SWEEP_FAILED set"; fi
 
 echo "----"
 if [ "$fail" -eq 0 ]; then echo "ALL PASS"; else echo "FAILURES PRESENT"; fi

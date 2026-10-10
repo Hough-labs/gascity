@@ -116,6 +116,59 @@ func TestRigGitHooksCheck_StaleCopy_WarnsAdvisory(t *testing.T) {
 	if !strings.Contains(r.FixHint, "core.hooksPath") {
 		t.Errorf("FixHint = %q, want a core.hooksPath remedy", r.FixHint)
 	}
+	if !strings.Contains(r.FixHint, "make setup") {
+		t.Errorf("FixHint = %q, want it to name `make setup`, which claims core.hooksPath for .githooks", r.FixHint)
+	}
+	if strings.Contains(r.FixHint, "forwarder") {
+		t.Errorf("FixHint = %q, still advises forwarders; a forwarder over a beads hook runs bd twice now that .githooks chains beads itself", r.FixHint)
+	}
+}
+
+// A forwarder that kept beads' own hook block, in front of a tracked hook that
+// already chains to beads, runs bd twice for that hook. The tracked gate does
+// run, so this is not a shadowed hook, but it is still worth a warning: the
+// fix is the same `make setup`.
+func TestRigGitHooksCheck_ForwarderKeepingBeadsBlockOverChainingHook_WarnsAdvisory(t *testing.T) {
+	repo := initGitHooksTestRepo(t)
+	writeTrackedHook(t, repo, "pre-commit", "#!/bin/sh\nexit 0\n")
+	writeTrackedHook(t, repo, "pre-push", "#!/bin/sh\n"+
+		"\"$(git rev-parse --show-toplevel)/.githooks/lib/beads-chain.sh\" pre-push \"$@\"\n")
+	owned := pointHooksPathAtOwnedDir(t, repo)
+	writeExecutableForGitHooksTest(t, filepath.Join(owned, "pre-commit"), "#!/bin/sh\nexit 0\n")
+	writeExecutableForGitHooksTest(t, filepath.Join(owned, "pre-push"), forwarderKeepingBeadsBlock("pre-push"))
+
+	r := NewRigGitHooksCheck(config.Rig{Name: "testrig", Path: repo}).Run(&CheckContext{})
+
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d (%s), want StatusWarning for a forwarder that runs beads twice", r.Status, r.Message)
+	}
+	if r.Severity != SeverityAdvisory {
+		t.Fatalf("severity = %d, want SeverityAdvisory", r.Severity)
+	}
+	if !strings.Contains(r.Message, "1 of 2") || !strings.Contains(r.Message, "twice") {
+		t.Errorf("message = %q, want the double-run count", r.Message)
+	}
+	if len(r.Details) != 1 || !strings.Contains(r.Details[0], "pre-push") || !strings.Contains(r.Details[0], "twice") {
+		t.Errorf("Details = %v, want one line naming pre-push as running bd twice", r.Details)
+	}
+	if !strings.Contains(r.FixHint, "make setup") {
+		t.Errorf("FixHint = %q, want `make setup`", r.FixHint)
+	}
+}
+
+// The same forwarder in front of a tracked hook that does NOT call beads runs
+// beads exactly once, through the block it kept, so there is nothing to report.
+func TestRigGitHooksCheck_ForwarderKeepingBeadsBlockOverPlainHook_OK(t *testing.T) {
+	repo := initGitHooksTestRepo(t)
+	writeTrackedHook(t, repo, "pre-push", "#!/bin/sh\nexit 0\n")
+	owned := pointHooksPathAtOwnedDir(t, repo)
+	writeExecutableForGitHooksTest(t, filepath.Join(owned, "pre-push"), forwarderKeepingBeadsBlock("pre-push"))
+
+	r := NewRigGitHooksCheck(config.Rig{Name: "testrig", Path: repo}).Run(&CheckContext{})
+
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d (%s), want StatusOK when only the kept block calls beads", r.Status, r.Message)
+	}
 }
 
 func TestRigGitHooksCheck_HookNotInstalledInOwnedDir_Warns(t *testing.T) {
@@ -204,6 +257,19 @@ func pointHooksPathAtOwnedDir(t *testing.T, repo string) string {
 	}
 	runGitForRigRootBranchTest(t, repo, "config", "core.hooksPath", owned)
 	return owned
+}
+
+// forwarderKeepingBeadsBlock renders a forwarder in the shape still installed
+// over beads-owned hooks on hosts that predate .githooks owning core.hooksPath:
+// the forwarder body, then beads' own integration block, carried across verbatim.
+func forwarderKeepingBeadsBlock(name string) string {
+	return "#!/usr/bin/env bash\n" +
+		"# gascity-hook-forwarder: .githooks/" + name + "\n" +
+		"\"$(git rev-parse --show-toplevel)/.githooks/" + name + "\" \"$@\"\n" +
+		"\n" +
+		"# --- BEGIN BEADS INTEGRATION v1.2.2 ---\n" +
+		"if command -v bd >/dev/null 2>&1; then bd hooks run " + name + " \"$@\"; fi\n" +
+		"# --- END BEADS INTEGRATION v1.2.2 ---\n"
 }
 
 func writeTrackedHook(t *testing.T, repo, name, body string) {

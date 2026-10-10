@@ -16,13 +16,11 @@
 # re-alerts. The CRITICAL "server unreachable" escalation is intentionally NOT
 # routed through this dedup, so a true outage always alerts.
 #
-# The state file also carries the id of the message bead the advisory created,
-# so the emitter can withdraw that bead once the condition clears (gascity-9xr4:
-# human-addressed advisories had a 0% auto-close rate across the whole history
-# of the queue and were only ever swept by hand). Format is one value per line —
-# line 1 the signature, line 2 the bead id — which keeps a state file written
-# before the bead id existed readable: line 2 is simply absent and retraction
-# becomes a no-op.
+# advisory_archive_superseded is the mailbox half of the same lifecycle: the
+# signature dedup bounds how often an advisory is SENT, and the sweep bounds how
+# many *unread* advisory beads stay OPEN — at most one, the latest snapshot.
+# Read-but-open advisories are left alone (the sweep does not pass
+# --include-read).
 #
 # Sourced by mol-dog-doctor.sh; unit-tested by test/dolt/advisory_dedup_test.sh.
 
@@ -43,38 +41,47 @@ advisory_changed() {
   return 0
 }
 
-# advisory_record SIGNATURE STATE_FILE [MESSAGE_ID] — persist SIGNATURE as the
-# last-sent advisory, plus the message bead the send created so it can later be
-# withdrawn. Call only after a successful send, so a failed escalation does not
+# advisory_record SIGNATURE STATE_FILE — persist SIGNATURE as the last-sent
+# advisory. Call only after a successful send, so a failed escalation does not
 # suppress the retry on the next tick. Best-effort: a write failure is ignored
 # (fails open — the worst case is a duplicate alert, not a missed one).
 advisory_record() {
   _adv_sig="${1:-}"
   _adv_file="${2:-}"
-  _adv_id="${3:-}"
   [ -n "$_adv_file" ] || return 0
   _adv_dir=$(dirname "$_adv_file")
   [ -d "$_adv_dir" ] || mkdir -p "$_adv_dir" 2>/dev/null || true
-  ( umask 077; printf '%s\n%s\n' "$_adv_sig" "$_adv_id" > "$_adv_file" ) 2>/dev/null || true
+  ( umask 077; printf '%s\n' "$_adv_sig" > "$_adv_file" ) 2>/dev/null || true
 }
 
-# advisory_recorded_id STATE_FILE — print the message bead id recorded alongside
-# the last-sent signature, or nothing when none was recorded (no state file, or
-# a file written before the id was tracked). Read-only: never writes.
-advisory_recorded_id() {
-  _adv_file="${1:-}"
-  [ -n "$_adv_file" ] || return 0
-  [ -f "$_adv_file" ] || return 0
-  sed -n '2p' "$_adv_file" 2>/dev/null || true
-}
-
-# advisory_clear STATE_FILE — forget the last-sent signature (and its message
-# bead id) so the next warning re-alerts. Call when the server is healthy AND
-# the recorded advisory has been withdrawn: the state file's lifetime is the
-# advisory bead's lifetime, so clearing before a successful retraction would
-# strand that bead open forever — the exact defect this state exists to close.
-# Best-effort.
+# advisory_clear STATE_FILE — forget the last-sent signature so the next warning
+# re-alerts. Call when the server is healthy (no active warnings). Best-effort.
 advisory_clear() {
   [ -n "${1:-}" ] || return 0
   rm -f "$1" 2>/dev/null || true
+}
+
+# advisory_archive_superseded SUBJECT_PREFIX RECIPIENT [LIMIT] — archive open
+# unread advisories addressed to RECIPIENT whose subject starts with
+# SUBJECT_PREFIX, so the mailbox holds at most one standing advisory. The
+# caller invokes it just before sending a fresh advisory (the new send carries
+# the full current status block, so older snapshots — including any backlog
+# minted before the dedup existed — are stale the moment it lands; sweeping
+# first avoids archiving the message about to be sent) and again when the
+# server returns to healthy (the condition cleared, so no advisory should stay
+# open). Archiving retains the beads (closed, body kept), so history stays
+# queryable. Best-effort: a failed or absent `gc mail archive` is ignored
+# (fails open — the worst case is the pre-sweep behavior, a lingering advisory
+# bead, never a lost alert). The failure still sets ADVISORY_SWEEP_FAILED=1
+# (cleared on every call), so a caller about to forget the advisory can keep
+# its state and sweep again on the next tick instead (gascity-9xr4).
+advisory_archive_superseded() {
+  ADVISORY_SWEEP_FAILED=""
+  _adv_subj="${1:-}"
+  _adv_rcpt="${2:-}"
+  _adv_limit="${3:-100}"
+  [ -n "$_adv_subj" ] || return 0
+  [ -n "$_adv_rcpt" ] || return 0
+  gc mail archive --to "$_adv_rcpt" --subject-prefix "$_adv_subj" \
+    --limit "$_adv_limit" >/dev/null 2>&1 || ADVISORY_SWEEP_FAILED=1
 }

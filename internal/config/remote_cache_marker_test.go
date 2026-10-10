@@ -55,7 +55,7 @@ const testMarkerSource = "git@github.com:example/pack"
 func TestRemoteCacheMarker_SkipsGitInALaterProcess(t *testing.T) {
 	cacheRoot, cacheDir, gitCalls := newValidatedRemoteCache(t)
 
-	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit, false); err != nil {
 		t.Fatalf("first validate: %v", err)
 	}
 	first := *gitCalls
@@ -64,7 +64,7 @@ func TestRemoteCacheMarker_SkipsGitInALaterProcess(t *testing.T) {
 	}
 
 	ResetRemoteCacheValidationCache()
-	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit, false); err != nil {
 		t.Fatalf("validate in a fresh process: %v", err)
 	}
 	if *gitCalls != first {
@@ -79,14 +79,14 @@ func TestRemoteCacheMarker_SkipsGitInALaterProcess(t *testing.T) {
 func TestRemoteCacheMarker_RejectsWorktreeEdit(t *testing.T) {
 	cacheRoot, cacheDir, gitCalls := newValidatedRemoteCache(t)
 
-	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit, false); err != nil {
 		t.Fatalf("first validate: %v", err)
 	}
 	first := *gitCalls
 
 	writeTestFile(t, cacheDir, filepath.Join("agents", "builder.md"), "builder edited in place\n")
 	ResetRemoteCacheValidationCache()
-	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit, false); err != nil {
 		t.Fatalf("validate after edit: %v", err)
 	}
 	if *gitCalls == first {
@@ -99,14 +99,14 @@ func TestRemoteCacheMarker_RejectsWorktreeEdit(t *testing.T) {
 func TestRemoteCacheMarker_RejectsNewUntrackedFile(t *testing.T) {
 	cacheRoot, cacheDir, gitCalls := newValidatedRemoteCache(t)
 
-	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit, false); err != nil {
 		t.Fatalf("first validate: %v", err)
 	}
 	first := *gitCalls
 
 	writeTestFile(t, cacheDir, filepath.Join("agents", "stowaway.md"), "not from the pack\n")
 	ResetRemoteCacheValidationCache()
-	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit, false); err != nil {
 		t.Fatalf("validate after new file: %v", err)
 	}
 	if *gitCalls == first {
@@ -119,14 +119,14 @@ func TestRemoteCacheMarker_RejectsNewUntrackedFile(t *testing.T) {
 func TestRemoteCacheMarker_RejectsMovedHead(t *testing.T) {
 	cacheRoot, cacheDir, gitCalls := newValidatedRemoteCache(t)
 
-	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit, false); err != nil {
 		t.Fatalf("first validate: %v", err)
 	}
 	first := *gitCalls
 
 	writeTestFile(t, cacheDir, filepath.Join(".git", "HEAD"), testMarkerOtherCommit+"\n")
 	ResetRemoteCacheValidationCache()
-	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit, false); err != nil {
 		t.Fatalf("validate after HEAD move: %v", err)
 	}
 	if *gitCalls == first {
@@ -140,14 +140,14 @@ func TestRemoteCacheMarker_RejectsMovedHead(t *testing.T) {
 func TestRemoteCacheMarker_RejectsSymbolicHead(t *testing.T) {
 	cacheRoot, cacheDir, gitCalls := newValidatedRemoteCache(t)
 
-	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit, false); err != nil {
 		t.Fatalf("first validate: %v", err)
 	}
 	first := *gitCalls
 
 	writeTestFile(t, cacheDir, filepath.Join(".git", "HEAD"), "ref: refs/heads/main\n")
 	ResetRemoteCacheValidationCache()
-	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit, false); err != nil {
 		t.Fatalf("validate with symbolic HEAD: %v", err)
 	}
 	if *gitCalls == first {
@@ -160,7 +160,7 @@ func TestRemoteCacheMarker_RejectsSymbolicHead(t *testing.T) {
 func TestRemoteCacheMarker_RejectsOtherCommit(t *testing.T) {
 	cacheRoot, cacheDir, gitCalls := newValidatedRemoteCache(t)
 
-	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit, false); err != nil {
 		t.Fatalf("first validate: %v", err)
 	}
 	first := *gitCalls
@@ -168,7 +168,7 @@ func TestRemoteCacheMarker_RejectsOtherCommit(t *testing.T) {
 	ResetRemoteCacheValidationCache()
 	// HEAD still holds testMarkerCommit, so validating the OTHER commit must
 	// reach git — which the stub reports as a mismatch.
-	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerOtherCommit); err == nil {
+	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerOtherCommit, false); err == nil {
 		t.Fatal("validating a different commit against this checkout should fail")
 	}
 	if *gitCalls == first {
@@ -183,7 +183,7 @@ func TestRemoteCacheMarker_RejectsOtherCommit(t *testing.T) {
 func TestRemoteCacheMarker_SurvivesGitDirChurn(t *testing.T) {
 	cacheRoot, cacheDir, gitCalls := newValidatedRemoteCache(t)
 
-	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit, false); err != nil {
 		t.Fatalf("first validate: %v", err)
 	}
 	first := *gitCalls
@@ -193,7 +193,7 @@ func TestRemoteCacheMarker_SurvivesGitDirChurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	ResetRemoteCacheValidationCache()
-	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(testMarkerSource, cacheRoot, cacheDir, testMarkerCommit, false); err != nil {
 		t.Fatalf("validate after .git churn: %v", err)
 	}
 	if *gitCalls != first {
@@ -233,7 +233,7 @@ func TestRemoteCacheMarker_NotWrittenForBundledSources(t *testing.T) {
 	// The synthetic marker is absent, so the bundled branch falls through to
 	// the ordinary git contract; what matters is that neither outcome leaves a
 	// validation marker inside a synthetic cache directory.
-	_ = validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit)
+	_ = validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit, false)
 	if _, err := os.Stat(remoteCacheValidationMarkerPath(cacheDir)); !os.IsNotExist(err) {
 		t.Fatalf("bundled source wrote a validation marker (stat err = %v); want none", err)
 	}

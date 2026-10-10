@@ -12,7 +12,7 @@ export BEADS_DIR="$GC_CITY/.beads"
 MODE="${GC_GRAPH_MODE:-success}"
 REPORT_FILE="$GC_CITY/graph-workflow-steps.log"
 TRACE_FILE="$GC_CITY/graph-workflow-trace.log"
-ASSIGNEE="${GC_SESSION_NAME:-${GC_AGENT:-}}"
+ASSIGNEE="${BEADS_ACTOR:-${GC_SESSION_NAME:-${GC_AGENT:-}}}"
 HARNESS_STATE_DIR="$GC_CITY/.gc/test-harness"
 HOOK_TIMEOUT="${GC_GRAPH_HOOK_TIMEOUT:-35}"
 
@@ -165,10 +165,17 @@ set_formula_verdict() {
     local bead_id="$1"
     local ref="$2"
 
+    # GC_GRAPH_ITERATE_VERDICT_SUFFIXES lists refs that record "iterate"
+    # instead of "done", so a test can force a review loop into another
+    # iteration.
     case "$ref" in
         *.apply-fixes*)
-            bd update "$bead_id" --set-metadata "review.verdict=done" >/dev/null
-            trace "set-verdict bead=$bead_id key=review.verdict value=done"
+            local verdict="done"
+            if ref_matches_suffix_list "$ref" "${GC_GRAPH_ITERATE_VERDICT_SUFFIXES:-}"; then
+                verdict="iterate"
+            fi
+            bd update "$bead_id" --set-metadata "review.verdict=$verdict" >/dev/null
+            trace "set-verdict bead=$bead_id key=review.verdict value=$verdict"
             ;;
         *.apply-design-changes*)
             bd update "$bead_id" --set-metadata "design_review.verdict=done" >/dev/null

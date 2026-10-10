@@ -1,6 +1,8 @@
 version: "2"
 
 run:
+  modules-download-mode: readonly
+
   # golangci-lint otherwise serializes every run on this machine behind ONE
   # lock file: runCommand.preRunE calls acquireFileLock, which locks
   # filepath.Join(os.TempDir(), "golangci-lint.lock") -- a path derived from

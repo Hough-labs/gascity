@@ -20,13 +20,26 @@ const trackedHooksDirName = ".githooks"
 
 // hookForwarderMarker is the sentinel comment an installed forwarder carries.
 // A forwarder is not a copy of the tracked hook; it execs the tracked hook, so
-// the tracked gate still runs and cannot drift out of sync with it.
+// the tracked gate still runs and cannot drift out of sync with it. Forwarders
+// were how .githooks ran while another tool owned core.hooksPath; .githooks now
+// owns the path itself, but a forwarder left in place still runs the hook.
 const hookForwarderMarker = "gascity-hook-forwarder:"
+
+// beadsIntegrationMarker opens the hook block beads' installer writes into the
+// hooks it owns. A forwarder installed over a beads hook kept that block and
+// ran it after the tracked hook.
+const beadsIntegrationMarker = "# --- BEGIN BEADS INTEGRATION"
+
+// beadsChainMarkers identify a tracked hook that calls beads itself, directly
+// or through the repo's chain helper (.githooks/lib/beads-chain.sh).
+var beadsChainMarkers = []string{"beads-chain", "bd hooks run"}
 
 // RigGitHooksCheck warns when the git hooks a rig's repo actually runs are not
 // the hooks it tracks under .githooks/ — a stale copy, a missing install, or a
 // hooks directory another tool owns. Such a repo's documented commit and push
-// gates are silently inert: git commit and git push both still succeed.
+// gates are silently inert: git commit and git push both still succeed. It
+// also warns when a forwarder runs beads twice: once through the tracked hook,
+// which chains to beads, and again through the beads block the forwarder kept.
 // SeverityAdvisory; not WarmupEligible.
 type RigGitHooksCheck struct {
 	rig     config.Rig
@@ -76,24 +89,34 @@ func (c *RigGitHooksCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	var shadowed []string
+	var shadowed, doubled []string
 	for _, name := range tracked {
-		if detail := inertTrackedHook(filepath.Join(trackedDir, name), filepath.Join(hooksDir, name), name); detail != "" {
+		trackedPath, effectivePath := filepath.Join(trackedDir, name), filepath.Join(hooksDir, name)
+		if detail := inertTrackedHook(trackedPath, effectivePath, name); detail != "" {
 			shadowed = append(shadowed, detail)
+			continue
+		}
+		if detail := doubleChainedHook(trackedPath, effectivePath, name); detail != "" {
+			doubled = append(doubled, detail)
 		}
 	}
-	if len(shadowed) == 0 {
+	if len(shadowed) == 0 && len(doubled) == 0 {
 		r.Status = StatusOK
 		r.Message = fmt.Sprintf("rig %q: git runs the tracked %s hooks (%s)", c.rig.Name, trackedHooksDirName, strings.Join(tracked, ", "))
 		return r
 	}
 
 	r.Status = StatusWarning
-	r.Message = fmt.Sprintf("rig %q: %d of %d tracked %s hooks never run — git runs %s instead",
-		c.rig.Name, len(shadowed), len(tracked), trackedHooksDirName, hooksDir)
-	r.Details = shadowed
-	r.FixHint = fmt.Sprintf("git -C %q config core.hooksPath %s — or, when another tool owns %s, install forwarders there that exec %s/<hook>",
-		c.rig.Path, trackedHooksDirName, hooksDir, trackedHooksDirName)
+	if len(shadowed) > 0 {
+		r.Message = fmt.Sprintf("rig %q: %d of %d tracked %s hooks never run — git runs %s instead",
+			c.rig.Name, len(shadowed), len(tracked), trackedHooksDirName, hooksDir)
+	} else {
+		r.Message = fmt.Sprintf("rig %q: %d of %d tracked %s hooks run beads twice — the forwarders in %s still carry beads' own hook block",
+			c.rig.Name, len(doubled), len(tracked), trackedHooksDirName, hooksDir)
+	}
+	r.Details = append(append([]string{}, shadowed...), doubled...)
+	r.FixHint = fmt.Sprintf("run `make setup` in %q, which points core.hooksPath at %s and verifies the claim (or: git -C %q config core.hooksPath %s)",
+		c.rig.Path, trackedHooksDirName, c.rig.Path, trackedHooksDirName)
 	return r
 }
 
@@ -168,6 +191,34 @@ func inertTrackedHook(trackedPath, effectivePath, name string) string {
 		return ""
 	}
 	return fmt.Sprintf("%s: %s is a stale copy — it differs from %s, which is what git should run", name, effectivePath, trackedRef)
+}
+
+// doubleChainedHook reports why the hook git runs at effectivePath calls beads
+// twice, or "" when it does not. That happens when effectivePath is a forwarder
+// that kept beads' own integration block and the tracked hook it runs already
+// chains to beads: every `bd hooks run` for that hook then fires once from the
+// tracked hook and again from the block.
+func doubleChainedHook(trackedPath, effectivePath, name string) string {
+	trackedRef := trackedHooksDirName + "/" + name
+	effective, err := os.ReadFile(effectivePath) //nolint:gosec // path derived from git's own hooks dir
+	if err != nil || !isHookForwarder(effective, trackedRef) || !bytes.Contains(effective, []byte(beadsIntegrationMarker)) {
+		return ""
+	}
+	trackedBody, err := os.ReadFile(trackedPath) //nolint:gosec // path derived from the rig's tracked hooks dir
+	if err != nil || !chainsToBeads(trackedBody) {
+		return ""
+	}
+	return fmt.Sprintf("%s: %s runs %s, which already chains to beads, and then beads' own hook block, so bd runs this hook twice", name, effectivePath, trackedRef)
+}
+
+// chainsToBeads reports whether a tracked hook body calls beads itself.
+func chainsToBeads(body []byte) bool {
+	for _, marker := range beadsChainMarkers {
+		if bytes.Contains(body, []byte(marker)) {
+			return true
+		}
+	}
+	return false
 }
 
 // isHookForwarder reports whether body is a forwarder chaining to trackedRef.

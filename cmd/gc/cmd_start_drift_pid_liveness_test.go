@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"os"
 	"os/exec"
 	"syscall"
 	"testing"
@@ -13,8 +12,8 @@ import (
 // This is deliberately the only exec.Command site in the file: the resource
 // census (internal/testpolicy/resourcecensus) ratchets test subprocess
 // construction per call site, and every process these tests need is the same
-// shape — a real child whose PID the liveness probes can be pointed at. Four
-// inline constructions would have banked four calls against that ratchet to
+// shape — a real child whose PID the liveness probes can be pointed at. Three
+// inline constructions would have banked three calls against that ratchet to
 // buy nothing; routing them through one helper banks one. New tests in this
 // file should reuse it rather than add a call site.
 func startLivenessSubject(t *testing.T, name string, args ...string) *exec.Cmd {
@@ -26,29 +25,7 @@ func startLivenessSubject(t *testing.T, name string, args ...string) *exec.Cmd {
 	return cmd
 }
 
-// TestPidGoneReportsLiveProcessAsAlive pins the portability contract of
-// pidGone: a process that is demonstrably running must never be reported as
-// gone. The original implementation read /proc/<pid>/status and returned
-// os.IsNotExist(err) on a read failure, which on any host without a procfs
-// (Darwin) is unconditionally true — so every live PID was reported gone.
-func TestPidGoneReportsLiveProcessAsAlive(t *testing.T) {
-	if pidGone(os.Getpid()) {
-		t.Fatalf("pidGone(%d) = true for the running test process; want false", os.Getpid())
-	}
-
-	cmd := startLivenessSubject(t, "sleep", "30")
-	pid := cmd.Process.Pid
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
-
-	if pidGone(pid) {
-		t.Fatalf("pidGone(%d) = true for a live child process; want false", pid)
-	}
-}
-
-// TestPidGoneReportsReapedProcessAsGone is the other half of the contract: once
+// TestPidGoneReportsReapedProcessAsGone pins the gone half of the contract: once
 // the child has exited and been waited on, the PID is genuinely gone.
 func TestPidGoneReportsReapedProcessAsGone(t *testing.T) {
 	cmd := startLivenessSubject(t, "true")

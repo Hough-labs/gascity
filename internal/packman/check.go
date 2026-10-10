@@ -279,10 +279,10 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 		return "", false
 	}
 
-	if config.IsBundledSourceAtCanonicalPin(source, commit) {
+	if repository, known := builtinpacks.RepositoryForSource(source); known && config.IsBundledSourceAtCanonicalPin(source, commit) {
 		// Full comparison, not the readiness path's stat gate: reporting on the
 		// cache's integrity is this command's product (gascity-i7v).
-		if err := builtinpacks.ValidateSyntheticRepoFull(cachePath, commit); err != nil {
+		if err := builtinpacks.ValidateSyntheticRepoFull(cachePath, repository, commit); err != nil {
 			gitInfo, gitErr := os.Stat(filepath.Join(cachePath, ".git"))
 			if gitErr == nil && !gitutil.MissingCheckoutMarker(gitInfo, gitErr) {
 				if !s.validateCachedGitCheckout(name, source, commit, cachePath) {
