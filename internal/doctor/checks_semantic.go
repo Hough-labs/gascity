@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -193,157 +193,83 @@ func (c *EventLogSizeCheck) CanFix() bool { return false }
 // Fix is a no-op.
 func (c *EventLogSizeCheck) Fix(_ *CheckContext) error { return nil }
 
-// --- Worktree disk size check ---
+// --- Worktree volume free-space check ---
 
-// rigSize pairs a rig directory name with its measured byte footprint
-// under .gc/worktrees/<rig>/. Used as the sort key for ordered output.
-type rigSize struct {
-	name  string
-	bytes int64
-}
+// worktreeVolumeFreeFixHint is the remedy shared by the warning and error
+// results of WorktreeVolumeFreeCheck.
+const worktreeVolumeFreeFixHint = "reclaim merged task worktrees under .gc/worktrees/<rig>/ (`gc doctor --fix` prunes the safely-prunable nested ones), free space elsewhere on the volume, or tune [doctor].worktree_volume_warn_free / worktree_volume_error_free. Per-directory du totals overstate reclaimable space on APFS because clones are billed at full size, so quote df deltas."
 
-// WorktreeDiskSizeCheck warns when a per-rig footprint under
-// .gc/worktrees/<rig>/ exceeds the configured threshold. Build
-// artifacts, nested task worktrees, and accumulated state can grow
-// unboundedly here; without this check the disk fills silently.
-type WorktreeDiskSizeCheck struct {
+// WorktreeVolumeFreeCheck warns when the volume that holds .gc/worktrees/
+// runs low on free space. Build artifacts, nested task worktrees, and
+// accumulated state grow there unboundedly; without this check the disk
+// fills silently. It asks the filesystem for free space in one statfs call
+// instead of walking the worktrees, so it finishes in constant time however
+// many files the worktrees hold.
+type WorktreeVolumeFreeCheck struct {
 	cfg config.DoctorConfig
-	// measureDir is injectable so tests can avoid shelling out to du.
-	// Production uses duDirBytes from checks.go.
-	measureDir func(string) (int64, bool, error)
+	// freeBytes reads the free bytes of the volume holding a path. It is
+	// injectable so tests can fake the volume's free space; nil uses
+	// fsys.FreeBytes.
+	freeBytes func(string) (int64, error)
 }
 
-// NewWorktreeDiskSizeCheck creates a worktree disk-footprint check.
-// The cfg is read for thresholds and policy at Run time, so reload-time
-// changes propagate naturally.
-func NewWorktreeDiskSizeCheck(cfg config.DoctorConfig) *WorktreeDiskSizeCheck {
-	// Wrap duDirBytes so its dolt-flavored error messages
-	// ("measure dolt data dir: ...") get re-tagged as worktree
-	// measurement failures when surfaced through this check.
-	measure := func(path string) (int64, bool, error) {
-		n, ok, err := duDirBytes(path)
-		if err != nil {
-			return n, ok, fmt.Errorf("measure worktree dir %q: %w", path, err)
-		}
-		return n, ok, nil
-	}
-	return &WorktreeDiskSizeCheck{cfg: cfg, measureDir: measure}
+// NewWorktreeVolumeFreeCheck creates a worktree-volume free-space check
+// that reads free space with freeBytes (nil uses fsys.FreeBytes). Callers
+// that run doctor against a throwaway city pass a fake, since the real
+// volume's free space is host state. The cfg is read for thresholds at Run
+// time, so reload-time changes propagate naturally.
+func NewWorktreeVolumeFreeCheck(cfg config.DoctorConfig, freeBytes func(string) (int64, error)) *WorktreeVolumeFreeCheck {
+	return &WorktreeVolumeFreeCheck{cfg: cfg, freeBytes: freeBytes}
 }
 
 // Name returns the check identifier.
-func (c *WorktreeDiskSizeCheck) Name() string { return "worktree-disk-size" }
+func (c *WorktreeVolumeFreeCheck) Name() string { return "worktree-volume-free" }
 
-// Run measures each rig's worktree footprint and reports any rigs
-// exceeding the configured warn or error thresholds.
-func (c *WorktreeDiskSizeCheck) Run(ctx *CheckContext) *CheckResult {
+// Run reads the free space on the volume holding .gc/worktrees/, or the
+// city directory when no worktree has been created yet, and compares it
+// with the configured warn and error thresholds.
+func (c *WorktreeVolumeFreeCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
-	wtRoot := filepath.Join(ctx.CityPath, ".gc", "worktrees")
+	path := filepath.Join(ctx.CityPath, ".gc", "worktrees")
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		path = ctx.CityPath
+	}
 
-	rigEntries, err := os.ReadDir(wtRoot)
+	freeBytes := c.freeBytes
+	if freeBytes == nil {
+		freeBytes = fsys.FreeBytes
+	}
+	free, err := freeBytes(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fsys.ErrFreeBytesUnsupported) {
 			r.Status = StatusOK
-			r.Message = "no .gc/worktrees directory"
+			r.Message = "free-space check not supported on this platform"
 			return r
 		}
+		// "We can't tell" must not look like "we're fine".
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("could not read free space for %s: %v", path, err)
+		r.FixHint = fmt.Sprintf("check that %s exists and is readable", path)
+		return r
+	}
+
+	warn := c.cfg.WorktreeVolumeWarnFreeBytes()
+	errFree := c.cfg.WorktreeVolumeErrorFreeBytes()
+	switch {
+	case free < errFree:
 		r.Status = StatusError
-		r.Message = fmt.Sprintf("reading .gc/worktrees: %v", err)
-		return r
-	}
-
-	measure := c.measureDir
-	if measure == nil {
-		measure = duDirBytes
-	}
-
-	var sizes []rigSize
-	var measureErrs []string
-	for _, e := range rigEntries {
-		if !e.IsDir() {
-			continue
-		}
-		root := filepath.Join(wtRoot, e.Name())
-		bytes, exists, err := measure(root)
-		if err != nil {
-			measureErrs = append(measureErrs, fmt.Sprintf("%s: %v", e.Name(), err))
-			continue
-		}
-		if !exists {
-			continue
-		}
-		sizes = append(sizes, rigSize{name: e.Name(), bytes: bytes})
-	}
-
-	if len(sizes) == 0 {
-		if len(measureErrs) > 0 {
-			// "We can't tell" must not look like "we're fine". Matches
-			// DoltNomsSize's policy of escalating on measurement failure.
-			r.Status = StatusWarning
-			r.Message = "could not measure any rig worktree directory"
-			r.Details = measureErrs
-			r.FixHint = "check filesystem permissions on .gc/worktrees/<rig>/"
-		} else {
-			r.Status = StatusOK
-			r.Message = "no rig worktree directories"
-		}
-		return r
-	}
-
-	sort.Slice(sizes, func(i, j int) bool { return sizes[i].bytes > sizes[j].bytes })
-
-	warn := c.cfg.WorktreeRigWarnBytes()
-	errBytes := c.cfg.WorktreeRigErrorBytes()
-
-	var details []string
-	var overThreshold int
-	status := StatusOK
-	for _, s := range sizes {
-		switch {
-		case s.bytes >= errBytes:
-			details = append(details, fmt.Sprintf("rig %q: %s (exceeds %s error threshold)",
-				s.name, humanSize(s.bytes), humanSize(errBytes)))
-			overThreshold++
-			if status < StatusError {
-				status = StatusError
-			}
-		case s.bytes >= warn:
-			details = append(details, fmt.Sprintf("rig %q: %s (exceeds %s warn threshold)",
-				s.name, humanSize(s.bytes), humanSize(warn)))
-			overThreshold++
-			if status < StatusWarning {
-				status = StatusWarning
-			}
-		}
-	}
-	for _, e := range measureErrs {
-		details = append(details, "measure error: "+e)
-	}
-	if len(measureErrs) > 0 && status < StatusWarning {
-		status = StatusWarning
-	}
-
-	r.Status = status
-	switch status {
-	case StatusError:
-		r.Message = fmt.Sprintf("%d rig(s) over worktree size threshold (largest: %q at %s)",
-			overThreshold, sizes[0].name, humanSize(sizes[0].bytes))
-		r.Details = details
-		r.FixHint = "investigate .gc/worktrees/<rig>/ for build-artifact accumulation; consider routing builds out of worktrees, periodic clean steps, or running `gc doctor --fix` to remove safely-prunable nested worktrees"
-	case StatusWarning:
-		if overThreshold > 0 {
-			r.Message = fmt.Sprintf("%d rig(s) approaching worktree size limit (largest: %q at %s)",
-				overThreshold, sizes[0].name, humanSize(sizes[0].bytes))
-			r.FixHint = "see fix hint for nested-worktree-prune; tune [doctor].worktree_rig_warn_size if 10 GB is too tight for this install"
-		} else {
-			r.Message = fmt.Sprintf("could not measure %d rig worktree path(s) (largest measured: %q at %s)",
-				len(measureErrs), sizes[0].name, humanSize(sizes[0].bytes))
-			r.FixHint = "check filesystem permissions on .gc/worktrees/<rig>/"
-		}
-		r.Details = details
+		r.Message = fmt.Sprintf("%s free on the volume holding %s (below %s error threshold)",
+			humanSize(free), path, humanSize(errFree))
+		r.FixHint = worktreeVolumeFreeFixHint
+	case free < warn:
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("%s free on the volume holding %s (below %s warn threshold)",
+			humanSize(free), path, humanSize(warn))
+		r.FixHint = worktreeVolumeFreeFixHint
 	default:
-		// All under thresholds: report the worst rig as info.
-		r.Message = fmt.Sprintf("largest rig worktree: %q at %s (under %s warn)",
-			sizes[0].name, humanSize(sizes[0].bytes), humanSize(warn))
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("%s free on the volume holding %s (at or above %s warn threshold)",
+			humanSize(free), path, humanSize(warn))
 	}
 	return r
 }
@@ -351,10 +277,10 @@ func (c *WorktreeDiskSizeCheck) Run(ctx *CheckContext) *CheckResult {
 // CanFix returns false — pruning is the responsibility of
 // NestedWorktreePruneCheck, which has the safety logic. This check is
 // observation-only.
-func (c *WorktreeDiskSizeCheck) CanFix() bool { return false }
+func (c *WorktreeVolumeFreeCheck) CanFix() bool { return false }
 
 // Fix is a no-op; see CanFix.
-func (c *WorktreeDiskSizeCheck) Fix(_ *CheckContext) error { return nil }
+func (c *WorktreeVolumeFreeCheck) Fix(_ *CheckContext) error { return nil }
 
 // --- Nested-worktree prune check ---
 

@@ -2242,12 +2242,6 @@
       "ccn": 21
     },
     {
-      "package": "doctor",
-      "function": "(*WorktreeDiskSizeCheck).Run",
-      "file": "internal/doctor/checks_semantic.go",
-      "ccn": 21
-    },
-    {
       "package": "eventexport",
       "function": "ProjectEvent",
       "file": "pkg/eventexport/project.go",

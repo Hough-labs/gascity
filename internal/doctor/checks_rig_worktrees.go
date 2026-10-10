@@ -11,12 +11,12 @@ import (
 // RigWorktreesCheck reports the per-bead worktree population that
 // formulas create at <rig>/worktrees/<bead-id>/.
 //
-// This is a different population from the one WorktreeDiskSizeCheck,
-// NestedWorktreePruneCheck and WorktreeCheck inspect: those three are
-// scoped to $CITY/.gc/worktrees/ (agent home worktrees and anything
-// nested inside them). A rig whose worktrees/ directory holds tens of
-// gigabytes of per-bead trees was therefore invisible to every worktree
-// check doctor had, and the board came back green over it.
+// This is a different population from the one NestedWorktreePruneCheck
+// and WorktreeCheck inspect: those two are scoped to
+// $CITY/.gc/worktrees/ (agent home worktrees and anything nested inside
+// them). A rig whose worktrees/ directory holds tens of gigabytes of
+// per-bead trees was therefore invisible to every per-population
+// worktree check doctor had, and the board came back green over it.
 //
 // Observation only. No automatic reclamation covers this population
 // today: the bead-worktree reaper (cmd/gc/bead_worktree_reaper.go:179)
@@ -36,10 +36,8 @@ type RigWorktreesCheck struct {
 
 // NewRigWorktreesCheck creates the per-rig worktree population check.
 // The cfg is read for thresholds at Run time, so reload-time changes
-// propagate naturally, and the thresholds are deliberately the same
-// [doctor].worktree_rig_* pair the city-scoped size check uses: the
-// question ("is a worktree population eating this disk?") is the same
-// one, and a second knob would be a second thing to keep in sync.
+// propagate naturally. The thresholds are the [doctor].worktree_rig_*
+// pair.
 func NewRigWorktreesCheck(rig config.Rig, cfg config.DoctorConfig) *RigWorktreesCheck {
 	measure := func(path string) (int64, bool, error) {
 		n, ok, err := duDirBytes(path)
@@ -95,9 +93,9 @@ func (c *RigWorktreesCheck) Run(_ *CheckContext) *CheckResult {
 	// dozens, and this check runs on every doctor invocation.
 	bytes, exists, err := measure(root)
 	if err != nil {
-		// "We can't tell" must not look like "we're fine". Matches
-		// WorktreeDiskSizeCheck's policy of escalating on measurement
-		// failure — the count alone is still worth reporting.
+		// "We can't tell" must not look like "we're fine", so a
+		// measurement failure escalates — the count alone is still worth
+		// reporting.
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("%d per-bead worktree(s) under %s, size unmeasurable", count, root)
 		r.Details = []string{err.Error()}

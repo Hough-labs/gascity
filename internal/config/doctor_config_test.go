@@ -3,6 +3,10 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
+
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func TestParseDoctorSection(t *testing.T) {
@@ -11,6 +15,8 @@ func TestParseDoctorSection(t *testing.T) {
 name = "test-city"
 
 [doctor]
+worktree_volume_warn_free = "80GB"
+worktree_volume_error_free = "30GB"
 worktree_rig_warn_size = "5GB"
 worktree_rig_error_size = "30GB"
 nested_worktree_prune = true
@@ -21,6 +27,12 @@ name = "mayor"
 	cfg, err := Parse(data)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Doctor.WorktreeVolumeWarnFree != "80GB" {
+		t.Errorf("WorktreeVolumeWarnFree = %q, want %q", cfg.Doctor.WorktreeVolumeWarnFree, "80GB")
+	}
+	if cfg.Doctor.WorktreeVolumeErrorFree != "30GB" {
+		t.Errorf("WorktreeVolumeErrorFree = %q, want %q", cfg.Doctor.WorktreeVolumeErrorFree, "30GB")
 	}
 	if cfg.Doctor.WorktreeRigWarnSize != "5GB" {
 		t.Errorf("WorktreeRigWarnSize = %q, want %q", cfg.Doctor.WorktreeRigWarnSize, "5GB")
@@ -100,7 +112,8 @@ name = "mayor"
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if cfg.Doctor.WorktreeRigWarnSize != "" || cfg.Doctor.WorktreeRigErrorSize != "" {
+	if cfg.Doctor.WorktreeRigWarnSize != "" || cfg.Doctor.WorktreeRigErrorSize != "" ||
+		cfg.Doctor.WorktreeVolumeWarnFree != "" || cfg.Doctor.WorktreeVolumeErrorFree != "" {
 		t.Errorf("Doctor section should be zero-valued; got %+v", cfg.Doctor)
 	}
 	if cfg.Doctor.NestedWorktreePrune {
@@ -113,6 +126,12 @@ name = "mayor"
 	}
 	if got := cfg.Doctor.WorktreeRigErrorBytes(); got != defaultWorktreeRigErrorBytes {
 		t.Errorf("WorktreeRigErrorBytes() = %d, want %d", got, defaultWorktreeRigErrorBytes)
+	}
+	if got := cfg.Doctor.WorktreeVolumeWarnFreeBytes(); got != defaultWorktreeVolumeWarnFreeBytes {
+		t.Errorf("WorktreeVolumeWarnFreeBytes() = %d, want %d", got, defaultWorktreeVolumeWarnFreeBytes)
+	}
+	if got := cfg.Doctor.WorktreeVolumeErrorFreeBytes(); got != defaultWorktreeVolumeErrorFreeBytes {
+		t.Errorf("WorktreeVolumeErrorFreeBytes() = %d, want %d", got, defaultWorktreeVolumeErrorFreeBytes)
 	}
 }
 
@@ -181,6 +200,111 @@ func TestDoctorConfigByteAccessors(t *testing.T) {
 				t.Errorf("WorktreeRigErrorBytes() = %d, want %d", got, tt.wantError)
 			}
 		})
+	}
+}
+
+func TestDoctorConfigWorktreeVolumeFreeAccessors(t *testing.T) {
+	const gb = int64(1024 * 1024 * 1024)
+	tests := []struct {
+		name      string
+		cfg       DoctorConfig
+		wantWarn  int64
+		wantError int64
+	}{
+		{
+			name:      "empty falls back to defaults",
+			cfg:       DoctorConfig{},
+			wantWarn:  50 * gb,
+			wantError: 20 * gb,
+		},
+		{
+			name:      "explicit GB values",
+			cfg:       DoctorConfig{WorktreeVolumeWarnFree: "80GB", WorktreeVolumeErrorFree: "30GB"},
+			wantWarn:  80 * gb,
+			wantError: 30 * gb,
+		},
+		{
+			name:      "MB units",
+			cfg:       DoctorConfig{WorktreeVolumeWarnFree: "2048MB", WorktreeVolumeErrorFree: "512MB"},
+			wantWarn:  2048 * 1024 * 1024,
+			wantError: 512 * 1024 * 1024,
+		},
+		{
+			name:      "unparseable warn falls back to its default; error still parses",
+			cfg:       DoctorConfig{WorktreeVolumeWarnFree: "junk", WorktreeVolumeErrorFree: "10GB"},
+			wantWarn:  50 * gb,
+			wantError: 10 * gb,
+		},
+		{
+			name:      "zero and negative are treated as unset",
+			cfg:       DoctorConfig{WorktreeVolumeWarnFree: "0GB", WorktreeVolumeErrorFree: "-5GB"},
+			wantWarn:  50 * gb,
+			wantError: 20 * gb,
+		},
+		{
+			name:      "error above warn falls back to both defaults",
+			cfg:       DoctorConfig{WorktreeVolumeWarnFree: "10GB", WorktreeVolumeErrorFree: "40GB"},
+			wantWarn:  50 * gb,
+			wantError: 20 * gb,
+		},
+		{
+			name:      "error equal to warn falls back to both defaults",
+			cfg:       DoctorConfig{WorktreeVolumeWarnFree: "30GB", WorktreeVolumeErrorFree: "30GB"},
+			wantWarn:  50 * gb,
+			wantError: 20 * gb,
+		},
+		{
+			name:      "warn alone below the default error falls back to both defaults",
+			cfg:       DoctorConfig{WorktreeVolumeWarnFree: "15GB"},
+			wantWarn:  50 * gb,
+			wantError: 20 * gb,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.WorktreeVolumeWarnFreeBytes(); got != tt.wantWarn {
+				t.Errorf("WorktreeVolumeWarnFreeBytes() = %d, want %d", got, tt.wantWarn)
+			}
+			if got := tt.cfg.WorktreeVolumeErrorFreeBytes(); got != tt.wantError {
+				t.Errorf("WorktreeVolumeErrorFreeBytes() = %d, want %d", got, tt.wantError)
+			}
+		})
+	}
+}
+
+// TestWorktreeRigSizeKeysStillLoad guards worktree_rig_warn_size and
+// worktree_rig_error_size: unknown keys are fatal, so a city.toml that sets
+// them must keep loading cleanly. Deleting the struct fields turns both
+// assertions red.
+func TestWorktreeRigSizeKeysStillLoad(t *testing.T) {
+	data := `
+[workspace]
+name = "test-city"
+
+[doctor]
+worktree_rig_warn_size = "5GB"
+worktree_rig_error_size = "30GB"
+`
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(data)
+	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	for _, w := range prov.Warnings {
+		if strings.Contains(w, "worktree_rig_") {
+			t.Errorf("worktree_rig_* key produced a load warning: %q", w)
+		}
+	}
+
+	var cfg City
+	md, err := toml.Decode(data, &cfg)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if fatal := fatalUndecodedWarnings(md, "city.toml"); len(fatal) != 0 {
+		t.Errorf("worktree_rig_* keys must not be fatal unknown fields: %v", fatal)
 	}
 }
 

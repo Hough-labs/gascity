@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -381,241 +382,177 @@ func TestHumanSize(t *testing.T) {
 	}
 }
 
-// --- WorktreeDiskSizeCheck ---
+// --- WorktreeVolumeFreeCheck ---
 
-// fakeMeasure returns a deterministic byte count per directory path so
-// tests don't shell out to du. Returns sizes[path] when present; treats
-// missing keys as not-existent (mirrors duDirBytes signature).
-func fakeMeasure(sizes map[string]int64, errs map[string]error) func(string) (int64, bool, error) {
-	return func(path string) (int64, bool, error) {
-		if e, ok := errs[path]; ok {
-			return 0, true, e
+const gib = int64(1024 * 1024 * 1024)
+
+// fakeFreeBytes returns a freeBytes func that reports free (or fails
+// with err) and records the path it was asked about.
+func fakeFreeBytes(free int64, err error, gotPath *string) func(string) (int64, error) {
+	return func(path string) (int64, error) {
+		*gotPath = path
+		if err != nil {
+			return -1, err
 		}
-		n, ok := sizes[path]
-		if !ok {
-			return 0, false, nil
-		}
-		return n, true, nil
+		return free, nil
 	}
 }
 
-func TestWorktreeDiskSizeCheck_NoWorktreesDir(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+// newWorktreeVolumeCity returns a city dir that holds .gc/worktrees/.
+func newWorktreeVolumeCity(t *testing.T) (cityDir, worktrees string) {
+	t.Helper()
+	cityDir = t.TempDir()
+	worktrees = filepath.Join(cityDir, ".gc", "worktrees")
+	if err := os.MkdirAll(worktrees, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	c := NewWorktreeDiskSizeCheck(config.DoctorConfig{})
-	r := c.Run(&CheckContext{CityPath: dir})
+	return cityDir, worktrees
+}
+
+func TestWorktreeVolumeFreeCheck_Name(t *testing.T) {
+	if got := NewWorktreeVolumeFreeCheck(config.DoctorConfig{}, nil).Name(); got != "worktree-volume-free" {
+		t.Errorf("Name() = %q, want %q", got, "worktree-volume-free")
+	}
+}
+
+func TestWorktreeVolumeFreeCheck_DefaultThresholds(t *testing.T) {
+	tests := []struct {
+		name       string
+		free       int64
+		wantStatus CheckStatus
+		wantInMsg  string
+		wantHint   bool
+	}{
+		{"plenty free is OK", 100 * gib, StatusOK, "at or above 50.0 GB warn threshold", false},
+		{"below warn is Warning", 30 * gib, StatusWarning, "below 50.0 GB warn threshold", true},
+		{"below error is Error", 10 * gib, StatusError, "below 20.0 GB error threshold", true},
+		{"exactly warn is OK", 50 * gib, StatusOK, "at or above 50.0 GB warn threshold", false},
+		{"exactly error is Warning", 20 * gib, StatusWarning, "below 50.0 GB warn threshold", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir, worktrees := newWorktreeVolumeCity(t)
+			var gotPath string
+			c := &WorktreeVolumeFreeCheck{
+				cfg:       config.DoctorConfig{},
+				freeBytes: fakeFreeBytes(tt.free, nil, &gotPath),
+			}
+			r := c.Run(&CheckContext{CityPath: cityDir})
+			if r.Status != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; msg=%s", r.Status, tt.wantStatus, r.Message)
+			}
+			if !strings.Contains(r.Message, tt.wantInMsg) {
+				t.Errorf("message %q should contain %q", r.Message, tt.wantInMsg)
+			}
+			if !strings.Contains(r.Message, humanSize(tt.free)) {
+				t.Errorf("message %q should report the free bytes %s", r.Message, humanSize(tt.free))
+			}
+			if !strings.Contains(r.Message, worktrees) {
+				t.Errorf("message %q should name the measured path %q", r.Message, worktrees)
+			}
+			if gotPath != worktrees {
+				t.Errorf("measured path = %q, want %q", gotPath, worktrees)
+			}
+			if tt.wantHint && !strings.Contains(r.FixHint, "df") {
+				t.Errorf("FixHint should tell the operator to quote df deltas; got %q", r.FixHint)
+			}
+			if !tt.wantHint && r.FixHint != "" {
+				t.Errorf("FixHint = %q, want empty for an OK result", r.FixHint)
+			}
+		})
+	}
+}
+
+func TestWorktreeVolumeFreeCheck_MeasuresCityWhenNoWorktreesDir(t *testing.T) {
+	cityDir := t.TempDir()
+	var gotPath string
+	c := &WorktreeVolumeFreeCheck{freeBytes: fakeFreeBytes(100*gib, nil, &gotPath)}
+	r := c.Run(&CheckContext{CityPath: cityDir})
+	if gotPath != cityDir {
+		t.Errorf("measured path = %q, want the city path %q", gotPath, cityDir)
+	}
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK; msg=%s", r.Status, r.Message)
 	}
+	if !strings.Contains(r.Message, cityDir) {
+		t.Errorf("message %q should name the measured path %q", r.Message, cityDir)
+	}
 }
 
-func TestWorktreeDiskSizeCheck_AllUnderThreshold(t *testing.T) {
-	dir := t.TempDir()
-	rigA := filepath.Join(dir, ".gc", "worktrees", "rig-a")
-	rigB := filepath.Join(dir, ".gc", "worktrees", "rig-b")
-	if err := os.MkdirAll(rigA, 0o755); err != nil {
-		t.Fatal(err)
+func TestWorktreeVolumeFreeCheck_ReadErrorIsWarning(t *testing.T) {
+	// "We can't tell" must not look like "we're fine".
+	cityDir, worktrees := newWorktreeVolumeCity(t)
+	var gotPath string
+	c := &WorktreeVolumeFreeCheck{
+		freeBytes: fakeFreeBytes(0, errors.New("permission denied"), &gotPath),
 	}
-	if err := os.MkdirAll(rigB, 0o755); err != nil {
-		t.Fatal(err)
+	r := c.Run(&CheckContext{CityPath: cityDir})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg=%s", r.Status, r.Message)
 	}
+	want := "could not read free space for " + worktrees
+	if !strings.Contains(r.Message, want) {
+		t.Errorf("message %q should contain %q", r.Message, want)
+	}
+	if !strings.Contains(r.Message, "permission denied") {
+		t.Errorf("message %q should carry the underlying error", r.Message)
+	}
+	if r.FixHint == "" {
+		t.Error("expected a fix hint for an unreadable volume")
+	}
+}
 
-	c := &WorktreeDiskSizeCheck{
-		cfg: config.DoctorConfig{WorktreeRigWarnSize: "10GB", WorktreeRigErrorSize: "50GB"},
-		measureDir: fakeMeasure(map[string]int64{
-			rigA: 1 * 1024 * 1024 * 1024, // 1 GB
-			rigB: 500 * 1024 * 1024,      // 500 MB
-		}, nil),
+func TestWorktreeVolumeFreeCheck_UnsupportedPlatformIsOK(t *testing.T) {
+	cityDir, _ := newWorktreeVolumeCity(t)
+	var gotPath string
+	c := &WorktreeVolumeFreeCheck{
+		freeBytes: fakeFreeBytes(0, fsys.ErrFreeBytesUnsupported, &gotPath),
 	}
-	r := c.Run(&CheckContext{CityPath: dir})
+	r := c.Run(&CheckContext{CityPath: cityDir})
 	if r.Status != StatusOK {
-		t.Errorf("status = %d, want OK; msg=%s details=%v", r.Status, r.Message, r.Details)
+		t.Fatalf("status = %d, want OK; msg=%s", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "rig-a") {
-		t.Errorf("message should name largest rig (rig-a); got %q", r.Message)
-	}
-}
-
-func TestWorktreeDiskSizeCheck_UnderThresholdWithMeasurementErrorReturnsWarning(t *testing.T) {
-	dir := t.TempDir()
-	rigOK := filepath.Join(dir, ".gc", "worktrees", "ok")
-	rigBroken := filepath.Join(dir, ".gc", "worktrees", "broken")
-	for _, p := range []string{rigOK, rigBroken} {
-		if err := os.MkdirAll(p, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	c := &WorktreeDiskSizeCheck{
-		cfg: config.DoctorConfig{WorktreeRigWarnSize: "10GB", WorktreeRigErrorSize: "50GB"},
-		measureDir: fakeMeasure(map[string]int64{
-			rigOK: 1 * 1024 * 1024 * 1024,
-		}, map[string]error{
-			rigBroken: errors.New("permission denied"),
-		}),
-	}
-	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusWarning {
-		t.Fatalf("status = %d, want Warning; msg=%s details=%v", r.Status, r.Message, r.Details)
-	}
-	if !strings.Contains(strings.Join(r.Details, "\n"), "measure error: broken: permission denied") {
-		t.Errorf("details should surface measurement error; got %v", r.Details)
+	if r.Message != "free-space check not supported on this platform" {
+		t.Errorf("message = %q", r.Message)
 	}
 }
 
-func TestWorktreeDiskSizeCheck_OverWarnThreshold(t *testing.T) {
-	dir := t.TempDir()
-	rigA := filepath.Join(dir, ".gc", "worktrees", "rig-a")
-	rigB := filepath.Join(dir, ".gc", "worktrees", "rig-b")
-	if err := os.MkdirAll(rigA, 0o755); err != nil {
-		t.Fatal(err)
+func TestWorktreeVolumeFreeCheck_HonorsCustomThresholds(t *testing.T) {
+	cfg := config.DoctorConfig{WorktreeVolumeWarnFree: "200GB", WorktreeVolumeErrorFree: "120GB"}
+	tests := []struct {
+		name       string
+		free       int64
+		wantStatus CheckStatus
+		wantInMsg  string
+	}{
+		{"above custom warn", 250 * gib, StatusOK, "at or above 200.0 GB warn threshold"},
+		{"below custom warn", 150 * gib, StatusWarning, "below 200.0 GB warn threshold"},
+		{"below custom error", 100 * gib, StatusError, "below 120.0 GB error threshold"},
 	}
-	if err := os.MkdirAll(rigB, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	c := &WorktreeDiskSizeCheck{
-		cfg: config.DoctorConfig{WorktreeRigWarnSize: "5GB", WorktreeRigErrorSize: "50GB"},
-		measureDir: fakeMeasure(map[string]int64{
-			rigA: 8 * 1024 * 1024 * 1024, // 8 GB — over warn
-			rigB: 1 * 1024 * 1024 * 1024, // 1 GB — under
-		}, nil),
-	}
-	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusWarning {
-		t.Fatalf("status = %d, want Warning; msg=%s details=%v", r.Status, r.Message, r.Details)
-	}
-	if len(r.Details) != 1 {
-		t.Errorf("len(Details) = %d, want 1; details=%v", len(r.Details), r.Details)
-	}
-	if !strings.Contains(r.Details[0], "rig-a") {
-		t.Errorf("details should flag rig-a; got %q", r.Details[0])
-	}
-	if strings.Contains(strings.Join(r.Details, "\n"), "rig-b") {
-		t.Errorf("details should not flag rig-b (under threshold); got %v", r.Details)
-	}
-	if r.FixHint == "" {
-		t.Error("expected fix hint")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir, _ := newWorktreeVolumeCity(t)
+			var gotPath string
+			c := &WorktreeVolumeFreeCheck{cfg: cfg, freeBytes: fakeFreeBytes(tt.free, nil, &gotPath)}
+			r := c.Run(&CheckContext{CityPath: cityDir})
+			if r.Status != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; msg=%s", r.Status, tt.wantStatus, r.Message)
+			}
+			if !strings.Contains(r.Message, tt.wantInMsg) {
+				t.Errorf("message %q should contain %q", r.Message, tt.wantInMsg)
+			}
+		})
 	}
 }
 
-func TestWorktreeDiskSizeCheck_OverErrorThreshold(t *testing.T) {
-	dir := t.TempDir()
-	rig := filepath.Join(dir, ".gc", "worktrees", "huge")
-	if err := os.MkdirAll(rig, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	c := &WorktreeDiskSizeCheck{
-		cfg: config.DoctorConfig{WorktreeRigWarnSize: "5GB", WorktreeRigErrorSize: "20GB"},
-		measureDir: fakeMeasure(map[string]int64{
-			rig: 100 * 1024 * 1024 * 1024, // 100 GB
-		}, nil),
-	}
-	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusError {
-		t.Fatalf("status = %d, want Error", r.Status)
-	}
-	if !strings.Contains(r.Details[0], "error threshold") {
-		t.Errorf("details should mention error threshold; got %q", r.Details[0])
-	}
-}
-
-func TestWorktreeDiskSizeCheck_DetailsSortedDescending(t *testing.T) {
-	dir := t.TempDir()
-	for _, name := range []string{"small", "huge", "medium"} {
-		if err := os.MkdirAll(filepath.Join(dir, ".gc", "worktrees", name), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	c := &WorktreeDiskSizeCheck{
-		cfg: config.DoctorConfig{WorktreeRigWarnSize: "1GB", WorktreeRigErrorSize: "100GB"},
-		measureDir: fakeMeasure(map[string]int64{
-			filepath.Join(dir, ".gc", "worktrees", "small"):  500 * 1024 * 1024,
-			filepath.Join(dir, ".gc", "worktrees", "medium"): 5 * 1024 * 1024 * 1024,
-			filepath.Join(dir, ".gc", "worktrees", "huge"):   30 * 1024 * 1024 * 1024,
-		}, nil),
-	}
-	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusWarning {
-		t.Fatalf("status = %d, want Warning; details=%v", r.Status, r.Details)
-	}
-	// The largest should appear first in details. The "small" rig is
-	// under threshold and should not appear at all.
-	if !strings.HasPrefix(r.Details[0], `rig "huge"`) {
-		t.Errorf("details[0] should start with huge rig; got %q", r.Details[0])
-	}
-	if strings.Contains(strings.Join(r.Details, "\n"), `rig "small"`) {
-		t.Errorf("under-threshold rig should be omitted from details; got %v", r.Details)
-	}
-}
-
-// TestWorktreeDiskSizeCheck_CountExcludesMeasurementErrors pins the
-// fix for a count bug: the message reports "<N> rig(s) over threshold"
-// where N must be the threshold-violation count, NOT
-// `len(details)` (which also includes measurement errors).
-func TestWorktreeDiskSizeCheck_CountExcludesMeasurementErrors(t *testing.T) {
-	dir := t.TempDir()
-	rigOver := filepath.Join(dir, ".gc", "worktrees", "over")
-	rigBroken := filepath.Join(dir, ".gc", "worktrees", "broken")
-	for _, p := range []string{rigOver, rigBroken} {
-		if err := os.MkdirAll(p, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	c := &WorktreeDiskSizeCheck{
-		cfg: config.DoctorConfig{WorktreeRigWarnSize: "5GB", WorktreeRigErrorSize: "100GB"},
-		measureDir: fakeMeasure(map[string]int64{
-			rigOver: 8 * 1024 * 1024 * 1024,
-		}, map[string]error{
-			rigBroken: errors.New("permission denied"),
-		}),
-	}
-	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusWarning {
-		t.Fatalf("status = %d, want Warning", r.Status)
-	}
-	// Exactly one rig is over threshold; the broken one is a
-	// measurement error, not a threshold violation.
-	if !strings.Contains(r.Message, "1 rig(s)") {
-		t.Errorf("message should report 1 rig over threshold (not 2); got %q", r.Message)
-	}
-}
-
-func TestWorktreeDiskSizeCheck_AllMeasurementsFailedReturnsWarning(t *testing.T) {
-	// "We can't tell" must not look like "we're fine". When every rig
-	// fails to measure (e.g. permission denied), the check escalates
-	// to Warning and surfaces the errors — matches DoltNomsSize policy.
-	dir := t.TempDir()
-	rigA := filepath.Join(dir, ".gc", "worktrees", "broken-a")
-	rigB := filepath.Join(dir, ".gc", "worktrees", "broken-b")
-	if err := os.MkdirAll(rigA, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(rigB, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	c := &WorktreeDiskSizeCheck{
-		cfg: config.DoctorConfig{},
-		measureDir: fakeMeasure(nil, map[string]error{
-			rigA: errors.New("permission denied"),
-			rigB: errors.New("io error"),
-		}),
-	}
-	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusWarning {
-		t.Errorf("status = %d, want Warning", r.Status)
-	}
-	if r.FixHint == "" {
-		t.Error("expected fix hint pointing at filesystem permissions")
-	}
-	if len(r.Details) != 2 {
-		t.Errorf("len(Details) = %d, want 2 (one per failed rig)", len(r.Details))
+func TestWorktreeVolumeFreeCheck_ProductionReaderMeasuresRealVolume(t *testing.T) {
+	cityDir, _ := newWorktreeVolumeCity(t)
+	c := NewWorktreeVolumeFreeCheck(config.DoctorConfig{WorktreeVolumeWarnFree: "1KB", WorktreeVolumeErrorFree: "1B"}, fsys.FreeBytes)
+	r := c.Run(&CheckContext{CityPath: cityDir})
+	// A read failure would be a Warning, so OK proves the real reader
+	// answered for this volume.
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK with a 1 KB warn threshold; msg=%s", r.Status, r.Message)
 	}
 }
 

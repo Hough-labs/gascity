@@ -161,8 +161,7 @@ func TestRigWorktreesCheck_FilesAreNotCountedAsWorktrees(t *testing.T) {
 	}
 }
 
-// "We can't tell" must not read as "we're fine" — the same policy
-// WorktreeDiskSizeCheck applies to measurement failure.
+// "We can't tell" must not read as "we're fine".
 func TestRigWorktreesCheck_MeasureFails_WarnsAndKeepsTheCount(t *testing.T) {
 	rigPath := makeWorktreeDirs(t, "tlp-aaa", "tlp-bbb")
 	c := newRigWorktreesCheckWithMeasure(t, rigPath, config.DoctorConfig{}, func(string) (int64, bool, error) {
