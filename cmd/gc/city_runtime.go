@@ -108,8 +108,11 @@ type CityRuntime struct {
 	watchTargets []config.WatchTarget
 	configRev    string
 	configDirty  *atomic.Bool
-	watchMu      sync.Mutex
-	watchCleanup func()
+	// configDebounce is the config watcher's coalesce window; zero selects
+	// defaultConfigDebounce.
+	configDebounce time.Duration
+	watchMu        sync.Mutex
+	watchCleanup   func()
 
 	serviceStateMu          sync.RWMutex
 	cfg                     *config.City
@@ -296,6 +299,9 @@ type CityRuntimeParams struct {
 	WatchTargets []config.WatchTarget
 	ConfigRev    string
 	ConfigDirty  *atomic.Bool
+	// ConfigDebounce overrides the config watcher's coalesce window when
+	// non-zero (used by tests).
+	ConfigDebounce time.Duration
 
 	Cfg                     *config.City
 	SP                      runtime.Provider
@@ -429,6 +435,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		watchTargets:            p.WatchTargets,
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
+		configDebounce:          p.ConfigDebounce,
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
 		publication:             p.Publication,
@@ -2476,7 +2483,7 @@ func (cr *CityRuntime) restartConfigWatcher() {
 		dirty = &atomic.Bool{}
 		cr.configDirty = dirty
 	}
-	cleanup := watchConfigTargets(cr.configWatcherTargets(), dirty, cr.pokeCh, cr.stderr)
+	cleanup := watchConfigTargets(cr.configWatcherTargets(), cr.configDebounce, dirty, cr.pokeCh, cr.stderr)
 
 	cr.watchMu.Lock()
 	cr.watchCleanup = cleanup
