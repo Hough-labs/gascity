@@ -2577,6 +2577,13 @@ func (cr *CityRuntime) newWarmClaimTriggerResolver(servingRigs map[string]beads.
 	}
 }
 
+// warmClaimTriggerProbe is the warm-bind probe over resolve, judging a
+// trigger against this controller's config (isUnclaimedTrigger: a pool
+// template assignee is demand, not a claim).
+func (cr *CityRuntime) warmClaimTriggerProbe(resolve warmClaimTriggerResolver) warmClaimTriggerProbe {
+	return buildWarmClaimTriggerProbe(cr.cfg, resolve, cr.stderr)
+}
+
 // beadReconcileTick runs one bead-driven reconciliation pass. bootReconcile is
 // true only for the synchronous pass on the startup path: that pass must flip
 // readiness quickly, so it skips the undesired-pool-session sweep (a heavy
@@ -2805,7 +2812,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		// warm-bind gap; on tmux it is the fast primary nudge ahead of the
 		// idle-timeout relaunch backstop, deduped by the marker + the
 		// unclaimed-trigger gate.
-		withWarmClaimProbe(buildWarmClaimTriggerProbe(cr.newWarmClaimTriggerResolver(rigStores), cr.stderr)),
+		withWarmClaimProbe(cr.warmClaimTriggerProbe(cr.newWarmClaimTriggerResolver(rigStores))),
 	}
 	if bootReconcile {
 		// #3288: skip the per-session orphan/failed-create session-bead closes on
@@ -2899,7 +2906,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		claimWorkStoreRefs := make([]string, len(claimWork))
 		copy(claimWorkStoreRefs, assignedWorkStoreRefs)
 		copy(claimWorkStoreRefs[len(assignedWorkBeads):], result.ReadyUnassignedRoutedWorkStoreRefs)
-		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, claimWorkStoreRefs, time.Now(), cr.stdout)
+		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, claimWorkStoreRefs, time.Now(), poolClaimDrainOver(cr.residencyTopology(servingRigStores(cr.cfg, rigStores, suspendedRigPaths)), cr.requestExecutionStalledDrain), cr.stdout)
 		nudgeStalledPoolContinuations(
 			cr.sp,
 			cr.cfg,
