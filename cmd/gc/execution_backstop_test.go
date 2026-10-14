@@ -1017,3 +1017,54 @@ func TestExecutionBackstopNewIncarnationInheritsNoSpentWindow(t *testing.T) {
 		t.Fatalf("after the incarnation's own grace with no nudge to send: drains %v, want one escalation", f.drained)
 	}
 }
+
+// TestExecutionBackstopHoldsAPolecatWaitingOnItsOwnGate (gc-led0c) is the
+// fork's production shape of the v5.10x veto. A winnow polecat claims its
+// step, runs its gate as a background task and waits on it at a quiet prompt,
+// its claim nudge configured. Before the backport the backstop spent its three
+// nudges and drained it after about eleven minutes, killing the gate. The
+// step_started that `gc hook --claim` records carries the seat's session bead
+// ID as session_id and its alias, not its bead ID, as actor; that is the event
+// the hold must match. A step_started from another seat, or none at all, is no
+// evidence: the seat is nudged and drained as before.
+func TestExecutionBackstopHoldsAPolecatWaitingOnItsOwnGate(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		sessionID func(f *executionBackstopFixture) string // "" records no step_started
+		wantHeld  bool
+	}{
+		{name: "step started by this seat since its wake", sessionID: func(f *executionBackstopFixture) string { return f.session.ID }, wantHeld: true},
+		{name: "step started by another seat since this wake", sessionID: func(*executionBackstopFixture) string { return "gc-wisp-predecessor" }},
+		{name: "no step started", sessionID: func(*executionBackstopFixture) string { return "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecutionBackstopFixture(t)
+			woke := f.now.Add(-time.Minute)
+			if err := f.store.SetMetadata(f.session.ID, "last_woke_at", woke.Format(time.RFC3339)); err != nil {
+				t.Fatal(err)
+			}
+			if id := tc.sessionID(f); id != "" {
+				f.rec.Record(events.Event{
+					Type: events.ExecutionStepStarted, Ts: woke.Add(10 * time.Second),
+					Actor: "winnow/gastown.nux", SessionID: id, Subject: f.work.ID, RunID: "root-1",
+				})
+			}
+			f.tickStale(t)
+
+			nudges, stalled := f.nudgeCount(), f.stalledEvents()
+			if tc.wantHeld {
+				if len(f.drained) != 0 || nudges != 0 || stalled != 0 {
+					t.Fatalf("a seat executing its step since its wake: drains %v, nudges %d, step_stalled %d; want it held with none", f.drained, nudges, stalled)
+				}
+				if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldExecuting) {
+					t.Fatalf("hold breadcrumb = %q, want %q", got, executionHoldExecuting)
+				}
+				return
+			}
+			if nudges != idleClaimNudgeMaxAttempts || len(f.drained) != 1 || stalled != 1 {
+				t.Fatalf("no evidence from this seat: nudges %d, drains %v, step_stalled %d; want %d nudges, then one drain and one step_stalled",
+					nudges, f.drained, stalled, idleClaimNudgeMaxAttempts)
+			}
+		})
+	}
+}
